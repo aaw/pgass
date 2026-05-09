@@ -39,4 +39,16 @@ TEST_F(ParserTest, LexStringUnterminated) {
   EXPECT_EQ(lexer.next().type, TokenType::kERROR);
 }
 
+TEST_F(ParserTest, LexMultiCharIds) {
+  Lexer lexer("   a hello X Name 0 100 123456  ");
+  EXPECT_THAT(lexer.next(), AllOf(Field(&Token::type, Eq(TokenType::kID)), Field(&Token::val, Eq("a"))));
+  EXPECT_THAT(lexer.next(), AllOf(Field(&Token::type, Eq(TokenType::kID)), Field(&Token::val, Eq("hello"))));
+  EXPECT_THAT(lexer.next(), AllOf(Field(&Token::type, Eq(TokenType::kVARIABLE)), Field(&Token::val, Eq("X"))));
+  EXPECT_THAT(lexer.next(), AllOf(Field(&Token::type, Eq(TokenType::kVARIABLE)), Field(&Token::val, Eq("Name"))));
+  EXPECT_THAT(lexer.next(), AllOf(Field(&Token::type, Eq(TokenType::kNUMBER)), Field(&Token::val, Eq("0"))));
+  EXPECT_THAT(lexer.next(), AllOf(Field(&Token::type, Eq(TokenType::kNUMBER)), Field(&Token::val, Eq("100"))));
+  EXPECT_THAT(lexer.next(), AllOf(Field(&Token::type, Eq(TokenType::kNUMBER)), Field(&Token::val, Eq("123456"))));
+  EXPECT_EQ(lexer.next().type, TokenType::kEOF);
+}
+
 } // namespace
