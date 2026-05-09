@@ -1,11 +1,45 @@
-#include <cctype>
 #include <string_view>
 
+#include "absl/strings/str_cat.h"
+
 enum class TokenType {
-  Id,
-  Var,
-  Eof,
-  Error
+  kAGGREGATE_COUNT,
+  kAGGREGATE_MAX,
+  kAGGREGATE_MIN,
+  kAGGREGATE_SUM,
+  kANONYMOUS_VARIABLE,
+  kAT,
+  kCOLON,
+  kCOMMA,
+  kCONS,
+  kCURLY_CLOSE,
+  kCURLY_OPEN,
+  kDIV,
+  kDOT,
+  kEOF,
+  kEQUAL,
+  kERROR,
+  kGREATER,
+  kGREATER_OR_EQ,
+  kID,
+  kLESS,
+  kLESS_OR_EQ,
+  kMINUS,
+  kNAF,
+  kNUMBER,
+  kOR,
+  kPAREN_CLOSE,
+  kPAREN_OPEN,
+  kPLUS,
+  kQUERY_MARK,
+  kSEMICOLON,
+  kSQUARE_CLOSE,
+  kSQUARE_OPEN,
+  kSTRING,
+  kTIMES,
+  kUNEQUAL,
+  kVARIABLE,
+  kWCONS,
 };
 
 struct Token {
@@ -13,22 +47,128 @@ struct Token {
   std::string_view val;
 };
 
+// TODO: count newlines so we can report line, offset instead of just string offset
+
 class Lexer {
 public:
   explicit Lexer(std::string_view source) : source_(source) {}
 
   Token next() {
-    consume_whitespace();
-    if (pos_ >= source_.size()) return Token{.type=TokenType::Eof};
+    // Skip any whitespace or comments.
+    bool did_work = true;
+    while (did_work) {
+      did_work = false;
+      while (pos_ < source_.size() &&
+	     (source_[pos_] == ' ' || source_[pos_] == '\t' || source_[pos_] == '\n')) {
+	did_work = true;
+	++pos_;
+      }
+      if (pos_ < source_.size() && source_[pos_] == '%') {
+	did_work = true;
+	if (++pos_ >= source_.size()) break;
+	if (source_[pos_] == '*') {
+	  while (pos_ < source_.size()-1 && source_.substr(pos_, 2) != "*%") ++pos_;
+	  if (pos_ >= source_.size()-1) return Token{.type=TokenType::kERROR, .val="Unterminated multi-line comment at end-of-file"};
+	  pos_ += 2;
+	} else {
+	  while (pos_ < source_.size() && source_[pos_] != '\n') ++pos_;
+	  ++pos_;
+	}
+      }
+    }
 
-    return Token{.type=TokenType::Error};
+    if (pos_ >= source_.size()) return Token{.type=TokenType::kEOF};
+
+    // Consume/return any recognized tokens. First handle (possibly) multi-character tokens.
+    if (source_.substr(pos_, 3) == "not") return consume(TokenType::kNAF, 3);
+    if (source_[0] == '#') {
+      if (source_.substr(pos_, 6) == "#count") return consume(TokenType::kAGGREGATE_COUNT, 6);
+      if (source_.substr(pos_, 4) == "#max") return consume(TokenType::kAGGREGATE_MAX, 4);
+      if (source_.substr(pos_, 4) == "#min") return consume(TokenType::kAGGREGATE_MIN, 4);
+      if (source_.substr(pos_, 4) == "#sum") return consume(TokenType::kAGGREGATE_SUM, 4);
+    }
+    if (source_.substr(pos_, 2) == "<>" || source_.substr(pos_, 2) == "!=") {
+      return consume(TokenType::kUNEQUAL, 2);
+    }
+    if (source_.substr(pos_, 2) == "<=") return consume(TokenType::kLESS_OR_EQ, 2);
+    if (source_.substr(pos_, 2) == ">=") return consume(TokenType::kGREATER_OR_EQ, 2);
+    if (source_.substr(pos_, 2) == ":-") return consume(TokenType::kCONS, 2);
+    if (source_.substr(pos_, 2) == ":~") return consume(TokenType::kWCONS, 2);
+    if (source_[pos_] >= 'a' && source_[pos_] <= 'z') {
+      std::size_t end_pos = pos_ + 1;
+      while (end_pos < source_.size() &&
+	     ((source_[end_pos] >= 'a' && source_[end_pos] <= 'z') ||
+	      (source_[end_pos] >= 'A' && source_[end_pos] <= 'Z') ||
+	      (source_[end_pos] >= '0' && source_[end_pos] <= '9') ||
+	      source_[end_pos] == '_')) {
+	++end_pos;
+      }
+      return consume(TokenType::kID, end_pos - pos_);
+    }
+    if (source_[pos_] >= 'A' && source_[pos_] <= 'Z') {
+      std::size_t end_pos = pos_ + 1;
+      while (end_pos < source_.size() &&
+	     ((source_[end_pos] >= 'a' && source_[end_pos] <= 'z') ||
+	      (source_[end_pos] >= 'A' && source_[end_pos] <= 'Z') ||
+	      (source_[end_pos] >= '0' && source_[end_pos] <= '9') ||
+	      source_[end_pos] == '_')) {
+	++end_pos;
+      }
+      return consume(TokenType::kVARIABLE, end_pos - pos_);
+    }
+    if (source_[pos_] == '\"') {
+      std::size_t end_pos = pos_ + 1;
+      while (end_pos < source_.size()) {
+	if (source_[end_pos] == '\"') { ++end_pos; break; }
+	if (source_[end_pos] == '\\') ++end_pos;
+	++end_pos;
+      }
+      if (end_pos >= source_.size()-1) return Token{.type=TokenType::kERROR, .val="Unterminated string at end-of-file"};
+      return consume(TokenType::kSTRING, end_pos - pos_);
+    }
+    if (source_[pos_] >= '1' && source_[pos_] <= '9') {
+      std::size_t end_pos = pos_ + 1;
+      while (end_pos < source_.size() && source_[end_pos] >= '0' && source_[end_pos] <= '9') {
+	++end_pos;
+      }
+      return consume(TokenType::kNUMBER, end_pos - pos_);
+    }
+    if (source_[pos_] == '0') return consume(TokenType::kNUMBER, 1);
+
+    // Now handle all single-char tokens.
+    if (source_[pos_] == '_') return consume(TokenType::kANONYMOUS_VARIABLE, 1);
+    if (source_[pos_] == '.') return consume(TokenType::kDOT, 1);
+    if (source_[pos_] == ',') return consume(TokenType::kCOMMA, 1);
+    if (source_[pos_] == '?') return consume(TokenType::kQUERY_MARK, 1);
+    if (source_[pos_] == ':') return consume(TokenType::kCOLON, 1);
+    if (source_[pos_] == ';') return consume(TokenType::kSEMICOLON, 1);
+    if (source_[pos_] == '|') return consume(TokenType::kOR, 1);
+    if (source_[pos_] == '+') return consume(TokenType::kPLUS, 1);
+    if (source_[pos_] == '-') return consume(TokenType::kMINUS, 1);
+    if (source_[pos_] == '*') return consume(TokenType::kTIMES, 1);
+    if (source_[pos_] == '/') return consume(TokenType::kDIV, 1);
+    if (source_[pos_] == '@') return consume(TokenType::kAT, 1);
+    if (source_[pos_] == '(') return consume(TokenType::kPAREN_OPEN, 1);
+    if (source_[pos_] == ')') return consume(TokenType::kPAREN_CLOSE, 1);
+    if (source_[pos_] == '[') return consume(TokenType::kSQUARE_OPEN, 1);
+    if (source_[pos_] == ']') return consume(TokenType::kSQUARE_CLOSE, 1);
+    if (source_[pos_] == '{') return consume(TokenType::kCURLY_OPEN, 1);
+    if (source_[pos_] == '}') return consume(TokenType::kCURLY_CLOSE, 1);
+    if (source_[pos_] == '=') return consume(TokenType::kEQUAL, 1);
+    if (source_[pos_] == '<') return consume(TokenType::kLESS, 1);
+    if (source_[pos_] == '>') return consume(TokenType::kGREATER, 1);
+
+    return Token{.type=TokenType::kERROR, .val=absl::StrCat("Unrecognized token at ", pos_, ": ", source_.substr(pos_, kErrorContextSize), "...")};
   }
 
 private:
-  void inline consume_whitespace() {
-    while (pos_ < source_.size() && std::isspace(source_[pos_])) ++pos_;
+  inline Token consume(TokenType ttype, size_t len) {
+    Token retval = Token{.type=ttype, .val=source_.substr(pos_, len)};
+    pos_ += len;
+    return retval;
   }
 
   std::size_t pos_ = 0;
   std::string_view source_;
+  static constexpr int kErrorContextSize = 20;
 };
