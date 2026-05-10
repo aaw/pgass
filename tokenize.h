@@ -1,3 +1,6 @@
+#ifndef __TOKENIZE_H__
+#define __TOKENIZE_H__
+
 #include <string_view>
 
 #include "absl/strings/str_cat.h"
@@ -172,3 +175,5 @@ private:
   std::string_view source_;
   static constexpr int kErrorContextSize = 20;
 };
+
+#endif // __TOKENIZE_H__
