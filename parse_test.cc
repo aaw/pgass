@@ -1,5 +1,6 @@
 #include <gtest/gtest.h>
 #include <gmock/gmock.h>
+#include "parse.h"
 #include "tokenize.h"
 #include "absl/status/statusor.h"
 #include "absl/strings/string_view.h"
