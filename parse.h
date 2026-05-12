@@ -10,20 +10,28 @@
 
 struct Statement {};
 
-using Statements = std::vector<std::unique_ptr<Statement>>;
-
-struct Query {};
-
-struct Program {
-  Statements statements;
-  std::unique_ptr<Query> query;
-};
+using Statements = std::unique_ptr<std::vector<std::unique_ptr<Statement>>>;
 
 struct Term {
   virtual ~Term() = default;
 };
 
 using Terms = std::unique_ptr<std::vector<std::unique_ptr<Term>>>;
+
+struct ClassicalLiteral {
+  bool negated;
+  std::string id;
+  Terms args;
+};
+
+struct Query {
+  std::unique_ptr<ClassicalLiteral> lit;
+};
+
+struct Program {
+  Statements statements;
+  std::unique_ptr<Query> query;
+};
 
 struct Predicate : Term {
   std::string name;
@@ -71,34 +79,37 @@ struct TermOperation : Term {
       : op(o), left(std::move(l)), right(std::move(r)) {}
 };
 
-struct ClassicalLiteral {
-  bool negated;
-  std::string id;
-  Terms args;
-};
-
 class Parser {
  public:
   explicit Parser(std::string_view source) : lexer_(source) {}
 
   // <program> ::= [<statements>] [<query>]
   absl::StatusOr<std::unique_ptr<Program>> parse_program() {
-    auto checkpoint = lexer_.checkpoint();
-    ASSIGN_OR_RETURN(Statements statements, parse_statements());
-    if (statements.empty()) lexer_.rewind(checkpoint);
+    auto program = std::make_unique<Program>();
 
-    checkpoint = lexer_.checkpoint();
-    ASSIGN_OR_RETURN(std::unique_ptr<Query> query, parse_query());
-    if (query == nullptr) lexer_.rewind(checkpoint);
+    {
+      LexerCheckpoint try_statements(lexer_);
+      auto statements = parse_statements();
+      if (statements.ok()) {
+        try_statements.commit();
+        program->statements = std::move(*statements);
+      }
+    }
+
+    {
+      LexerCheckpoint try_query(lexer_);
+      auto query = parse_query();
+      if (query.ok()) {
+        try_query.commit();
+        program->query = std::move(*query);
+      }
+    }
 
     if (lexer_.next().type != TokenType::kEOF) {
       return absl::InvalidArgumentError(absl::StrCat(
           "Unexpected content at end of program: ", lexer_.report_pos()));
     }
 
-    auto program = std::make_unique<Program>();
-    program->statements = std::move(statements);
-    program->query = std::move(query);
     return program;
   }
 
@@ -108,10 +119,9 @@ class Parser {
 
   // <query> ::= <classical_literal> QUERY_MARK
   absl::StatusOr<std::unique_ptr<Query>> parse_query() {
-    LexerCheckpoint checkpoint(lexer_);
     auto query = std::make_unique<Query>();
-
-    checkpoint.commit();
+    ASSIGN_OR_RETURN(query->lit, parse_classical_literal());
+    CONSUME_TOKEN_TYPE_OR_RETURN(lexer_, TokenType::kQUERY_MARK);
     return query;
   }
 
@@ -221,12 +231,27 @@ class Parser {
 
   // <terms> ::= [<terms> COMMA] <term>
   absl::StatusOr<Terms> parse_terms() {
-    return std::make_unique<std::vector<std::unique_ptr<Term>>>();
+    Terms terms;
+    ASSIGN_OR_RETURN(auto first_term, parse_single_term());
+    terms->push_back(std::move(first_term));
+
+    while (true) {
+      LexerCheckpoint try_comma(lexer_);
+      Token token = lexer_.next();
+      if (token.type != TokenType::kCOMMA) {
+        return terms;
+      }
+      try_comma.commit();
+
+      ASSIGN_OR_RETURN(auto next_term, parse_single_term());
+      terms->push_back(std::move(next_term));
+    }
+
+    return terms;
   }
 
   // <classical_literal> ::= [MINUS] ID [PAREN_OPEN [<terms>] PAREN_CLOSE]
   absl::StatusOr<std::unique_ptr<ClassicalLiteral>> parse_classical_literal() {
-    LexerCheckpoint checkpoint(lexer_);
     auto lit = std::make_unique<ClassicalLiteral>();
 
     Token token = lexer_.next();
@@ -242,14 +267,23 @@ class Parser {
     }
     lit->id = token.val;
 
-    CONSUME_TOKEN_TYPE_OR_RETURN(lexer_, TokenType::kPAREN_OPEN);
+    LexerCheckpoint try_open_paren(lexer_);
+    token = lexer_.next();
+    if (token.type == TokenType::kPAREN_OPEN) {
+      try_open_paren.commit();
 
-    ASSIGN_OR_RETURN(Terms terms, parse_terms());
-    lit->args = std::move(terms);
+      {
+        LexerCheckpoint try_terms(lexer_);
+        auto terms = parse_terms();
+        if (terms.ok()) {
+          try_terms.commit();
+          lit->args = std::move(*terms);
+        }
+      }
 
-    CONSUME_TOKEN_TYPE_OR_RETURN(lexer_, TokenType::kPAREN_CLOSE);
+      CONSUME_TOKEN_TYPE_OR_RETURN(lexer_, TokenType::kPAREN_CLOSE);
+    }
 
-    checkpoint.commit();
     return lit;
   }
 
