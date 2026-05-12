@@ -8,7 +8,17 @@
 #include "macros.h"
 #include "tokenize.h"
 
-struct Statement {};
+struct Head {};
+
+struct Body {};
+
+struct Weight {};
+
+struct Statement {
+  std::unique_ptr<Head> head;
+  std::unique_ptr<Body> body;
+  std::unique_ptr<Weight> weight;
+};
 
 using Statements = std::unique_ptr<std::vector<std::unique_ptr<Statement>>>;
 
@@ -115,7 +125,81 @@ class Parser {
 
  private:
   // <statements> ::= [<statements>] <statement>
-  absl::StatusOr<Statements> parse_statements() { return Statements(); }
+  absl::StatusOr<Statements> parse_statements() {
+    Statements statements;
+    ASSIGN_OR_RETURN(auto statement, parse_statement());
+    statements->push_back(std::move(statement));
+
+    while (true) {
+      LexerCheckpoint try_next_statement(lexer_);
+      auto next_statement = parse_statement();
+      if (next_statement.ok()) {
+        try_next_statement.commit();
+        statements->push_back(std::move(*next_statement));
+      }
+    }
+
+    return statements;
+  }
+
+  /* <statement> ::= CONS [<body>] DOT
+                   | <head> [CONS [<body>]] DOT
+                   | WCONS [<body>] DOT SQUARE_OPEN <weight_at_level>
+     SQUARE_CLOSE
+  */
+  absl::StatusOr<std::unique_ptr<Statement>> parse_statement() {
+    auto statement = std::make_unique<Statement>();
+
+    {
+      LexerCheckpoint try_no_head(lexer_);
+      Token tok = lexer_.next();
+      if (tok.type == TokenType::kCONS || tok.type == TokenType::kWCONS) {
+        try_no_head.commit();
+
+        {
+          LexerCheckpoint try_body(lexer_);
+          auto body = parse_body();
+          if (body.ok()) {
+            try_body.commit();
+            statement->body = std::move(*body);
+          }
+        }
+
+        CONSUME_TOKEN_TYPE_OR_RETURN(lexer_, TokenType::kDOT);
+        if (tok.type == TokenType::kCONS) return statement;
+
+        CONSUME_TOKEN_TYPE_OR_RETURN(lexer_, TokenType::kSQUARE_OPEN);
+        ASSIGN_OR_RETURN(statement->weight, parse_weight());
+        CONSUME_TOKEN_TYPE_OR_RETURN(lexer_, TokenType::kSQUARE_CLOSE);
+        return statement;
+      }
+    }
+
+    // Otherwise, we start with a <head>.
+    ASSIGN_OR_RETURN(statement->head, parse_head());
+    // TODO [CONS [<body>]]
+    CONSUME_TOKEN_TYPE_OR_RETURN(lexer_, TokenType::kDOT);
+
+    return statement;
+  }
+
+  // <body> ::= [<body> COMMA] (<naf_literal> | [NAF] <aggregate>)
+  absl::StatusOr<std::unique_ptr<Body>> parse_body() {
+    // TODO
+    return std::make_unique<Body>();
+  }
+
+  // <head> ::= <disjunction> | <choice>
+  absl::StatusOr<std::unique_ptr<Head>> parse_head() {
+    // TODO
+    return std::make_unique<Head>();
+  }
+
+  // <weight_at_level> ::= <term> [AT <term>] [COMMA <terms>]
+  absl::StatusOr<std::unique_ptr<Weight>> parse_weight() {
+    // TODO
+    return std::make_unique<Weight>();
+  }
 
   // <query> ::= <classical_literal> QUERY_MARK
   absl::StatusOr<std::unique_ptr<Query>> parse_query() {
