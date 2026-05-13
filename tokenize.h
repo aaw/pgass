@@ -201,10 +201,7 @@ class Lexer {
     if (source_[pos_] == '<') return consume(TokenType::kLESS, 1);
     if (source_[pos_] == '>') return consume(TokenType::kGREATER, 1);
 
-    return Token{
-        .type = TokenType::kERROR,
-        .val = absl::StrCat("Unrecognized token at ", pos_, ": ",
-                            source_.substr(pos_, kErrorContextSize), "...")};
+    return Token{.type = TokenType::kERROR};
   }
 
  private:
@@ -213,9 +210,6 @@ class Lexer {
     pos_ += len;
     return retval;
   }
-
-  // Number of bytes of error context when we bail during tokenization.
-  static constexpr int kErrorContextSize = 20;
 
   std::size_t pos_ = 0;
   std::string_view source_;
