@@ -54,10 +54,6 @@ class Lexer {
  public:
   explicit Lexer(std::string_view source) : source_(source) {}
 
-  std::size_t checkpoint() { return pos_; }
-
-  void rewind(std::size_t checkpoint_id) { pos_ = checkpoint_id; }
-
   std::string report_pos() {
     int line = 1;
     size_t last_newline_pos = 0;
@@ -205,6 +201,11 @@ class Lexer {
   }
 
  private:
+  friend class LexerCheckpoint;
+
+  std::size_t checkpoint() { return pos_; }
+  void rewind(std::size_t checkpoint_id) { pos_ = checkpoint_id; }
+
   inline bool is_id_char(size_t p) {
     if (p >= source_.size()) return false;
     char c = source_[p];

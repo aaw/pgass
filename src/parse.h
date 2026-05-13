@@ -13,7 +13,6 @@
 #include "macros.h"
 #include "tokenize.h"
 
-// Forward declarations for recursive structures if needed.
 struct Head {
   virtual ~Head() = default;
 };
