@@ -92,7 +92,7 @@ struct Aggregate : BodyItem {
   std::unique_ptr<Term> lb_term;
   BinopType lb_op;  // only valid if lb_term != nullptr;
   std::unique_ptr<Term> ub_term;
-  BinopType ub_op;  // only valid if up_term != nullptr;
+  BinopType ub_op;  // only valid if ub_term != nullptr;
   AggregateFunctionType function;
   AggregateElements elements;
 };
