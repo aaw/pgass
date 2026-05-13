@@ -228,6 +228,9 @@ class LexerCheckpoint {
   LexerCheckpoint(Lexer& lexer)
       : lexer_(lexer), checkpoint_(lexer.checkpoint()) {}
 
+  LexerCheckpoint(const LexerCheckpoint&) = delete;
+  LexerCheckpoint& operator=(const LexerCheckpoint&) = delete;
+
   ~LexerCheckpoint() {
     if (checkpoint_ == std::numeric_limits<std::size_t>::max()) return;
     lexer_.rewind(checkpoint_);
