@@ -2,19 +2,28 @@
 #define __PARSE_H__
 
 #include <cstdint>
+#include <memory>
+#include <string>
+#include <vector>
 
 #include "absl/status/status.h"
 #include "absl/status/statusor.h"
+#include "absl/strings/numbers.h"
+#include "absl/strings/str_cat.h"
 #include "macros.h"
 #include "tokenize.h"
 
-struct Head {};
+struct Head {
+  virtual ~Head() = default;
+};
 
 // The grammar defines Body recursively (<body> ::= [<body> COMMA] ...). We
 // introduce a BodyContainer/BodyItem so that the parsed Body contains a vector
 // of BodyContainers instead.
 
-struct BodyItem {};
+struct BodyItem {
+  virtual ~BodyItem() = default;
+};
 
 struct BodyContainer {
   bool naf;
@@ -25,7 +34,20 @@ struct Body {
   std::unique_ptr<std::vector<std::unique_ptr<BodyContainer>>> items;
 };
 
-struct Weight {};
+struct Term {
+  virtual ~Term() = default;
+};
+
+using Terms = std::unique_ptr<std::vector<std::unique_ptr<Term>>>;
+
+struct Weight {
+  std::unique_ptr<Term> weight;
+  std::unique_ptr<Term> level;
+  Terms terms;
+
+  Weight(std::unique_ptr<Term> w, std::unique_ptr<Term> l, Terms t)
+      : weight(std::move(w)), level(std::move(l)), terms(std::move(t)) {}
+};
 
 struct Statement {
   std::unique_ptr<Head> head;
@@ -34,12 +56,6 @@ struct Statement {
 };
 
 using Statements = std::unique_ptr<std::vector<std::unique_ptr<Statement>>>;
-
-struct Term {
-  virtual ~Term() = default;
-};
-
-using Terms = std::unique_ptr<std::vector<std::unique_ptr<Term>>>;
 
 enum class BinopType {
   kEQUAL,
@@ -118,13 +134,13 @@ struct Number : Term {
 struct String : Term {
   std::string value;
 
-  String(std::string_view value) : value(value) {}
+  String(std::string_view value) : value(std::string(value)) {}
 };
 
 struct Variable : Term {
   std::string name;
 
-  Variable(std::string_view name) : name(name) {}
+  Variable(std::string_view name) : name(std::string(name)) {}
 };
 
 struct AnonymousVariable : Term {};
@@ -181,10 +197,9 @@ class Parser {
     return program;
   }
 
- private:
   // <statements> ::= [<statements>] <statement>
   absl::StatusOr<Statements> parse_statements() {
-    Statements statements;
+    auto statements = std::make_unique<std::vector<std::unique_ptr<Statement>>>();
     ASSIGN_OR_RETURN(auto statement, parse_statement());
     statements->push_back(std::move(statement));
 
@@ -194,6 +209,8 @@ class Parser {
       if (next_statement.ok()) {
         try_next_statement.commit();
         statements->push_back(std::move(*next_statement));
+      } else {
+        break;
       }
     }
 
@@ -268,7 +285,7 @@ class Parser {
                                 <aggregate_element>
   */
   absl::StatusOr<AggregateElements> parse_aggregate_elements() {
-    AggregateElements elements;
+    auto elements = std::make_unique<std::vector<std::unique_ptr<AggregateElement>>>();
     ASSIGN_OR_RETURN(auto element, parse_aggregate_element());
     elements->push_back(std::move(element));
 
@@ -282,6 +299,8 @@ class Parser {
       if (next_element.ok()) {
         try_next_element.commit();
         elements->push_back(std::move(*next_element));
+      } else {
+        break;
       }
     }
 
@@ -355,7 +374,7 @@ class Parser {
       }
     }
 
-    return std::make_unique<Aggregate>();
+    return aggregate;
   }
 
   // <body> ::= [<body> COMMA] (<naf_literal> | [NAF] <aggregate>)
@@ -412,8 +431,28 @@ class Parser {
 
   // <weight_at_level> ::= <term> [AT <term>] [COMMA <terms>]
   absl::StatusOr<std::unique_ptr<Weight>> parse_weight() {
-    // TODO
-    return std::make_unique<Weight>();
+    ASSIGN_OR_RETURN(auto weight_term, parse_term());
+
+    std::unique_ptr<Term> level;
+    {
+      LexerCheckpoint try_at(lexer_);
+      if (lexer_.next().type == TokenType::kAT) {
+        try_at.commit();
+        ASSIGN_OR_RETURN(level, parse_term());
+      }
+    }
+
+    Terms terms;
+    {
+      LexerCheckpoint try_comma(lexer_);
+      if (lexer_.next().type == TokenType::kCOMMA) {
+        try_comma.commit();
+        ASSIGN_OR_RETURN(terms, parse_terms());
+      }
+    }
+
+    return std::make_unique<Weight>(std::move(weight_term), std::move(level),
+                                     std::move(terms));
   }
 
   // <naf_literal> ::= [NAF] <classical_literal> | <builtin_atom>
@@ -587,7 +626,7 @@ class Parser {
     } else if (token.type == TokenType::kANONYMOUS_VARIABLE) {
       return std::make_unique<AnonymousVariable>();
     } else if (token.type == TokenType::kPAREN_OPEN) {
-      ASSIGN_OR_RETURN(auto term, parse_single_term());
+      ASSIGN_OR_RETURN(auto term, parse_term());
       CONSUME_TOKEN_TYPE_OR_RETURN(lexer_, TokenType::kPAREN_CLOSE);
       return term;
     } else if (token.type == TokenType::kMINUS) {
@@ -602,7 +641,7 @@ class Parser {
 
   // <terms> ::= [<terms> COMMA] <term>
   absl::StatusOr<Terms> parse_terms() {
-    Terms terms;
+    auto terms = std::make_unique<std::vector<std::unique_ptr<Term>>>();
     ASSIGN_OR_RETURN(auto first_term, parse_single_term());
     terms->push_back(std::move(first_term));
 

@@ -107,7 +107,7 @@ class Lexer {
     // Consume/return any recognized tokens. First handle (possibly)
     // multi-character tokens.
     if (source_.substr(pos_, 3) == "not") return consume(TokenType::kNAF, 3);
-    if (source_[0] == '#') {
+    if (source_[pos_] == '#') {
       if (source_.substr(pos_, 6) == "#count")
         return consume(TokenType::kAGGREGATE_COUNT, 6);
       if (source_.substr(pos_, 4) == "#max")
@@ -150,15 +150,20 @@ class Lexer {
     }
     if (source_[pos_] == '\"') {
       std::size_t end_pos = pos_ + 1;
+      bool found_quote = false;
       while (end_pos < source_.size()) {
         if (source_[end_pos] == '\"') {
           ++end_pos;
+          found_quote = true;
           break;
         }
-        if (source_[end_pos] == '\\') ++end_pos;
+        if (source_[end_pos] == '\\') {
+          ++end_pos;
+          if (end_pos >= source_.size()) break;
+        }
         ++end_pos;
       }
-      if (end_pos >= source_.size() - 1)
+      if (!found_quote)
         return Token{.type = TokenType::kERROR,
                      .val = "Unterminated string at end-of-file"};
       return consume(TokenType::kSTRING, end_pos - pos_);
