@@ -714,8 +714,23 @@ class Parser {
 
   // <naf_literal> ::= [NAF] <classical_literal> | <builtin_atom>
   absl::StatusOr<std::unique_ptr<NafLiteral>> parse_naf_literal() {
-    auto literal = std::make_unique<NafLiteral>();
+    // Try builtin_atom before classical_literal: both can start with
+    // "ID [PAREN_OPEN <terms> PAREN_CLOSE]", and builtin_atom is the longer
+    // production. NAF must not be consumed first — it is only valid before
+    // classical_literal, not builtin_atom.
+    {
+      LexerCheckpoint try_builtin_atom(lexer_);
+      auto builtin_atom = parse_builtin_atom();
+      if (builtin_atom.ok()) {
+        try_builtin_atom.commit();
+        auto literal = std::make_unique<NafLiteral>();
+        literal->naf = false;
+        literal->literal = std::move(*builtin_atom);
+        return literal;
+      }
+    }
 
+    auto literal = std::make_unique<NafLiteral>();
     {
       LexerCheckpoint try_naf(lexer_);
       if (lexer_.next().type == TokenType::kNAF) {
@@ -723,24 +738,7 @@ class Parser {
         literal->naf = true;
       }
     }
-
-    // classical_literal can produce "ID PAREN_OPEN <terms> PAREN_CLOSE"
-    // and builtin_atom can also produce that, but as a prefix of a binop.
-    // So we need to attempt to parse builtin_atom (the longer of the two
-    // productions) first.
-
-    {
-      LexerCheckpoint try_builtin_atom(lexer_);
-      auto builtin_atom = parse_builtin_atom();
-      if (builtin_atom.ok()) {
-        try_builtin_atom.commit();
-        literal->literal = std::move(*builtin_atom);
-        return literal;
-      }
-    }
-
     ASSIGN_OR_RETURN(literal->literal, parse_classical_literal());
-
     return literal;
   }
 
