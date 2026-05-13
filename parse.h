@@ -10,7 +10,20 @@
 
 struct Head {};
 
-struct Body {};
+// The grammar defines Body recursively (<body> ::= [<body> COMMA] ...). We
+// introduce a BodyContainer/BodyItem so that the parsed Body contains a vector
+// of BodyContainers instead.
+
+struct BodyItem {};
+
+struct BodyContainer {
+  bool naf;
+  std::unique_ptr<BodyItem> item;
+};
+
+struct Body {
+  std::unique_ptr<std::vector<std::unique_ptr<BodyContainer>>> items;
+};
 
 struct Weight {};
 
@@ -28,7 +41,52 @@ struct Term {
 
 using Terms = std::unique_ptr<std::vector<std::unique_ptr<Term>>>;
 
-struct ClassicalLiteral {
+enum class BinopType {
+  kEQUAL,
+  kUNEQUAL,
+  kLESS,
+  kGREATER,
+  kLESS_OR_EQ,
+  kGREATER_OR_EQ
+};
+
+struct Literal {
+  virtual ~Literal() = default;
+};
+
+enum class AggregateFunctionType {
+  kAGGREGATE_COUNT,
+  kAGGREGATE_MAX,
+  kAGGREGATE_MIN,
+  kAGGREGATE_SUM
+};
+
+struct AggregateElement {};
+
+using AggregateElements =
+    std::unique_ptr<std::vector<std::unique_ptr<AggregateElement>>>;
+
+struct NafLiteral : BodyItem {
+  bool naf;
+  std::unique_ptr<Literal> literal;
+};
+
+struct Aggregate : BodyItem {
+  std::unique_ptr<Term> lb_term;
+  BinopType lb_op;  // only valid if lb_term != nullptr;
+  std::unique_ptr<Term> ub_term;
+  BinopType ub_op;  // only valid if up_term != nullptr;
+  AggregateFunctionType function;
+  AggregateElements elements;
+};
+
+struct BuiltinAtom : Literal {
+  std::unique_ptr<Term> left;
+  std::unique_ptr<Term> right;
+  BinopType op;
+};
+
+struct ClassicalLiteral : Literal {
   bool negated;
   std::string id;
   Terms args;
@@ -150,6 +208,7 @@ class Parser {
   absl::StatusOr<std::unique_ptr<Statement>> parse_statement() {
     auto statement = std::make_unique<Statement>();
 
+    // First, try to parse the head-less productions that start with CONS/WCONS.
     {
       LexerCheckpoint try_no_head(lexer_);
       Token tok = lexer_.next();
@@ -175,18 +234,174 @@ class Parser {
       }
     }
 
-    // Otherwise, we start with a <head>.
+    // Otherwise, we need to parse <head> [CONS [<body>]] DOT
     ASSIGN_OR_RETURN(statement->head, parse_head());
-    // TODO [CONS [<body>]]
+
+    {
+      LexerCheckpoint try_cons(lexer_);
+      Token tok = lexer_.next();
+      if (tok.type == TokenType::kCONS) {
+        try_cons.commit();
+        {
+          LexerCheckpoint try_body(lexer_);
+          auto body = parse_body();
+          if (body.ok()) {
+            try_body.commit();
+            statement->body = std::move(*body);
+          }
+        }
+      }
+    }
+
     CONSUME_TOKEN_TYPE_OR_RETURN(lexer_, TokenType::kDOT);
 
     return statement;
   }
 
+  // <aggregate_element> ::= [<basic_terms>] [COLON [<naf_literals>]]
+  absl::StatusOr<std::unique_ptr<AggregateElement>> parse_aggregate_element() {
+    // TODO
+    return std::make_unique<AggregateElement>();
+  }
+
+  /* <aggregate_elements> ::= [<aggregate_elements> SEMICOLON]
+                                <aggregate_element>
+  */
+  absl::StatusOr<AggregateElements> parse_aggregate_elements() {
+    AggregateElements elements;
+    ASSIGN_OR_RETURN(auto element, parse_aggregate_element());
+    elements->push_back(std::move(element));
+
+    while (true) {
+      LexerCheckpoint try_next_element(lexer_);
+      Token token = lexer_.next();
+      if (token.type != TokenType::kSEMICOLON) {
+        break;
+      }
+      auto next_element = parse_aggregate_element();
+      if (next_element.ok()) {
+        try_next_element.commit();
+        elements->push_back(std::move(*next_element));
+      }
+    }
+
+    return elements;
+  }
+
+  /* <aggregate_function> ::= AGGREGATE_COUNT
+                            | AGGREGATE_MAX
+                            | AGGREGATE_MIN
+                            | AGGREGATE_SUM
+  */
+  absl::StatusOr<AggregateFunctionType> parse_aggregate_function() {
+    Token token = lexer_.next();
+    if (token.type == TokenType::kAGGREGATE_COUNT) {
+      return AggregateFunctionType::kAGGREGATE_COUNT;
+    } else if (token.type == TokenType::kAGGREGATE_MAX) {
+      return AggregateFunctionType::kAGGREGATE_MAX;
+    } else if (token.type == TokenType::kAGGREGATE_MIN) {
+      return AggregateFunctionType::kAGGREGATE_MIN;
+    } else if (token.type == TokenType::kAGGREGATE_SUM) {
+      return AggregateFunctionType::kAGGREGATE_SUM;
+    } else {
+      return absl::InvalidArgumentError(absl::StrCat(
+          "Expected aggregate function (#count, #max, #min, #sum), got '",
+          token.val, "' at ", lexer_.report_pos()));
+    }
+  }
+
+  /* <aggregate> ::= [<term> <binop>] <aggregate_function>
+                       CURLY_OPEN [<aggregate_elements>]
+                       CURLY_CLOSE [<binop> <term>]
+  */
+  absl::StatusOr<std::unique_ptr<Aggregate>> parse_aggregate() {
+    auto aggregate = std::make_unique<Aggregate>();
+
+    {
+      // Parse the lower bound, if one exists.
+      LexerCheckpoint try_term_and_binop(lexer_);
+      auto term = parse_term();
+      auto binop = parse_binop();
+      if (term.ok() && binop.ok()) {
+        aggregate->lb_term = std::move(*term);
+        aggregate->lb_op = std::move(*binop);
+        try_term_and_binop.commit();
+      }
+    }
+
+    ASSIGN_OR_RETURN(aggregate->function, parse_aggregate_function());
+    CONSUME_TOKEN_TYPE_OR_RETURN(lexer_, TokenType::kCURLY_OPEN);
+
+    {
+      LexerCheckpoint try_aggregate_elements(lexer_);
+      auto aggregate_elements = parse_aggregate_elements();
+      if (aggregate_elements.ok()) {
+        aggregate->elements = std::move(*aggregate_elements);
+        try_aggregate_elements.commit();
+      }
+    }
+
+    CONSUME_TOKEN_TYPE_OR_RETURN(lexer_, TokenType::kCURLY_CLOSE);
+
+    {
+      // Parse the upper bound, if one exists.
+      LexerCheckpoint try_term_and_binop(lexer_);
+      auto binop = parse_binop();
+      auto term = parse_term();
+      if (term.ok() && binop.ok()) {
+        aggregate->ub_term = std::move(*term);
+        aggregate->ub_op = std::move(*binop);
+        try_term_and_binop.commit();
+      }
+    }
+
+    return std::make_unique<Aggregate>();
+  }
+
   // <body> ::= [<body> COMMA] (<naf_literal> | [NAF] <aggregate>)
   absl::StatusOr<std::unique_ptr<Body>> parse_body() {
-    // TODO
-    return std::make_unique<Body>();
+    auto body = std::make_unique<Body>();
+    body->items =
+        std::make_unique<std::vector<std::unique_ptr<BodyContainer>>>();
+
+    while (true) {
+      bool found_naf_literal = false;
+      {
+        LexerCheckpoint try_naf_literal(lexer_);
+        auto naf_literal = parse_naf_literal();
+        if (naf_literal.ok()) {
+          try_naf_literal.commit();
+          found_naf_literal = true;
+          body->items->push_back(std::make_unique<BodyContainer>(
+              BodyContainer{.naf = false, .item = std::move(*naf_literal)}));
+        }
+      }
+
+      // Otherwise, it's a [NAF] <aggregate>.
+      if (!found_naf_literal) {
+        bool naf = false;
+        {
+          LexerCheckpoint try_naf(lexer_);
+          Token token = lexer_.next();
+          if (token.type == TokenType::kNAF) {
+            try_naf.commit();
+            naf = true;
+          }
+        }
+        ASSIGN_OR_RETURN(auto aggregate, parse_aggregate());
+        body->items->push_back(std::make_unique<BodyContainer>(
+            BodyContainer{.naf = naf, .item = std::move(aggregate)}));
+      }
+
+      LexerCheckpoint try_comma(lexer_);
+      Token token = lexer_.next();
+      if (token.type != TokenType::kCOMMA) {
+        return body;
+      }
+      try_comma.commit();
+    }
+
+    return body;
   }
 
   // <head> ::= <disjunction> | <choice>
@@ -199,6 +414,75 @@ class Parser {
   absl::StatusOr<std::unique_ptr<Weight>> parse_weight() {
     // TODO
     return std::make_unique<Weight>();
+  }
+
+  // <naf_literal> ::= [NAF] <classical_literal> | <builtin_atom>
+  absl::StatusOr<std::unique_ptr<NafLiteral>> parse_naf_literal() {
+    auto literal = std::make_unique<NafLiteral>();
+
+    {
+      LexerCheckpoint try_naf(lexer_);
+      if (lexer_.next().type == TokenType::kNAF) {
+        try_naf.commit();
+        literal->naf = true;
+      }
+    }
+
+    // classical_literal can produce "ID PAREN_OPEN <terms> PAREN_CLOSE"
+    // and builtin_atom can also produce that, but as a prefix of a binop.
+    // So we need to attempt to parse builtin_atom (the longer of the two
+    // productions) first.
+
+    {
+      LexerCheckpoint try_builtin_atom(lexer_);
+      auto builtin_atom = parse_builtin_atom();
+      if (builtin_atom.ok()) {
+        try_builtin_atom.commit();
+        literal->literal = std::move(*builtin_atom);
+        return literal;
+      }
+    }
+
+    ASSIGN_OR_RETURN(literal->literal, parse_classical_literal());
+
+    return literal;
+  }
+
+  /* <binop> ::= EQUAL
+               | UNEQUAL
+               | LESS
+               | GREATER
+               | LESS_OR_EQ
+               | GREATER_OR_EQ
+  */
+  absl::StatusOr<BinopType> parse_binop() {
+    Token token = lexer_.next();
+    if (token.type == TokenType::kEQUAL) {
+      return BinopType::kEQUAL;
+    } else if (token.type == TokenType::kUNEQUAL) {
+      return BinopType::kUNEQUAL;
+    } else if (token.type == TokenType::kLESS) {
+      return BinopType::kLESS;
+    } else if (token.type == TokenType::kGREATER) {
+      return BinopType::kGREATER;
+    } else if (token.type == TokenType::kLESS_OR_EQ) {
+      return BinopType::kLESS_OR_EQ;
+    } else if (token.type == TokenType::kGREATER_OR_EQ) {
+      return BinopType::kGREATER_OR_EQ;
+    } else {
+      return absl::InvalidArgumentError(
+          absl::StrCat("Expected operator (=, <>, !=, <, >, <=, >=), got '",
+                       token.val, "' at ", lexer_.report_pos()));
+    }
+  }
+
+  // <builtin_atom> ::= <term> <binop> <term>
+  absl::StatusOr<std::unique_ptr<BuiltinAtom>> parse_builtin_atom() {
+    auto atom = std::make_unique<BuiltinAtom>();
+    ASSIGN_OR_RETURN(atom->left, parse_term());
+    ASSIGN_OR_RETURN(atom->op, parse_binop());
+    ASSIGN_OR_RETURN(atom->right, parse_term());
+    return atom;
   }
 
   // <query> ::= <classical_literal> QUERY_MARK
@@ -224,6 +508,9 @@ class Parser {
     // productions only when we stop seeing a connecting +,-,*, or /.
     LexerCheckpoint checkpoint(lexer_);
 
+    // TODO: either by reworking this or by a separate pass over the AST,
+    //       make these arithmetic operations left-associative (they're
+    //       right-associative with this parsing logic, which is incorrect).
     ASSIGN_OR_RETURN(auto lhs, parse_single_term());
 
     LexerCheckpoint try_arith_op(lexer_);
