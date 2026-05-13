@@ -89,6 +89,24 @@ TEST_F(ParserTest, ParseTerms) {
   EXPECT_EQ(dynamic_cast<String*>(terms->at(2).get())->value, "\"hello\"");
 }
 
+TEST_F(ParserTest, ParseTermArithmeticLeftAssociative) {
+  // 1-2-3 must parse as (1-2)-3, not 1-(2-3).
+  Parser parser("1-2-3");
+  auto term_status = parser.parse_term();
+  ASSERT_TRUE(term_status.ok()) << term_status.status();
+  auto* outer = dynamic_cast<TermOperation*>(term_status->get());
+  ASSERT_NE(outer, nullptr);
+  EXPECT_EQ(outer->op, OperationType::kMINUS);
+  // left child must itself be (1-2)
+  auto* inner = dynamic_cast<TermOperation*>(outer->left.get());
+  ASSERT_NE(inner, nullptr) << "expected left-associative grouping (1-2)-3";
+  EXPECT_EQ(inner->op, OperationType::kMINUS);
+  EXPECT_EQ(dynamic_cast<Number*>(inner->left.get())->value, 1);
+  EXPECT_EQ(dynamic_cast<Number*>(inner->right.get())->value, 2);
+  // right child is 3
+  EXPECT_EQ(dynamic_cast<Number*>(outer->right.get())->value, 3);
+}
+
 TEST_F(ParserTest, ParseTermsWithArithmetic) {
   // parse_terms() must use parse_term() so arithmetic expressions are accepted.
   Parser parser("1+2, X*3");

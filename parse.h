@@ -797,42 +797,28 @@ class Parser {
               | <term> <arithop> <term>
   */
   absl::StatusOr<std::unique_ptr<Term>> parse_term() {
-    // We handle the left-recursive "<term> <arithop> <term>" production
-    // iteratively here, falling back to the simpler single term
-    // productions only when we stop seeing a connecting +,-,*, or /.
-    LexerCheckpoint checkpoint(lexer_);
-
-    // TODO: either by reworking this or by a separate pass over the AST,
-    //       make these arithmetic operations left-associative (they're
-    //       right-associative with this parsing logic, which is incorrect).
     ASSIGN_OR_RETURN(auto lhs, parse_single_term());
 
-    LexerCheckpoint try_arith_op(lexer_);
-    Token token = lexer_.next();
-    OperationType op;
-    bool found_op = true;
-    if (token.type == TokenType::kPLUS) {
-      op = OperationType::kPLUS;
-    } else if (token.type == TokenType::kMINUS) {
-      op = OperationType::kMINUS;
-    } else if (token.type == TokenType::kTIMES) {
-      op = OperationType::kTIMES;
-    } else if (token.type == TokenType::kDIV) {
-      op = OperationType::kDIV;
-    } else {
-      found_op = false;
+    while (true) {
+      LexerCheckpoint try_arith_op(lexer_);
+      Token token = lexer_.next();
+      OperationType op;
+      if (token.type == TokenType::kPLUS) {
+        op = OperationType::kPLUS;
+      } else if (token.type == TokenType::kMINUS) {
+        op = OperationType::kMINUS;
+      } else if (token.type == TokenType::kTIMES) {
+        op = OperationType::kTIMES;
+      } else if (token.type == TokenType::kDIV) {
+        op = OperationType::kDIV;
+      } else {
+        return lhs;
+      }
+      try_arith_op.commit();
+
+      ASSIGN_OR_RETURN(auto rhs, parse_single_term());
+      lhs = std::make_unique<TermOperation>(op, std::move(lhs), std::move(rhs));
     }
-
-    if (!found_op) {
-      checkpoint.commit();
-      return lhs;  // Not a term operation, just a term.
-    }
-    try_arith_op.commit();
-
-    ASSIGN_OR_RETURN(auto rhs, parse_term());
-
-    checkpoint.commit();
-    return std::make_unique<TermOperation>(op, std::move(lhs), std::move(rhs));
   }
 
   /* <term> ::= ID [PAREN_OPEN [<terms>] PAREN_CLOSE]
