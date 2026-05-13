@@ -28,13 +28,8 @@ struct BodyItem {
   virtual ~BodyItem() = default;
 };
 
-struct BodyContainer {
-  bool naf;
-  std::unique_ptr<BodyItem> item;
-};
-
 struct Body {
-  std::unique_ptr<std::vector<std::unique_ptr<BodyContainer>>> items;
+  std::unique_ptr<std::vector<std::unique_ptr<BodyItem>>> items;
 };
 
 struct Weight {
@@ -93,6 +88,7 @@ using AggregateElements =
     std::unique_ptr<std::vector<std::unique_ptr<AggregateElement>>>;
 
 struct Aggregate : BodyItem {
+  bool naf;
   std::unique_ptr<Term> lb_term;
   BinopType lb_op;  // only valid if lb_term != nullptr;
   std::unique_ptr<Term> ub_term;
@@ -514,7 +510,7 @@ class Parser {
   absl::StatusOr<std::unique_ptr<Body>> parse_body() {
     auto body = std::make_unique<Body>();
     body->items =
-        std::make_unique<std::vector<std::unique_ptr<BodyContainer>>>();
+        std::make_unique<std::vector<std::unique_ptr<BodyItem>>>();
 
     while (true) {
       bool found_naf_literal = false;
@@ -524,8 +520,7 @@ class Parser {
         if (naf_literal.ok()) {
           try_naf_literal.commit();
           found_naf_literal = true;
-          body->items->push_back(std::make_unique<BodyContainer>(
-              BodyContainer{.naf = false, .item = std::move(*naf_literal)}));
+          body->items->push_back(std::move(*naf_literal));
         }
       }
 
@@ -541,8 +536,8 @@ class Parser {
           }
         }
         ASSIGN_OR_RETURN(auto aggregate, parse_aggregate());
-        body->items->push_back(std::make_unique<BodyContainer>(
-            BodyContainer{.naf = naf, .item = std::move(aggregate)}));
+        aggregate->naf = naf;
+        body->items->push_back(std::move(aggregate));
       }
 
       LexerCheckpoint try_comma(lexer_);

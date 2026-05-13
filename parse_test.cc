@@ -217,4 +217,40 @@ TEST_F(ParserTest, ParseHeadChoice) {
   }
 }
 
+TEST_F(ParserTest, ParseBodyNafLiteral) {
+  Parser parser(":- not p, q.");
+  auto stmt_status = parser.parse_statement();
+  ASSERT_TRUE(stmt_status.ok()) << stmt_status.status();
+  auto& body = (*stmt_status)->body;
+  ASSERT_NE(body, nullptr);
+  ASSERT_EQ(body->items->size(), 2);
+
+  auto* naf_lit0 = dynamic_cast<NafLiteral*>(body->items->at(0).get());
+  ASSERT_NE(naf_lit0, nullptr);
+  EXPECT_TRUE(naf_lit0->naf);
+  EXPECT_EQ(dynamic_cast<ClassicalLiteral*>(naf_lit0->literal.get())->id, "p");
+
+  auto* naf_lit1 = dynamic_cast<NafLiteral*>(body->items->at(1).get());
+  ASSERT_NE(naf_lit1, nullptr);
+  EXPECT_FALSE(naf_lit1->naf);
+  EXPECT_EQ(dynamic_cast<ClassicalLiteral*>(naf_lit1->literal.get())->id, "q");
+}
+
+TEST_F(ParserTest, ParseBodyNafAggregate) {
+  Parser parser(":- not #count{} = 0, #sum{} > 1.");
+  auto stmt_status = parser.parse_statement();
+  ASSERT_TRUE(stmt_status.ok()) << stmt_status.status();
+  auto& body = (*stmt_status)->body;
+  ASSERT_NE(body, nullptr);
+  ASSERT_EQ(body->items->size(), 2);
+
+  auto* agg0 = dynamic_cast<Aggregate*>(body->items->at(0).get());
+  ASSERT_NE(agg0, nullptr);
+  EXPECT_TRUE(agg0->naf);
+
+  auto* agg1 = dynamic_cast<Aggregate*>(body->items->at(1).get());
+  ASSERT_NE(agg1, nullptr);
+  EXPECT_FALSE(agg1->naf);
+}
+
 } // namespace
