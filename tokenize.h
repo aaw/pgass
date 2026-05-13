@@ -106,15 +106,16 @@ class Lexer {
 
     // Consume/return any recognized tokens. First handle (possibly)
     // multi-character tokens.
-    if (source_.substr(pos_, 3) == "not") return consume(TokenType::kNAF, 3);
+    if (source_.substr(pos_, 3) == "not" && !is_id_char(pos_ + 3))
+      return consume(TokenType::kNAF, 3);
     if (source_[pos_] == '#') {
-      if (source_.substr(pos_, 6) == "#count")
+      if (source_.substr(pos_, 6) == "#count" && !is_id_char(pos_ + 6))
         return consume(TokenType::kAGGREGATE_COUNT, 6);
-      if (source_.substr(pos_, 4) == "#max")
+      if (source_.substr(pos_, 4) == "#max" && !is_id_char(pos_ + 4))
         return consume(TokenType::kAGGREGATE_MAX, 4);
-      if (source_.substr(pos_, 4) == "#min")
+      if (source_.substr(pos_, 4) == "#min" && !is_id_char(pos_ + 4))
         return consume(TokenType::kAGGREGATE_MIN, 4);
-      if (source_.substr(pos_, 4) == "#sum")
+      if (source_.substr(pos_, 4) == "#sum" && !is_id_char(pos_ + 4))
         return consume(TokenType::kAGGREGATE_SUM, 4);
     }
     if (source_.substr(pos_, 2) == "<>" || source_.substr(pos_, 2) == "!=") {
@@ -205,6 +206,13 @@ class Lexer {
   }
 
  private:
+  inline bool is_id_char(size_t p) {
+    if (p >= source_.size()) return false;
+    char c = source_[p];
+    return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') ||
+           (c >= '0' && c <= '9') || c == '_';
+  }
+
   inline Token consume(TokenType ttype, size_t len) {
     Token retval = Token{.type = ttype, .val = source_.substr(pos_, len)};
     pos_ += len;
