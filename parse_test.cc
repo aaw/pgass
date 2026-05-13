@@ -89,6 +89,25 @@ TEST_F(ParserTest, ParseTerms) {
   EXPECT_EQ(dynamic_cast<String*>(terms->at(2).get())->value, "\"hello\"");
 }
 
+TEST_F(ParserTest, ParseTermsWithArithmetic) {
+  // parse_terms() must use parse_term() so arithmetic expressions are accepted.
+  Parser parser("1+2, X*3");
+  auto terms_status = parser.parse_terms();
+  ASSERT_TRUE(terms_status.ok()) << terms_status.status();
+  auto terms = std::move(*terms_status);
+  ASSERT_EQ(terms->size(), 2);
+
+  auto* add = dynamic_cast<TermOperation*>(terms->at(0).get());
+  ASSERT_NE(add, nullptr);
+  EXPECT_EQ(add->op, OperationType::kPLUS);
+  EXPECT_NE(dynamic_cast<Number*>(add->left.get()), nullptr);
+  EXPECT_NE(dynamic_cast<Number*>(add->right.get()), nullptr);
+
+  auto* mul = dynamic_cast<TermOperation*>(terms->at(1).get());
+  ASSERT_NE(mul, nullptr);
+  EXPECT_EQ(mul->op, OperationType::kTIMES);
+}
+
 TEST_F(ParserTest, ParseClassicalLiteral) {
   Parser parser("-p(X, 1)");
   auto lit_status = parser.parse_classical_literal();

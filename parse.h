@@ -899,7 +899,7 @@ class Parser {
   // <terms> ::= [<terms> COMMA] <term>
   absl::StatusOr<Terms> parse_terms() {
     auto terms = std::make_unique<std::vector<std::unique_ptr<Term>>>();
-    ASSIGN_OR_RETURN(auto first_term, parse_single_term());
+    ASSIGN_OR_RETURN(auto first_term, parse_term());
     terms->push_back(std::move(first_term));
 
     while (true) {
@@ -910,7 +910,7 @@ class Parser {
       }
       try_comma.commit();
 
-      ASSIGN_OR_RETURN(auto next_term, parse_single_term());
+      ASSIGN_OR_RETURN(auto next_term, parse_term());
       terms->push_back(std::move(next_term));
     }
 
