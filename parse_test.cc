@@ -102,4 +102,82 @@ TEST_F(ParserTest, ParseClassicalLiteral) {
   EXPECT_NE(dynamic_cast<Number*>(lit->args->at(1).get()), nullptr);
 }
 
+TEST_F(ParserTest, ParseAggregateElement) {
+  {
+    Parser parser("X, 1 : p(X), not q");
+    auto element_status = parser.parse_aggregate_element();
+    ASSERT_TRUE(element_status.ok()) << element_status.status();
+    auto element = std::move(*element_status);
+    ASSERT_NE(element->terms, nullptr);
+    ASSERT_EQ(element->terms->size(), 2);
+    ASSERT_NE(element->literals, nullptr);
+    ASSERT_EQ(element->literals->size(), 2);
+    EXPECT_FALSE(element->literals->at(0)->naf);
+    EXPECT_TRUE(element->literals->at(1)->naf);
+  }
+
+  {
+    Parser parser("X");
+    auto element_status = parser.parse_aggregate_element();
+    ASSERT_TRUE(element_status.ok()) << element_status.status();
+    auto element = std::move(*element_status);
+    ASSERT_NE(element->terms, nullptr);
+    ASSERT_EQ(element->terms->size(), 1);
+    EXPECT_EQ(element->literals, nullptr);
+  }
+
+  {
+    Parser parser(": p");
+    auto element_status = parser.parse_aggregate_element();
+    ASSERT_TRUE(element_status.ok()) << element_status.status();
+    auto element = std::move(*element_status);
+    EXPECT_EQ(element->terms, nullptr);
+    ASSERT_NE(element->literals, nullptr);
+    ASSERT_EQ(element->literals->size(), 1);
+  }
+}
+
+TEST_F(ParserTest, ParseHeadDisjunction) {
+  Parser parser("p(X) | -q(Y)");
+  auto head_status = parser.parse_head();
+  ASSERT_TRUE(head_status.ok()) << head_status.status();
+  auto head = std::move(*head_status);
+  auto* disj = dynamic_cast<Disjunction*>(head.get());
+  ASSERT_NE(disj, nullptr);
+  ASSERT_EQ(disj->literals.size(), 2);
+  EXPECT_EQ(disj->literals[0]->id, "p");
+  EXPECT_EQ(disj->literals[1]->id, "q");
+  EXPECT_TRUE(disj->literals[1]->negated);
+}
+
+TEST_F(ParserTest, ParseHeadChoice) {
+  {
+    Parser parser("{ p(X) : q(X); r } <= 1");
+    auto head_status = parser.parse_head();
+    ASSERT_TRUE(head_status.ok()) << head_status.status();
+    auto head = std::move(*head_status);
+    auto* choice = dynamic_cast<Choice*>(head.get());
+    ASSERT_NE(choice, nullptr);
+    ASSERT_EQ(choice->elements->size(), 2);
+    EXPECT_EQ(choice->elements->at(0)->literal->id, "p");
+    ASSERT_NE(choice->elements->at(0)->conditions, nullptr);
+    EXPECT_EQ(choice->elements->at(1)->literal->id, "r");
+    EXPECT_EQ(choice->elements->at(1)->conditions, nullptr);
+    EXPECT_EQ(choice->ub_op, BinopType::kLESS_OR_EQ);
+    ASSERT_NE(choice->ub_term, nullptr);
+  }
+
+  {
+    Parser parser("1 < { p }");
+    auto head_status = parser.parse_head();
+    ASSERT_TRUE(head_status.ok()) << head_status.status();
+    auto head = std::move(*head_status);
+    auto* choice = dynamic_cast<Choice*>(head.get());
+    ASSERT_NE(choice, nullptr);
+    ASSERT_EQ(choice->elements->size(), 1);
+    EXPECT_EQ(choice->lb_op, BinopType::kLESS);
+    ASSERT_NE(choice->lb_term, nullptr);
+  }
+}
+
 } // namespace

@@ -13,13 +13,16 @@
 #include "macros.h"
 #include "tokenize.h"
 
+// Forward declarations for recursive structures if needed.
 struct Head {
   virtual ~Head() = default;
 };
 
-// The grammar defines Body recursively (<body> ::= [<body> COMMA] ...). We
-// introduce a BodyContainer/BodyItem so that the parsed Body contains a vector
-// of BodyContainers instead.
+struct Term {
+  virtual ~Term() = default;
+};
+
+using Terms = std::unique_ptr<std::vector<std::unique_ptr<Term>>>;
 
 struct BodyItem {
   virtual ~BodyItem() = default;
@@ -33,12 +36,6 @@ struct BodyContainer {
 struct Body {
   std::unique_ptr<std::vector<std::unique_ptr<BodyContainer>>> items;
 };
-
-struct Term {
-  virtual ~Term() = default;
-};
-
-using Terms = std::unique_ptr<std::vector<std::unique_ptr<Term>>>;
 
 struct Weight {
   std::unique_ptr<Term> weight;
@@ -77,15 +74,23 @@ enum class AggregateFunctionType {
   kAGGREGATE_SUM
 };
 
-struct AggregateElement {};
-
-using AggregateElements =
-    std::unique_ptr<std::vector<std::unique_ptr<AggregateElement>>>;
-
 struct NafLiteral : BodyItem {
   bool naf;
   std::unique_ptr<Literal> literal;
 };
+
+using NafLiterals = std::unique_ptr<std::vector<std::unique_ptr<NafLiteral>>>;
+
+struct AggregateElement {
+  Terms terms;
+  NafLiterals literals;
+
+  AggregateElement(Terms t, NafLiterals l)
+      : terms(std::move(t)), literals(std::move(l)) {}
+};
+
+using AggregateElements =
+    std::unique_ptr<std::vector<std::unique_ptr<AggregateElement>>>;
 
 struct Aggregate : BodyItem {
   std::unique_ptr<Term> lb_term;
@@ -106,6 +111,28 @@ struct ClassicalLiteral : Literal {
   bool negated;
   std::string id;
   Terms args;
+};
+
+struct Disjunction : Head {
+  std::vector<std::unique_ptr<ClassicalLiteral>> literals;
+};
+
+struct ChoiceElement {
+  std::unique_ptr<ClassicalLiteral> literal;
+  NafLiterals conditions;
+
+  ChoiceElement(std::unique_ptr<ClassicalLiteral> l, NafLiterals c)
+      : literal(std::move(l)), conditions(std::move(c)) {}
+};
+
+using ChoiceElements = std::unique_ptr<std::vector<std::unique_ptr<ChoiceElement>>>;
+
+struct Choice : Head {
+  std::unique_ptr<Term> lb_term;
+  BinopType lb_op;  // only valid if lb_term != nullptr;
+  std::unique_ptr<Term> ub_term;
+  BinopType ub_op;  // only valid if ub_term != nullptr;
+  ChoiceElements elements;
 };
 
 struct Query {
@@ -275,10 +302,116 @@ class Parser {
     return statement;
   }
 
+  // <basic_term> ::= <ground_term> | <variable_term>
+  // <ground_term> ::= SYMBOLIC_CONSTANT | STRING | [MINUS] NUMBER
+  // <variable_term> ::= VARIABLE | ANONYMOUS_VARIABLE
+  absl::StatusOr<std::unique_ptr<Term>> parse_basic_term() {
+    Token token = lexer_.next();
+    if (token.type == TokenType::kID) {
+      return std::make_unique<Predicate>(std::string(token.val), nullptr);
+    } else if (token.type == TokenType::kSTRING) {
+      return std::make_unique<String>(token.val);
+    } else if (token.type == TokenType::kNUMBER) {
+      uint64_t number;
+      if (!absl::SimpleAtoi(token.val, &number)) {
+        return absl::InvalidArgumentError(absl::StrCat(
+            "Couldn't convert number ", token.val,
+            " to 64-bit unsigned integer (", lexer_.report_pos(), ")"));
+      }
+      return std::make_unique<Number>(number);
+    } else if (token.type == TokenType::kMINUS) {
+      CONSUME_TOKEN_OR_RETURN(lexer_, num_tok, TokenType::kNUMBER);
+      uint64_t number;
+      if (!absl::SimpleAtoi(num_tok.val, &number)) {
+        return absl::InvalidArgumentError(absl::StrCat(
+            "Couldn't convert number ", num_tok.val,
+            " to 64-bit unsigned integer (", lexer_.report_pos(), ")"));
+      }
+      return std::make_unique<NegatedTerm>(std::make_unique<Number>(number));
+    } else if (token.type == TokenType::kVARIABLE) {
+      return std::make_unique<Variable>(token.val);
+    } else if (token.type == TokenType::kANONYMOUS_VARIABLE) {
+      return std::make_unique<AnonymousVariable>();
+    }
+
+    return absl::InvalidArgumentError(absl::StrCat(
+        "Unexpected token '", token.val,
+        "' while attempting to parse basic term at ", lexer_.report_pos()));
+  }
+
+  // <basic_terms> ::= [<basic_terms> COMMA] <basic_term>
+  absl::StatusOr<Terms> parse_basic_terms() {
+    auto terms = std::make_unique<std::vector<std::unique_ptr<Term>>>();
+    ASSIGN_OR_RETURN(auto first_term, parse_basic_term());
+    terms->push_back(std::move(first_term));
+
+    while (true) {
+      LexerCheckpoint try_comma(lexer_);
+      Token token = lexer_.next();
+      if (token.type != TokenType::kCOMMA) {
+        return terms;
+      }
+      try_comma.commit();
+
+      ASSIGN_OR_RETURN(auto next_term, parse_basic_term());
+      terms->push_back(std::move(next_term));
+    }
+
+    return terms;
+  }
+
+  // <naf_literals> ::= [<naf_literals> COMMA] <naf_literal>
+  absl::StatusOr<NafLiterals> parse_naf_literals() {
+    auto literals =
+        std::make_unique<std::vector<std::unique_ptr<NafLiteral>>>();
+    ASSIGN_OR_RETURN(auto first_literal, parse_naf_literal());
+    literals->push_back(std::move(first_literal));
+
+    while (true) {
+      LexerCheckpoint try_comma(lexer_);
+      Token token = lexer_.next();
+      if (token.type != TokenType::kCOMMA) {
+        return literals;
+      }
+      try_comma.commit();
+
+      ASSIGN_OR_RETURN(auto next_literal, parse_naf_literal());
+      literals->push_back(std::move(next_literal));
+    }
+
+    return literals;
+  }
+
   // <aggregate_element> ::= [<basic_terms>] [COLON [<naf_literals>]]
   absl::StatusOr<std::unique_ptr<AggregateElement>> parse_aggregate_element() {
-    // TODO
-    return std::make_unique<AggregateElement>();
+    Terms terms;
+    {
+      LexerCheckpoint try_basic_terms(lexer_);
+      auto basic_terms = parse_basic_terms();
+      if (basic_terms.ok()) {
+        try_basic_terms.commit();
+        terms = std::move(*basic_terms);
+      }
+    }
+
+    NafLiterals literals;
+    {
+      LexerCheckpoint try_colon(lexer_);
+      if (lexer_.next().type == TokenType::kCOLON) {
+        try_colon.commit();
+        {
+          LexerCheckpoint try_naf_literals(lexer_);
+          auto naf_literals = parse_naf_literals();
+          if (naf_literals.ok()) {
+            try_naf_literals.commit();
+            literals = std::move(*naf_literals);
+          }
+        }
+      }
+    }
+
+    return std::make_unique<AggregateElement>(std::move(terms),
+                                              std::move(literals));
   }
 
   /* <aggregate_elements> ::= [<aggregate_elements> SEMICOLON]
@@ -423,10 +556,134 @@ class Parser {
     return body;
   }
 
+  // <choice_element> ::= <classical_literal> [COLON [<naf_literals>]]
+  absl::StatusOr<std::unique_ptr<ChoiceElement>> parse_choice_element() {
+    ASSIGN_OR_RETURN(auto literal, parse_classical_literal());
+
+    NafLiterals conditions;
+    {
+      LexerCheckpoint try_colon(lexer_);
+      if (lexer_.next().type == TokenType::kCOLON) {
+        try_colon.commit();
+        {
+          LexerCheckpoint try_naf_literals(lexer_);
+          auto naf_literals = parse_naf_literals();
+          if (naf_literals.ok()) {
+            try_naf_literals.commit();
+            conditions = std::move(*naf_literals);
+          }
+        }
+      }
+    }
+
+    return std::make_unique<ChoiceElement>(std::move(literal),
+                                           std::move(conditions));
+  }
+
+  // <choice_elements> ::= [<choice_elements> SEMICOLON] <choice_element>
+  absl::StatusOr<ChoiceElements>
+  parse_choice_elements() {
+    auto elements = std::make_unique<std::vector<std::unique_ptr<ChoiceElement>>>();
+    ASSIGN_OR_RETURN(auto element, parse_choice_element());
+    elements->push_back(std::move(element));
+
+    while (true) {
+      LexerCheckpoint try_next_element(lexer_);
+      Token token = lexer_.next();
+      if (token.type != TokenType::kSEMICOLON) {
+        break;
+      }
+      auto next_element = parse_choice_element();
+      if (next_element.ok()) {
+        try_next_element.commit();
+        elements->push_back(std::move(*next_element));
+      } else {
+        break;
+      }
+    }
+
+    return elements;
+  }
+
+  // <choice> ::= [<term> <binop>] CURLY_OPEN [<choice_elements>] CURLY_CLOSE [<binop> <term>]
+  absl::StatusOr<std::unique_ptr<Choice>> parse_choice() {
+    auto choice = std::make_unique<Choice>();
+
+    {
+      // Parse the lower bound, if one exists.
+      LexerCheckpoint try_term_and_binop(lexer_);
+      auto term = parse_term();
+      auto binop = parse_binop();
+      if (term.ok() && binop.ok()) {
+        choice->lb_term = std::move(*term);
+        choice->lb_op = std::move(*binop);
+        try_term_and_binop.commit();
+      }
+    }
+
+    CONSUME_TOKEN_TYPE_OR_RETURN(lexer_, TokenType::kCURLY_OPEN);
+
+    {
+      LexerCheckpoint try_choice_elements(lexer_);
+      auto choice_elements = parse_choice_elements();
+      if (choice_elements.ok()) {
+        choice->elements = std::move(*choice_elements);
+        try_choice_elements.commit();
+      }
+    }
+
+    CONSUME_TOKEN_TYPE_OR_RETURN(lexer_, TokenType::kCURLY_CLOSE);
+
+    {
+      // Parse the upper bound, if one exists.
+      LexerCheckpoint try_term_and_binop(lexer_);
+      auto binop = parse_binop();
+      auto term = parse_term();
+      if (term.ok() && binop.ok()) {
+        choice->ub_term = std::move(*term);
+        choice->ub_op = std::move(*binop);
+        try_term_and_binop.commit();
+      }
+    }
+
+    return choice;
+  }
+
+  // <disjunction> ::= [<disjunction> OR] <classical_literal>
+  absl::StatusOr<std::unique_ptr<Disjunction>> parse_disjunction() {
+    auto disjunction = std::make_unique<Disjunction>();
+    ASSIGN_OR_RETURN(auto literal, parse_classical_literal());
+    disjunction->literals.push_back(std::move(literal));
+
+    while (true) {
+      LexerCheckpoint try_or(lexer_);
+      Token token = lexer_.next();
+      if (token.type != TokenType::kOR) {
+        break;
+      }
+      try_or.commit();
+
+      ASSIGN_OR_RETURN(auto next_literal, parse_classical_literal());
+      disjunction->literals.push_back(std::move(next_literal));
+    }
+
+    return disjunction;
+  }
+
   // <head> ::= <disjunction> | <choice>
   absl::StatusOr<std::unique_ptr<Head>> parse_head() {
-    // TODO
-    return std::make_unique<Head>();
+    {
+      LexerCheckpoint try_choice(lexer_);
+      auto choice = parse_choice();
+      if (choice.ok()) {
+        try_choice.commit();
+        return std::move(*choice);
+      }
+    }
+
+    auto disjunction = parse_disjunction();
+    if (!disjunction.ok()) return disjunction.status();
+    return std::move(*disjunction);
   }
 
   // <weight_at_level> ::= <term> [AT <term>] [COMMA <terms>]
