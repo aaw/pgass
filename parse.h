@@ -816,14 +816,13 @@ class Parser {
     }
   }
 
-  /* <term> ::= ID [PAREN_OPEN [<terms>] PAREN_CLOSE]
-              | NUMBER
-              | STRING
-              | VARIABLE
-              | ANONYMOUS_VARIABLE
-              | PAREN_OPEN <term> PAREN_CLOSE
-              | MINUS <term>
-              | <term> <arithop> <term>
+  /* <single_term> ::= ID [PAREN_OPEN [<terms>] PAREN_CLOSE]
+                     | NUMBER
+                     | STRING
+                     | VARIABLE
+                     | ANONYMOUS_VARIABLE
+                     | PAREN_OPEN <term> PAREN_CLOSE
+                     | MINUS <single_term>
   */
   absl::StatusOr<std::unique_ptr<Term>> parse_single_term() {
     Token token = lexer_.next();

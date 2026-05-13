@@ -1,7 +1,6 @@
 #ifndef __TOKENIZE_H__
 #define __TOKENIZE_H__
 
-#include <deque>
 #include <string_view>
 
 #include "absl/strings/str_cat.h"
