@@ -25,6 +25,23 @@ jobs:
       - name: Test
         run: ctest --test-dir build --output-on-failure
 
+  lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Cache dependencies
+        uses: actions/cache@v4
+        with:
+          path: build/_deps
+          key: deps-${{ hashFiles('CMakeLists.txt') }}
+
+      - name: Install clang tools
+        run: sudo apt-get install -y clang-format clang-tidy
+
+      - name: Check formatting and linting
+        run: make check
+
   asan:
     runs-on: ubuntu-latest
     steps:
