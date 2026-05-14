@@ -253,4 +253,40 @@ TEST_F(ParserTest, ParseBodyNafAggregate) {
   EXPECT_FALSE(agg1->naf);
 }
 
+TEST_F(ParserTest, ParseProgramGraphColoring) {
+  Parser parser(R"(
+    node(a). node(b). node(c). node(d).
+    edge(a,b). edge(b,c). edge(c,d). edge(d,a). edge(a,c).
+    color(red). color(green). color(blue).
+    1 <= { col(N,C) : color(C) } <= 1 :- node(N).
+    :- edge(X,Y), col(X,C), col(Y,C).
+  )");
+  auto prog = parser.parse_program();
+  ASSERT_TRUE(prog.ok()) << prog.status();
+}
+
+TEST_F(ParserTest, ParseProgramNQueens) {
+  Parser parser(R"(
+    n(1). n(2). n(3). n(4).
+    1 <= { queen(R,C) : n(C) } <= 1 :- n(R).
+    :- queen(R1,C), queen(R2,C), R1 <> R2.
+    :- queen(R1,C1), queen(R2,C2), R1 <> R2, R1-C1 = R2-C2.
+    :- queen(R1,C1), queen(R2,C2), R1 <> R2, R1+C1 = R2+C2.
+  )");
+  auto prog = parser.parse_program();
+  ASSERT_TRUE(prog.ok()) << prog.status();
+}
+
+TEST_F(ParserTest, ParseProgramReachability) {
+  Parser parser(R"(
+    edge(a,b). edge(b,c). edge(c,d). edge(a,d).
+    reachable(X,Y) :- edge(X,Y).
+    reachable(X,Z) :- reachable(X,Y), edge(Y,Z).
+    connected :- reachable(a,d).
+    :- not connected.
+  )");
+  auto prog = parser.parse_program();
+  ASSERT_TRUE(prog.ok()) << prog.status();
+}
+
 } // namespace
