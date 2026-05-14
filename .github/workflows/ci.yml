@@ -38,3 +38,6 @@ jobs:
 
       - name: Build and test with ASan
         run: make asan
+        env:
+          CC: clang
+          CXX: clang++
