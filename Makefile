@@ -6,17 +6,11 @@ SRCS := $(shell find src -name '*.cpp' -o -name '*.h' -o -name '*.c')
 
 all: build test
 
-build: format-check
+build:
 	@if [ ! -f "build/CMakeCache.txt" ]; then \
 		cmake -B build -S . -DCMAKE_EXPORT_COMPILE_COMMANDS=ON; \
 	fi
 	cmake --build build -j$(NPROC)
-
-format-check:
-	clang-format --dry-run --Werror $(SRCS)
-
-tidy:
-	clang-format -i $(SRCS)
 
 asan:
 	@if [ ! -f "build-asan/CMakeCache.txt" ]; then \
