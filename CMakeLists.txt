@@ -35,6 +35,15 @@ target_link_libraries(parse_lib
     absl::statusor
 )
 
+add_executable(pgass src/pgass.cc)
+target_link_libraries(pgass
+  PRIVATE
+    parse_lib
+    absl::flags
+    absl::flags_parse
+    absl::flags_usage
+)
+
 add_executable(parse_test src/parse_test.cc)
 
 target_link_libraries(parse_test
