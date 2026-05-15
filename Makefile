@@ -1,14 +1,22 @@
 NPROC := $(shell nproc 2>/dev/null || sysctl -n hw.logicalcpu 2>/dev/null || echo 4)
 
-.PHONY: all build run clean test asan
+SRCS := $(shell find src -name '*.cpp' -o -name '*.h' -o -name '*.c')
+
+.PHONY: all build run clean test asan tidy
 
 all: build run
 
-build:
+build: format-check
 	@if [ ! -f "build/CMakeCache.txt" ]; then \
 		cmake -B build -S . -DCMAKE_EXPORT_COMPILE_COMMANDS=ON; \
 	fi
 	cmake --build build -j$(NPROC)
+
+format-check:
+	clang-format --dry-run --Werror $(SRCS)
+
+tidy:
+	clang-format -i $(SRCS)
 
 asan:
 	@if [ ! -f "build-asan/CMakeCache.txt" ]; then \

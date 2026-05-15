@@ -120,7 +120,8 @@ struct ChoiceElement {
       : literal(std::move(l)), conditions(std::move(c)) {}
 };
 
-using ChoiceElements = std::unique_ptr<std::vector<std::unique_ptr<ChoiceElement>>>;
+using ChoiceElements =
+    std::unique_ptr<std::vector<std::unique_ptr<ChoiceElement>>>;
 
 struct Choice : Head {
   std::unique_ptr<Term> lb_term;
@@ -221,7 +222,8 @@ class Parser {
 
   // <statements> ::= [<statements>] <statement>
   absl::StatusOr<Statements> parse_statements() {
-    auto statements = std::make_unique<std::vector<std::unique_ptr<Statement>>>();
+    auto statements =
+        std::make_unique<std::vector<std::unique_ptr<Statement>>>();
     ASSIGN_OR_RETURN(auto statement, parse_statement());
     statements->push_back(std::move(statement));
 
@@ -413,7 +415,8 @@ class Parser {
                                 <aggregate_element>
   */
   absl::StatusOr<AggregateElements> parse_aggregate_elements() {
-    auto elements = std::make_unique<std::vector<std::unique_ptr<AggregateElement>>>();
+    auto elements =
+        std::make_unique<std::vector<std::unique_ptr<AggregateElement>>>();
     ASSIGN_OR_RETURN(auto element, parse_aggregate_element());
     elements->push_back(std::move(element));
 
@@ -508,8 +511,7 @@ class Parser {
   // <body> ::= [<body> COMMA] (<naf_literal> | [NAF] <aggregate>)
   absl::StatusOr<std::unique_ptr<Body>> parse_body() {
     auto body = std::make_unique<Body>();
-    body->items =
-        std::make_unique<std::vector<std::unique_ptr<BodyItem>>>();
+    body->items = std::make_unique<std::vector<std::unique_ptr<BodyItem>>>();
 
     while (true) {
       bool found_naf_literal = false;
@@ -575,9 +577,9 @@ class Parser {
   }
 
   // <choice_elements> ::= [<choice_elements> SEMICOLON] <choice_element>
-  absl::StatusOr<ChoiceElements>
-  parse_choice_elements() {
-    auto elements = std::make_unique<std::vector<std::unique_ptr<ChoiceElement>>>();
+  absl::StatusOr<ChoiceElements> parse_choice_elements() {
+    auto elements =
+        std::make_unique<std::vector<std::unique_ptr<ChoiceElement>>>();
     ASSIGN_OR_RETURN(auto element, parse_choice_element());
     elements->push_back(std::move(element));
 
@@ -599,7 +601,8 @@ class Parser {
     return elements;
   }
 
-  // <choice> ::= [<term> <binop>] CURLY_OPEN [<choice_elements>] CURLY_CLOSE [<binop> <term>]
+  // <choice> ::= [<term> <binop>] CURLY_OPEN [<choice_elements>] CURLY_CLOSE
+  // [<binop> <term>]
   absl::StatusOr<std::unique_ptr<Choice>> parse_choice() {
     auto choice = std::make_unique<Choice>();
 
@@ -703,7 +706,7 @@ class Parser {
     }
 
     return std::make_unique<Weight>(std::move(weight_term), std::move(level),
-                                     std::move(terms));
+                                    std::move(terms));
   }
 
   // <naf_literal> ::= [NAF] <classical_literal> | <builtin_atom>
