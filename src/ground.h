@@ -1,8 +1,8 @@
 #ifndef __GROUND_H__
 #define __GROUND_H__
 
-#include "parse.h"
+#include "ast.h"
 
-bool safe(std::unique_ptr<Program> prog) { return true; }
+bool verify_safe(std::unique_ptr<Program> prog) { return true; }
 
 #endif  // __GROUND_H__

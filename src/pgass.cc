@@ -6,6 +6,7 @@
 #include "absl/flags/flag.h"
 #include "absl/flags/parse.h"
 #include "absl/flags/usage.h"
+#include "absl/log/check.h"
 #include "ground.h"
 #include "parse.h"
 
@@ -40,5 +41,6 @@ int main(int argc, char** argv) {
     return 1;
   }
 
-  return safe(std::move(*program)) ? 0 : 1;
+  CHECK(verify_safe(std::move(*program)));
+  return 0;
 }
