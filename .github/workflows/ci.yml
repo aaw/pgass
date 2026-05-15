@@ -16,14 +16,8 @@ jobs:
           path: build/_deps
           key: deps-${{ hashFiles('CMakeLists.txt') }}
 
-      - name: Configure
-        run: cmake -B build -S .
-
-      - name: Build
-        run: cmake --build build -j$(nproc)
-
-      - name: Test
-        run: ctest --test-dir build --output-on-failure
+      - name: Build and test
+        run: make
 
   asan:
     runs-on: ubuntu-latest

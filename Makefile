@@ -2,9 +2,9 @@ NPROC := $(shell nproc 2>/dev/null || sysctl -n hw.logicalcpu 2>/dev/null || ech
 
 SRCS := $(shell find src -name '*.cpp' -o -name '*.h' -o -name '*.c')
 
-.PHONY: all build run clean test asan tidy
+.PHONY: all build clean test asan tidy
 
-all: build run
+all: build test
 
 build: format-check
 	@if [ ! -f "build/CMakeCache.txt" ]; then \
@@ -26,13 +26,10 @@ asan:
 			-DCMAKE_EXE_LINKER_FLAGS="-fsanitize=address,undefined"; \
 	fi
 	cmake --build build-asan -j$(NPROC)
-	cd build-asan && ctest --output-on-failure
-
-run:
-	./build/parse_test
+	ctest --test-dir build-asan --output-on-failure
 
 test:
-	cd build && ctest --output-on-failure
+	ctest --test-dir build --output-on-failure
 
 clean:
 	rm -rf build build-asan
