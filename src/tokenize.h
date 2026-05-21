@@ -97,7 +97,7 @@ class Lexer {
       }
     }
 
-    if (pos_ >= source_.size()) return Token{.type = TokenType::kEOF};
+    if (pos_ >= source_.size()) return Token{.type = TokenType::kEOF, .val = ""};
 
     // Consume/return any recognized tokens. First handle (possibly)
     // multi-character tokens.
@@ -197,7 +197,7 @@ class Lexer {
     if (source_[pos_] == '<') return consume(TokenType::kLESS, 1);
     if (source_[pos_] == '>') return consume(TokenType::kGREATER, 1);
 
-    return Token{.type = TokenType::kERROR};
+    return Token{.type = TokenType::kERROR, .val = ""};
   }
 
  private:
