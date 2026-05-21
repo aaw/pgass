@@ -23,7 +23,7 @@ asan:
 	ctest --test-dir build-asan --output-on-failure
 
 test:
-	ctest --test-dir build --output-on-failure
+	ctest --test-dir build --output-on-failure $(if $(FILTER),-R $(FILTER))
 
 clean:
 	rm -rf build build-asan

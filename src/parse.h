@@ -1,5 +1,5 @@
-#ifndef __PARSE_H__
-#define __PARSE_H__
+#ifndef PARSE_H_
+#define PARSE_H_
 
 #include <cstdint>
 #include <memory>
@@ -765,4 +765,4 @@ class Parser {
   Lexer lexer_;
 };
 
-#endif  // __PARSE_H__
+#endif  // PARSE_H_

@@ -35,18 +35,29 @@ target_link_libraries(parse_lib
     absl::statusor
 )
 
+add_library(safety_lib STATIC src/safety.cc)
+target_compile_options(safety_lib PRIVATE -Wall -Wextra -Werror)
+target_link_libraries(safety_lib
+  PUBLIC
+    parse_lib
+  PRIVATE
+    absl::check
+    absl::flat_hash_set
+)
+
 add_executable(pgass src/pgass.cc)
+target_compile_options(pgass PRIVATE -Wall -Wextra -Werror)
 target_link_libraries(pgass
   PRIVATE
-    parse_lib
+    safety_lib
+    absl::check
     absl::flags
     absl::flags_parse
     absl::flags_usage
-    absl::log
 )
 
 add_executable(parse_test src/parse_test.cc)
-
+target_compile_options(parse_test PRIVATE -Wall -Wextra -Werror)
 target_link_libraries(parse_test
   PRIVATE
     parse_lib
@@ -54,5 +65,15 @@ target_link_libraries(parse_test
     GTest::gmock
 )
 
+add_executable(safety_test src/safety_test.cc)
+target_compile_options(safety_test PRIVATE -Wall -Wextra -Werror)
+target_link_libraries(safety_test
+  PRIVATE
+    safety_lib
+    GTest::gtest_main
+    GTest::gmock
+)
+
 include(GoogleTest)
 gtest_discover_tests(parse_test)
+gtest_discover_tests(safety_test)
