@@ -11,11 +11,12 @@
   }                                               \
   lhs = std::move(CONCAT(status_or_, __LINE__)).value()
 
-#define CONSUME_TOKEN_OR_RETURN(lexer, lhs, token_type)               \
-  Token lhs = lexer.next();                                           \
-  if (lhs.type != token_type) {                                       \
-    return absl::InvalidArgumentError(absl::StrCat(                   \
-        "Unexpected token '", lhs.val, "' at ", lexer.report_pos())); \
+#define CONSUME_TOKEN_OR_RETURN(lexer, lhs, token_type)                \
+  Token lhs = lexer.next();                                            \
+  if (lhs.type != token_type) {                                        \
+    return absl::InvalidArgumentError(absl::StrCat(                    \
+        "Unexpected token '", lhs.val, "'\n",                          \
+        lexer.report_last_token_pos()));                                \
   }
 
 #define CONSUME_TOKEN_TYPE_OR_RETURN(lexer, token_type) \

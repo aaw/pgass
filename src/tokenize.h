@@ -1,6 +1,7 @@
 #ifndef __TOKENIZE_H__
 #define __TOKENIZE_H__
 
+#include <algorithm>
 #include <string_view>
 
 #include "absl/strings/str_cat.h"
@@ -54,18 +55,10 @@ class Lexer {
  public:
   explicit Lexer(std::string_view source) : source_(source) {}
 
-  std::string report_pos() {
-    int line = 1;
-    size_t last_newline_pos = 0;
+  std::string report_pos() { return report_context(pos_); }
 
-    for (size_t i = 0; i < pos_; ++i) {
-      if (source_[i] == '\n') {
-        line++;
-        last_newline_pos = i + 1;  // Start of the next line
-      }
-    }
-    return absl::StrCat("line ", line, ", column ",
-                        pos_ - last_newline_pos + 1);
+  std::string report_last_token_pos() {
+    return report_context(last_token_start_);
   }
 
   Token next() {
@@ -96,6 +89,8 @@ class Lexer {
         }
       }
     }
+
+    last_token_start_ = pos_;
 
     if (pos_ >= source_.size()) return Token{.type = TokenType::kEOF, .val = ""};
 
@@ -206,6 +201,26 @@ class Lexer {
   std::size_t checkpoint() { return pos_; }
   void rewind(std::size_t checkpoint_id) { pos_ = checkpoint_id; }
 
+  std::string report_context(size_t error_pos) {
+    size_t clamped = std::min(error_pos, source_.size());
+    int line = 1;
+    size_t line_start = 0;
+    for (size_t i = 0; i < clamped; ++i) {
+      if (source_[i] == '\n') {
+        line++;
+        line_start = i + 1;
+      }
+    }
+    size_t col = clamped - line_start;
+    size_t line_end = line_start;
+    while (line_end < source_.size() && source_[line_end] != '\n') ++line_end;
+    std::string_view line_text = source_.substr(line_start, line_end - line_start);
+    std::string caret(col, ' ');
+    caret += '^';
+    return absl::StrCat("line ", line, ", column ", col + 1, ":\n", line_text,
+                        "\n", caret);
+  }
+
   inline bool is_id_char(size_t p) {
     if (p >= source_.size()) return false;
     char c = source_[p];
@@ -220,6 +235,7 @@ class Lexer {
   }
 
   std::size_t pos_ = 0;
+  std::size_t last_token_start_ = 0;
   std::string_view source_;
 };
 

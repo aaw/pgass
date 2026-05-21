@@ -42,7 +42,8 @@ class Parser {
 
     if (lexer_.next().type != TokenType::kEOF) {
       return absl::InvalidArgumentError(absl::StrCat(
-          "Unexpected content at end of program: ", lexer_.report_pos()));
+          "Unexpected content at end of program\n",
+          lexer_.report_last_token_pos()));
     }
 
     return program;
@@ -141,7 +142,7 @@ class Parser {
       if (!absl::SimpleAtoi(token.val, &number)) {
         return absl::InvalidArgumentError(absl::StrCat(
             "Couldn't convert number ", token.val,
-            " to 64-bit unsigned integer (", lexer_.report_pos(), ")"));
+            " to 64-bit unsigned integer\n", lexer_.report_last_token_pos()));
       }
       return std::make_unique<Number>(number);
     } else if (token.type == TokenType::kMINUS) {
@@ -150,7 +151,7 @@ class Parser {
       if (!absl::SimpleAtoi(num_tok.val, &number)) {
         return absl::InvalidArgumentError(absl::StrCat(
             "Couldn't convert number ", num_tok.val,
-            " to 64-bit unsigned integer (", lexer_.report_pos(), ")"));
+            " to 64-bit unsigned integer\n", lexer_.report_last_token_pos()));
       }
       return std::make_unique<NegatedTerm>(std::make_unique<Number>(number));
     } else if (token.type == TokenType::kVARIABLE) {
@@ -160,8 +161,8 @@ class Parser {
     }
 
     return absl::InvalidArgumentError(absl::StrCat(
-        "Unexpected token '", token.val,
-        "' while attempting to parse basic term at ", lexer_.report_pos()));
+        "Unexpected token '", token.val, "' while parsing basic term\n",
+        lexer_.report_last_token_pos()));
   }
 
   // <basic_terms> ::= [<basic_terms> COMMA] <basic_term>
@@ -284,7 +285,7 @@ class Parser {
     } else {
       return absl::InvalidArgumentError(absl::StrCat(
           "Expected aggregate function (#count, #max, #min, #sum), got '",
-          token.val, "' at ", lexer_.report_pos()));
+          token.val, "'\n", lexer_.report_last_token_pos()));
     }
   }
 
@@ -589,9 +590,9 @@ class Parser {
     } else if (token.type == TokenType::kGREATER_OR_EQ) {
       return BinopType::kGREATER_OR_EQ;
     } else {
-      return absl::InvalidArgumentError(
-          absl::StrCat("Expected operator (=, <>, !=, <, >, <=, >=), got '",
-                       token.val, "' at ", lexer_.report_pos()));
+      return absl::InvalidArgumentError(absl::StrCat(
+          "Expected operator (=, <>, !=, <, >, <=, >=), got '", token.val,
+          "'\n", lexer_.report_last_token_pos()));
     }
   }
 
@@ -681,7 +682,7 @@ class Parser {
       if (!absl::SimpleAtoi(token.val, &number)) {
         return absl::InvalidArgumentError(absl::StrCat(
             "Couldn't convert number ", token.val,
-            " to 64-bit unsigned integer (", lexer_.report_pos(), ")"));
+            " to 64-bit unsigned integer\n", lexer_.report_last_token_pos()));
       }
       return std::make_unique<Number>(number);
     } else if (token.type == TokenType::kSTRING) {
@@ -700,8 +701,8 @@ class Parser {
     }
 
     return absl::InvalidArgumentError(absl::StrCat(
-        "Unexpected token '", token.val, "' while attempting to parse term at ",
-        lexer_.report_pos()));
+        "Unexpected token '", token.val, "' while parsing term\n",
+        lexer_.report_last_token_pos()));
   }
 
   // <terms> ::= [<terms> COMMA] <term>
@@ -736,9 +737,9 @@ class Parser {
     }
 
     if (token.type != TokenType::kID) {
-      return absl::InvalidArgumentError(
-          absl::StrCat("Expected ID at ", lexer_.report_pos(), " but got '",
-                       token.val, "'"));
+      return absl::InvalidArgumentError(absl::StrCat(
+          "Expected identifier but got '", token.val, "'\n",
+          lexer_.report_last_token_pos()));
     }
     lit->id = token.val;
 

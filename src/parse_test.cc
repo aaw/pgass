@@ -300,4 +300,69 @@ TEST_F(ParserTest, ParseProgramReachability) {
   ASSERT_TRUE(prog.ok()) << prog.status();
 }
 
+// Error message format tests — each pins the exact string so they double as
+// examples of what users will see.
+
+TEST_F(ParserTest, ErrorMessageUnexpectedTermToken) {
+  // Simplest case: bad token as the only input.
+  Parser parser(".");
+  auto result = parser.parse_single_term();
+  ASSERT_FALSE(result.ok());
+  EXPECT_EQ(result.status().message(),
+            "Unexpected token '.' while parsing term\n"
+            "line 1, column 1:\n"
+            ".\n"
+            "^");
+}
+
+TEST_F(ParserTest, ErrorMessageCaretPointsMidLine) {
+  // After committing to the arithmetic op, the rhs fails — caret must land
+  // under the '.' on column 5, not at the start of the expression.
+  Parser parser("1 + .");
+  auto result = parser.parse_term();
+  ASSERT_FALSE(result.ok());
+  EXPECT_EQ(result.status().message(),
+            "Unexpected token '.' while parsing term\n"
+            "line 1, column 5:\n"
+            "1 + .\n"
+            "    ^");
+}
+
+TEST_F(ParserTest, ErrorMessageExpectedIdentifier) {
+  Parser parser("123");
+  auto result = parser.parse_classical_literal();
+  ASSERT_FALSE(result.ok());
+  EXPECT_EQ(result.status().message(),
+            "Expected identifier but got '123'\n"
+            "line 1, column 1:\n"
+            "123\n"
+            "^");
+}
+
+TEST_F(ParserTest, ErrorMessageUnexpectedContentMidLine) {
+  // First statement parses fine; caret should sit under 'garbage', not at
+  // the beginning of the input.
+  Parser parser("p(X). garbage");
+  auto result = parser.parse_program();
+  ASSERT_FALSE(result.ok());
+  EXPECT_EQ(result.status().message(),
+            "Unexpected content at end of program\n"
+            "line 1, column 7:\n"
+            "p(X). garbage\n"
+            "      ^");
+}
+
+TEST_F(ParserTest, ErrorMessageMultilineShowsCorrectLine) {
+  // Error is on the third source line — message must show that line and
+  // report line 3, not line 1.
+  Parser parser("p(a).\nq(Y).\n123");
+  auto result = parser.parse_program();
+  ASSERT_FALSE(result.ok());
+  EXPECT_EQ(result.status().message(),
+            "Unexpected content at end of program\n"
+            "line 3, column 1:\n"
+            "123\n"
+            "^");
+}
+
 }  // namespace
