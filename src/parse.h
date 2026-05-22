@@ -29,6 +29,7 @@ class Parser {
         try_statements.commit();
         program->statements = std::move(*statements);
       }
+      update_furthest(statements.status());
     }
 
     {
@@ -38,9 +39,13 @@ class Parser {
         try_query.commit();
         program->query = std::move(*query);
       }
+      update_furthest(query.status());
     }
 
     if (lexer_.next().type != TokenType::kEOF) {
+      if (!furthest_error_msg_.empty()) {
+        return absl::InvalidArgumentError(furthest_error_msg_);
+      }
       return absl::InvalidArgumentError(absl::StrCat(
           "Unexpected content at end of program\n",
           lexer_.report_last_token_pos()));
@@ -63,6 +68,7 @@ class Parser {
         try_next_statement.commit();
         statements->push_back(std::move(*next_statement));
       } else {
+        update_furthest(next_statement.status());
         break;
       }
     }
@@ -94,7 +100,14 @@ class Parser {
           }
         }
 
-        CONSUME_TOKEN_TYPE_OR_RETURN(lexer_, TokenType::kDOT);
+        {
+          Token dot_ = lexer_.next();
+          if (dot_.type != TokenType::kDOT) {
+            return absl::InvalidArgumentError(absl::StrCat(
+                "Expected '.' to end rule, got '", dot_.val, "'\n",
+                lexer_.report_last_token_pos()));
+          }
+        }
         if (tok.type == TokenType::kCONS) return statement;
 
         CONSUME_TOKEN_TYPE_OR_RETURN(lexer_, TokenType::kSQUARE_OPEN);
@@ -123,7 +136,14 @@ class Parser {
       }
     }
 
-    CONSUME_TOKEN_TYPE_OR_RETURN(lexer_, TokenType::kDOT);
+    {
+      Token dot_ = lexer_.next();
+      if (dot_.type != TokenType::kDOT) {
+        return absl::InvalidArgumentError(absl::StrCat(
+            "Expected '.' to end rule, got '", dot_.val, "'\n",
+            lexer_.report_last_token_pos()));
+      }
+    }
 
     return statement;
   }
@@ -505,6 +525,7 @@ class Parser {
         try_choice.commit();
         return std::move(*choice);
       }
+      update_furthest(choice.status());
     }
 
     auto disjunction = parse_disjunction();
@@ -755,6 +776,7 @@ class Parser {
           try_terms.commit();
           lit->args = std::move(*terms);
         }
+        update_furthest(terms.status());
       }
 
       CONSUME_TOKEN_TYPE_OR_RETURN(lexer_, TokenType::kPAREN_CLOSE);
@@ -763,7 +785,23 @@ class Parser {
     return lit;
   }
 
+  // Records the error that reached furthest into the input, so we can report
+  // something more useful than "unexpected content at end of program" when all
+  // backtracking paths fail.  Use strict > so that the first (outermost) error
+  // at a given position wins; this keeps "Expected '.' to end rule" over the
+  // later generic messages produced by query-parse attempts at the same spot.
+  void update_furthest(const absl::Status& s) {
+    if (s.ok()) return;
+    size_t p = lexer_.last_token_pos();
+    if (p > furthest_error_pos_) {
+      furthest_error_pos_ = p;
+      furthest_error_msg_ = std::string(s.message());
+    }
+  }
+
   Lexer lexer_;
+  size_t furthest_error_pos_ = 0;
+  std::string furthest_error_msg_;
 };
 
 #endif  // PARSE_H_

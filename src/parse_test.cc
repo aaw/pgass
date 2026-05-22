@@ -340,16 +340,16 @@ TEST_F(ParserTest, ErrorMessageExpectedIdentifier) {
 }
 
 TEST_F(ParserTest, ErrorMessageUnexpectedContentMidLine) {
-  // First statement parses fine; caret should sit under 'garbage', not at
-  // the beginning of the input.
+  // First statement parses fine; caret should sit at the end of 'garbage'
+  // (where the '.' was expected), not at the beginning of 'garbage'.
   Parser parser("p(X). garbage");
   auto result = parser.parse_program();
   ASSERT_FALSE(result.ok());
   EXPECT_EQ(result.status().message(),
-            "Unexpected content at end of program\n"
-            "line 1, column 7:\n"
+            "Expected '.' to end rule, got ''\n"
+            "line 1, column 14:\n"
             "p(X). garbage\n"
-            "      ^");
+            "             ^");
 }
 
 TEST_F(ParserTest, ErrorMessageMultilineShowsCorrectLine) {
@@ -359,10 +359,32 @@ TEST_F(ParserTest, ErrorMessageMultilineShowsCorrectLine) {
   auto result = parser.parse_program();
   ASSERT_FALSE(result.ok());
   EXPECT_EQ(result.status().message(),
-            "Unexpected content at end of program\n"
+            "Unexpected token '123'\n"
             "line 3, column 1:\n"
             "123\n"
             "^");
+}
+
+TEST_F(ParserTest, ErrorMessageMissingDotBetweenRules) {
+  Parser parser("p(1).\np(2)\np(3).");
+  auto result = parser.parse_program();
+  ASSERT_FALSE(result.ok());
+  EXPECT_EQ(result.status().message(),
+            "Expected '.' to end rule, got 'p'\n"
+            "line 3, column 1:\n"
+            "p(3).\n"
+            "^");
+}
+
+TEST_F(ParserTest, ErrorMessageMissingDotAtEndOfProgram) {
+  Parser parser("p(1). p(X) :- not r(X)");
+  auto result = parser.parse_program();
+  ASSERT_FALSE(result.ok());
+  EXPECT_EQ(result.status().message(),
+            "Expected '.' to end rule, got ''\n"
+            "line 1, column 23:\n"
+            "p(1). p(X) :- not r(X)\n"
+            "                      ^");
 }
 
 }  // namespace

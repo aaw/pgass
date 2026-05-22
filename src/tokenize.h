@@ -61,6 +61,8 @@ class Lexer {
     return report_context(last_token_start_);
   }
 
+  size_t last_token_pos() const { return last_token_start_; }
+
   Token next() {
     // Skip any whitespace or comments.
     bool did_work = true;
