@@ -121,7 +121,7 @@ TEST_F(SafetyTest, TestAggregationBoundAlmostPropagation) {
 TEST_F(SafetyTest, TestAggregationLocalScopeDoesNotLeak) {
   // We should recognize variables local to aggregations _only_ in their scopes
   // and not let them leak outside to other expressions.
-  std::string_view src = "p(X) :- q(X), #sum{S : S = X + 1}, B = S + Z.";
+  std::string_view src = "p(X) :- q(X), #sum{S : S = X + 1}, B = S + X.";
   Parser parser(src);
   auto prog = parser.parse_program();
   ASSERT_TRUE(prog.ok()) << prog.status();
@@ -139,8 +139,7 @@ TEST_F(SafetyTest, TestNafAggregateDoesNotBind) {
 }
 
 TEST_F(SafetyTest, TestGlobalsDoNotLeakAcrossStatements) {
-  std::string_view src =
-      "p(X, Y) :- q(X), Y = X. r(X, Y) :- q(X), Y + 1 = X.";
+  std::string_view src = "p(X, Y) :- q(X), Y = X. r(X, Y) :- q(X), Y + 1 = X.";
   Parser parser(src);
   auto prog = parser.parse_program();
   ASSERT_TRUE(prog.ok()) << prog.status();
