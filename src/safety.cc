@@ -1,7 +1,14 @@
 #include "safety.h"
 
+#include <algorithm>
+#include <string>
+#include <vector>
+
 #include "absl/container/flat_hash_set.h"
 #include "absl/log/check.h"
+#include "absl/status/status.h"
+#include "absl/strings/str_cat.h"
+#include "absl/strings/str_join.h"
 
 // ASP safety requires that every variable in a rule body be bound: reachable
 // by ground values without guessing. The three binding sources are:
@@ -117,9 +124,56 @@ void propagate_naf_literal(const NafLiteral* naf_lit,
   }
 }
 
+// Returns "line N: <source line text>" for the line at byte offset pos.
+std::string format_source_line(std::string_view source, size_t pos) {
+  size_t clamped = std::min(pos, source.size());
+  int line = 1;
+  size_t line_start = 0;
+  for (size_t i = 0; i < clamped; ++i) {
+    if (source[i] == '\n') {
+      ++line;
+      line_start = i + 1;
+    }
+  }
+  size_t line_end = line_start;
+  while (line_end < source.size() && source[line_end] != '\n') ++line_end;
+  return absl::StrCat("line ", line, ": ",
+                      source.substr(line_start, line_end - line_start));
+}
+
+// Returns a human-readable label for a rule's head (e.g. "p/2", "{p/1; q/2}",
+// or "integrity constraint").
+std::string head_description(const Statement& stmt) {
+  if (stmt.head == nullptr) return "integrity constraint";
+  if (auto* disj = dynamic_cast<const Disjunction*>(stmt.head.get())) {
+    std::string result;
+    for (const auto& lit : disj->literals) {
+      if (!result.empty()) result += " | ";
+      absl::StrAppend(&result, lit->id, "/",
+                      lit->args ? lit->args->size() : 0);
+    }
+    return result;
+  }
+  if (auto* choice = dynamic_cast<const Choice*>(stmt.head.get())) {
+    if (!choice->elements) return "{}";
+    std::string result = "{";
+    bool first = true;
+    for (const auto& elem : *(choice->elements)) {
+      if (!first) result += "; ";
+      first = false;
+      absl::StrAppend(&result, elem->literal->id, "/",
+                      elem->literal->args ? elem->literal->args->size() : 0);
+    }
+    result += "}";
+    return result;
+  }
+  return "rule";
+}
+
 }  // namespace
 
-bool verify_safe(const Program& prog) {
+absl::Status verify_safe(const Program& prog) {
+  std::string_view source = prog.source;
   for (const auto& statement : *(prog.statements)) {
     if (statement->body == nullptr) continue;
 
@@ -186,8 +240,23 @@ bool verify_safe(const Program& prog) {
       }
     } while (prev_num_bound < bound_vars.size());
 
-    if (!is_subset(vars, bound_vars)) return false;
-    if (!is_subset(aggregates, bound_aggregates)) return false;
+    if (!is_subset(vars, bound_vars)) {
+      std::vector<std::string> unbound;
+      for (std::string_view v : vars) {
+        if (!bound_vars.contains(v)) unbound.push_back(std::string(v));
+      }
+      std::sort(unbound.begin(), unbound.end());
+      return absl::InvalidArgumentError(absl::StrCat(
+          format_source_line(source, statement->source_pos), "\n",
+          "unsafe variable", (unbound.size() == 1 ? "" : "s"),
+          " in rule '", head_description(*statement), "': ",
+          absl::StrJoin(unbound, ", ")));
+    }
+    if (!is_subset(aggregates, bound_aggregates)) {
+      return absl::InvalidArgumentError(absl::StrCat(
+          format_source_line(source, statement->source_pos), "\n",
+          "unsafe aggregate in rule '", head_description(*statement), "'"));
+    }
   }
 
   // We've checked all the statements in the program for safety at this point.
@@ -197,5 +266,5 @@ bool verify_safe(const Program& prog) {
   // (e.g., p(X, 1, a)? means "does there exist an X such that p(X, 1, a) is
   // produced?") so there are no more questions of binding/safety at this point.
 
-  return true;
+  return absl::OkStatus();
 }

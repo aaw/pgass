@@ -41,6 +41,10 @@ int main(int argc, char** argv) {
     return 1;
   }
 
-  CHECK(verify_safe(**program));
+  auto safety = verify_safe(**program);
+  if (!safety.ok()) {
+    std::cerr << "pgass: " << safety.message() << "\n";
+    return 1;
+  }
   return 0;
 }

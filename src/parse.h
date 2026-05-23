@@ -51,6 +51,7 @@ class Parser {
           lexer_.report_last_token_pos()));
     }
 
+    program->source = lexer_.source();
     return program;
   }
 
@@ -83,6 +84,7 @@ class Parser {
   */
   absl::StatusOr<std::unique_ptr<Statement>> parse_statement() {
     auto statement = std::make_unique<Statement>();
+    statement->source_pos = lexer_.next_token_pos();
 
     // First, try to parse the head-less productions that start with CONS/WCONS.
     {

@@ -56,6 +56,7 @@ struct Statement {
   std::unique_ptr<Head> head;
   std::unique_ptr<Body> body;
   std::unique_ptr<Weight> weight;
+  size_t source_pos = 0;
 };
 
 using Statements = std::unique_ptr<std::vector<std::unique_ptr<Statement>>>;
@@ -163,6 +164,7 @@ struct Query {
 struct Program {
   Statements statements;
   std::unique_ptr<Query> query;
+  std::string_view source;
 };
 
 struct Predicate : Term {

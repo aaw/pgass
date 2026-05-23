@@ -55,6 +55,8 @@ class Lexer {
  public:
   explicit Lexer(std::string_view source) : source_(source) {}
 
+  std::string_view source() const { return source_; }
+
   std::string report_pos() { return report_context(pos_); }
 
   std::string report_last_token_pos() {
@@ -63,34 +65,18 @@ class Lexer {
 
   size_t last_token_pos() const { return last_token_start_; }
 
+  // Returns the byte offset of the next non-whitespace/comment token without
+  // consuming any input.
+  size_t next_token_pos() const {
+    size_t p = pos_;
+    skip_whitespace(p);
+    return p;
+  }
+
   Token next() {
-    // Skip any whitespace or comments.
-    bool did_work = true;
-    while (did_work) {
-      did_work = false;
-      while (pos_ < source_.size() &&
-             (source_[pos_] == ' ' || source_[pos_] == '\t' ||
-              source_[pos_] == '\n')) {
-        did_work = true;
-        ++pos_;
-      }
-      if (pos_ < source_.size() && source_[pos_] == '%') {
-        did_work = true;
-        if (++pos_ >= source_.size()) break;
-        if (source_[pos_] == '*') {
-          while (pos_ < source_.size() - 1 && source_.substr(pos_, 2) != "*%")
-            ++pos_;
-          if (pos_ >= source_.size() - 1)
-            return Token{
-                .type = TokenType::kERROR,
-                .val = "Unterminated multi-line comment at end-of-file"};
-          pos_ += 2;
-        } else {
-          while (pos_ < source_.size() && source_[pos_] != '\n') ++pos_;
-          ++pos_;
-        }
-      }
-    }
+    if (!skip_whitespace(pos_))
+      return Token{.type = TokenType::kERROR,
+                   .val = "Unterminated multi-line comment at end-of-file"};
 
     last_token_start_ = pos_;
 
@@ -202,6 +188,33 @@ class Lexer {
 
   std::size_t checkpoint() { return pos_; }
   void rewind(std::size_t checkpoint_id) { pos_ = checkpoint_id; }
+
+  // Advances p past whitespace and comments. Returns false if an unterminated
+  // block comment is encountered.
+  bool skip_whitespace(size_t& p) const {
+    bool did_work = true;
+    while (did_work) {
+      did_work = false;
+      while (p < source_.size() && (source_[p] == ' ' || source_[p] == '\t' ||
+                                    source_[p] == '\n')) {
+        did_work = true;
+        ++p;
+      }
+      if (p < source_.size() && source_[p] == '%') {
+        did_work = true;
+        if (++p >= source_.size()) break;
+        if (source_[p] == '*') {
+          while (p < source_.size() - 1 && source_.substr(p, 2) != "*%") ++p;
+          if (p >= source_.size() - 1) return false;
+          p += 2;
+        } else {
+          while (p < source_.size() && source_[p] != '\n') ++p;
+          ++p;
+        }
+      }
+    }
+    return true;
+  }
 
   std::string report_context(size_t error_pos) {
     size_t clamped = std::min(error_pos, source_.size());
