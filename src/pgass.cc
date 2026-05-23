@@ -7,8 +7,9 @@
 #include "absl/flags/parse.h"
 #include "absl/flags/usage.h"
 #include "absl/log/check.h"
-#include "safety.h"
+#include "absl/strings/str_cat.h"
 #include "parse.h"
+#include "safety.h"
 
 int main(int argc, char** argv) {
   absl::SetProgramUsageMessage(
@@ -29,8 +30,9 @@ int main(int argc, char** argv) {
         return 1;
       }
       if (!source.empty()) source += '\n';
-      source += std::string(std::istreambuf_iterator<char>(f),
-                            std::istreambuf_iterator<char>());
+      source =
+          absl::StrCat(source, std::string(std::istreambuf_iterator<char>(f),
+                                           std::istreambuf_iterator<char>()));
     }
   }
 
@@ -43,7 +45,7 @@ int main(int argc, char** argv) {
 
   auto safety = verify_safe(**program);
   if (!safety.ok()) {
-    std::cerr << "pgass: " << safety.message() << "\n";
+    std::cerr << "pgass: safety error: " << safety.message() << "\n";
     return 1;
   }
   return 0;
