@@ -327,7 +327,9 @@ std::string format(const Program& prog) {
     format_statement(&fmt, *statement);
     absl::StrAppend(&fmt, "\n");
   }
-  format_query(&fmt, *prog.query);
-  absl::StrAppend(&fmt, "\n");
+  if (prog.query) {
+    format_query(&fmt, *prog.query);
+    absl::StrAppend(&fmt, "\n");
+  }
   return fmt;
 }
