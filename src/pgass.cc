@@ -8,14 +8,17 @@
 #include "absl/flags/usage.h"
 #include "absl/log/check.h"
 #include "absl/strings/str_cat.h"
+#include "format.h"
 #include "normalize.h"
 #include "parse.h"
 #include "safety.h"
 
+ABSL_FLAG(bool, format, false, "Format the program and print to stdout");
+
 int main(int argc, char** argv) {
   absl::SetProgramUsageMessage(
       "Parse and ground an ASP program.\n"
-      "Usage: pgass [source_file ...]\n"
+      "Usage: pgass [--format] [source_file ...]\n"
       "  Files are concatenated; reads from stdin if none are given.");
   std::vector<char*> positional = absl::ParseCommandLine(argc, argv);
 
@@ -42,6 +45,11 @@ int main(int argc, char** argv) {
   if (!program.ok()) {
     std::cerr << "pgass: parse error: " << program.status().message() << "\n";
     return 1;
+  }
+
+  if (absl::GetFlag(FLAGS_format)) {
+    std::cout << format(**program);
+    return 0;
   }
 
   auto safety = verify_safe(**program);

@@ -68,6 +68,7 @@ add_executable(pgass src/pgass.cc)
 target_compile_options(pgass PRIVATE -Wall -Wextra -Werror)
 target_link_libraries(pgass
   PRIVATE
+    format_lib
     normalize_lib
     safety_lib
     absl::check
