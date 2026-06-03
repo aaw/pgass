@@ -146,7 +146,7 @@ absl::StatusOr<std::unique_ptr<Statement>> Parser::parse_statement() {
 absl::StatusOr<std::unique_ptr<Term>> Parser::parse_basic_term() {
   Token token = lexer_.next();
   if (token.type == TokenType::kID) {
-    return std::make_unique<Predicate>(std::string(token.val), nullptr);
+    return std::make_unique<Atom>(std::string(token.val), nullptr);
   } else if (token.type == TokenType::kSTRING) {
     return std::make_unique<String>(token.val);
   } else if (token.type == TokenType::kNUMBER) {
@@ -686,10 +686,9 @@ absl::StatusOr<std::unique_ptr<Term>> Parser::parse_single_term() {
       }
 
       CONSUME_TOKEN_TYPE_OR_RETURN(lexer_, TokenType::kPAREN_CLOSE);
-      return std::make_unique<Predicate>(std::string(token.val),
-                                         std::move(terms));
+      return std::make_unique<Atom>(std::string(token.val), std::move(terms));
     }
-    return std::make_unique<Predicate>(std::string(token.val), nullptr);
+    return std::make_unique<Atom>(std::string(token.val), nullptr);
   } else if (token.type == TokenType::kNUMBER) {
     uint64_t number;
     if (!absl::SimpleAtoi(token.val, &number)) {

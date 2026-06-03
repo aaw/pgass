@@ -8,6 +8,7 @@
 #include "absl/flags/usage.h"
 #include "absl/log/check.h"
 #include "absl/strings/str_cat.h"
+#include "normalize.h"
 #include "parse.h"
 #include "safety.h"
 
@@ -46,6 +47,13 @@ int main(int argc, char** argv) {
   auto safety = verify_safe(**program);
   if (!safety.ok()) {
     std::cerr << "pgass: safety error: " << safety.message() << "\n";
+    return 1;
+  }
+  return 0;
+
+  auto normal = normalize(**program);
+  if (!normal.ok()) {
+    std::cerr << "pgass: normalization error: " << normal.message() << "\n";
     return 1;
   }
   return 0;

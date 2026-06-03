@@ -33,14 +33,13 @@ bool is_subset(const absl::flat_hash_set<T>& a,
   return true;
 }
 
-
 // Collects all variable names appearing anywhere in `term` into `vars`.
 void collect_vars_in_term(const std::unique_ptr<Term>& term,
                           absl::flat_hash_set<std::string_view>& vars) {
   switch (term->kind) {
-    case Term::PredicateKind: {
-      auto* predicate = static_cast<Predicate*>(term.get());
-      for (const auto& pterm : *(predicate->args)) {
+    case Term::AtomKind: {
+      auto* atom = static_cast<Atom*>(term.get());
+      for (const auto& pterm : *(atom->args)) {
         collect_vars_in_term(pterm, vars);
       }
       break;
@@ -91,8 +90,12 @@ void propagate_atom_bindings(const BuiltinAtom* atom,
     std::string_view v = *rhs_vars.begin();
     bound_vars.insert(v);
   }
-  for (std::string_view v : lhs_vars) { vars.insert(v); }
-  for (std::string_view v : rhs_vars) { vars.insert(v); }
+  for (std::string_view v : lhs_vars) {
+    vars.insert(v);
+  }
+  for (std::string_view v : rhs_vars) {
+    vars.insert(v);
+  }
 }
 
 // Updates `bound_vars` and `vars` for a (possibly negated) literal.
@@ -149,8 +152,7 @@ std::string head_description(const Statement& stmt) {
     std::string result;
     for (const auto& lit : disj->literals) {
       if (!result.empty()) result += " | ";
-      absl::StrAppend(&result, lit->id, "/",
-                      lit->args ? lit->args->size() : 0);
+      absl::StrAppend(&result, lit->id, "/", lit->args ? lit->args->size() : 0);
     }
     return result;
   }
@@ -248,9 +250,8 @@ absl::Status verify_safe(const Program& prog) {
       std::sort(unbound.begin(), unbound.end());
       return absl::InvalidArgumentError(absl::StrCat(
           format_source_line(source, statement->source_pos), "\n",
-          "unsafe variable", (unbound.size() == 1 ? "" : "s"),
-          " in rule '", head_description(*statement), "': ",
-          absl::StrJoin(unbound, ", ")));
+          "unsafe variable", (unbound.size() == 1 ? "" : "s"), " in rule '",
+          head_description(*statement), "': ", absl::StrJoin(unbound, ", ")));
     }
     if (!is_subset(aggregates, bound_aggregates)) {
       return absl::InvalidArgumentError(absl::StrCat(

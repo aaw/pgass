@@ -8,12 +8,17 @@
 #include <vector>
 
 struct Head {
+  enum Kind { ChoiceKind, DisjunctionKind };
+  Kind kind;
   virtual ~Head() = default;
+
+ protected:
+  Head(Kind k) : kind(k) {}
 };
 
 struct Term {
   enum Kind {
-    PredicateKind,
+    AtomKind,
     NumberKind,
     StringKind,
     VariableKind,
@@ -96,7 +101,7 @@ struct NafLiteral : BodyItem {
 using NafLiterals = std::unique_ptr<std::vector<std::unique_ptr<NafLiteral>>>;
 
 struct AggregateElement {
-  Terms terms;
+  Terms terms;  // These are actually "basic" terms, see grammar for details.
   NafLiterals literals;
 
   AggregateElement(Terms t, NafLiterals l)
@@ -136,6 +141,8 @@ struct ClassicalLiteral : Literal {
 
 struct Disjunction : Head {
   std::vector<std::unique_ptr<ClassicalLiteral>> literals;
+
+  Disjunction() : Head(DisjunctionKind) {}
 };
 
 struct ChoiceElement {
@@ -155,6 +162,8 @@ struct Choice : Head {
   std::unique_ptr<Term> ub_term;
   BinopType ub_op;  // only valid if ub_term != nullptr;
   ChoiceElements elements;
+
+  Choice() : Head(ChoiceKind) {}
 };
 
 struct Query {
@@ -167,12 +176,12 @@ struct Program {
   std::string_view source;
 };
 
-struct Predicate : Term {
+struct Atom : Term {
   std::string name;
   Terms args;
 
-  Predicate(std::string name, Terms args)
-      : Term(PredicateKind), name(std::move(name)), args(std::move(args)) {}
+  Atom(std::string name, Terms args)
+      : Term(AtomKind), name(std::move(name)), args(std::move(args)) {}
 };
 
 struct Number : Term {

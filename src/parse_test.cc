@@ -67,10 +67,10 @@ TEST_F(ParserTest, ParseSingleTermId) {
   auto term_status = parser.parse_single_term();
   ASSERT_TRUE(term_status.ok()) << term_status.status();
   auto term = std::move(*term_status);
-  auto* pred = dynamic_cast<Predicate*>(term.get());
-  ASSERT_NE(pred, nullptr);
-  EXPECT_EQ(pred->name, "p");
-  EXPECT_EQ(pred->args, nullptr);
+  auto* atom = dynamic_cast<Atom*>(term.get());
+  ASSERT_NE(atom, nullptr);
+  EXPECT_EQ(atom->name, "p");
+  EXPECT_EQ(atom->args, nullptr);
 }
 
 TEST_F(ParserTest, ParseSingleTermNumber) {
