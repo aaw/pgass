@@ -4,6 +4,12 @@
 #define CONCAT_IMPL(x, y) x##y
 #define CONCAT(x, y) CONCAT_IMPL(x, y)
 
+#define RETURN_IF_ERROR(expr)    \
+  do {                           \
+    auto _s = (expr);            \
+    if (!_s.ok()) return _s;     \
+  } while (0)
+
 #define ASSIGN_OR_RETURN(lhs, rexpr)              \
   auto CONCAT(status_or_, __LINE__) = (rexpr);    \
   if (!CONCAT(status_or_, __LINE__).ok()) {       \

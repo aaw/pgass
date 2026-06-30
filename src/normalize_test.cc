@@ -42,7 +42,12 @@ std::string Strip(const std::string& str) {
 }
 
 MATCHER_P(EquivalentToSource, expected, "") {
-  return Strip(format(arg)) == Strip(expected);
+  std::string actual = Strip(format(arg));
+  std::string want = Strip(expected);
+  if (actual == want) return true;
+  *result_listener << "formatted source did not match.\n  actual:   " << actual
+                   << "\n  expected: " << want;
+  return false;
 }
 
 TEST_F(NormalizeTest, TestNoNormalization) {
@@ -55,10 +60,28 @@ TEST_F(NormalizeTest, TestNoNormalization) {
   Parser parser(program);
   auto prog = parser.parse_program();
   ASSERT_TRUE(prog.ok()) << prog.status();
-
   ASSERT_TRUE(normalize(**prog).ok());
 
   EXPECT_THAT(**prog, EquivalentToSource(program));
+}
+
+TEST_F(NormalizeTest, TestNormalizeIntegrityConstraints) {
+  std::string program = R"(
+    :- good(a), not bad(b).
+    :- edge(X, Y).
+    reachable(a, b)?
+  )";
+
+  Parser parser(program);
+  auto prog = parser.parse_program();
+  ASSERT_TRUE(prog.ok()) << prog.status();
+  ASSERT_TRUE(normalize(**prog).ok());
+
+  EXPECT_THAT(**prog, EquivalentToSource(R"(
+    _ic0 :- good(a), not bad(b), not _ic0.
+    _ic1 :- edge(X, Y), not _ic1.
+    reachable(a, b)?
+  )"));
 }
 
 }  // namespace

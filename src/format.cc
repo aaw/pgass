@@ -82,9 +82,12 @@ void format_terms(std::string* fmt, const Terms& terms) {
 
 void format_classical_literal(std::string* fmt, const ClassicalLiteral& lit) {
   if (lit.negated) absl::StrAppend(fmt, "-");
-  absl::StrAppend(fmt, lit.id, "(");
-  format_terms(fmt, lit.args);
-  absl::StrAppend(fmt, ")");
+  absl::StrAppend(fmt, lit.id);
+  if (lit.args != nullptr) {
+    absl::StrAppend(fmt, "(");
+    format_terms(fmt, lit.args);
+    absl::StrAppend(fmt, ")");
+  }
 }
 
 void format_binop(std::string* fmt, BinopType binop) {
