@@ -27,7 +27,7 @@ set(ABSL_PROPAGATE_CXX_STD ON CACHE BOOL "" FORCE)
 
 FetchContent_MakeAvailable(googletest abseil-cpp)
 
-add_library(parse_lib STATIC src/parse.cc)
+add_library(parse_lib STATIC src/parse.cc src/ast.cc)
 target_compile_options(parse_lib PRIVATE -Wall -Wextra -Werror)
 target_include_directories(parse_lib PUBLIC src)
 target_link_libraries(parse_lib

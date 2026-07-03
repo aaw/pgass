@@ -84,4 +84,60 @@ TEST_F(NormalizeTest, TestNormalizeIntegrityConstraints) {
   )"));
 }
 
+TEST_F(NormalizeTest, TestNormalizeChoiceRuleSimple) {
+  std::string program = R"(
+    { p1; p2; p3 } :- q1.
+  )";
+
+  Parser parser(program);
+  auto prog = parser.parse_program();
+  ASSERT_TRUE(prog.ok()) << prog.status();
+  ASSERT_TRUE(normalize(**prog).ok());
+
+  EXPECT_THAT(**prog, EquivalentToSource(R"(
+    p1 | _cr0 :- q1.
+    p2 | _cr1 :- q1.
+    p3 | _cr2 :- q1.
+  )"));
+}
+
+TEST_F(NormalizeTest, TestNormalizeChoiceRuleComplex) {
+  std::string program = R"(
+    1 < { a : a1, a2; b; c : c1, c2; d; e } <= 4 :- x, y, not z.
+  )";
+
+  Parser parser(program);
+  auto prog = parser.parse_program();
+  ASSERT_TRUE(prog.ok()) << prog.status();
+  ASSERT_TRUE(normalize(**prog).ok());
+
+  EXPECT_THAT(**prog, EquivalentToSource(R"(
+    a | _cr0 :- a1, a2, x, y, not z.
+    b | _cr1 :- x, y, not z.
+    c | _cr2 :- c1, c2, x, y, not z.
+    d | _cr3 :- x, y, not z.
+    e | _cr4 :- x, y, not z.
+    _ic0 :- x, y, not z, not 1 < #count{ _cr0: a, a1, a2, _cr1: b, _cr2: c, c1, c2, _cr3: d, _cr4: e } <= 4, not _ic0.
+  )"));
+}
+
+TEST_F(NormalizeTest, TestNormalizeMultipleChoiceRules) {
+  std::string program = R"(
+    { p1; p2 } :- q1.
+    { r1; r2 } :- s1.
+  )";
+
+  Parser parser(program);
+  auto prog = parser.parse_program();
+  ASSERT_TRUE(prog.ok()) << prog.status();
+  ASSERT_TRUE(normalize(**prog).ok());
+
+  EXPECT_THAT(**prog, EquivalentToSource(R"(
+    p1 | _cr0 :- q1.
+    p2 | _cr1 :- q1.
+    r1 | _cr2 :- s1.
+    r2 | _cr3 :- s1.
+  )"));
+}
+
 }  // namespace

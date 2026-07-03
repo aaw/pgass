@@ -29,6 +29,8 @@ struct Term {
   Kind kind;
   virtual ~Term() = default;
 
+  virtual std::unique_ptr<Term> clone() const = 0;
+
  protected:
   Term(Kind k) : kind(k) {}
 };
@@ -40,8 +42,15 @@ struct BodyItem {
   Kind kind;
   virtual ~BodyItem() = default;
 
+  std::unique_ptr<BodyItem> clone() const {
+    return std::unique_ptr<BodyItem>(clone_impl());
+  }
+
  protected:
   BodyItem(Kind k) : kind(k) {}
+  // Covariant raw-pointer clone, so derived classes can expose a clone() that
+  // returns their own concrete type (see NafLiteral).
+  virtual BodyItem* clone_impl() const = 0;
 };
 
 struct Body {
@@ -80,8 +89,15 @@ struct Literal {
   Kind kind;
   virtual ~Literal() = default;
 
+  std::unique_ptr<Literal> clone() const {
+    return std::unique_ptr<Literal>(clone_impl());
+  }
+
  protected:
   Literal(Kind k) : kind(k) {}
+  // Covariant raw-pointer clone, so ClassicalLiteral can expose a clone() that
+  // returns std::unique_ptr<ClassicalLiteral>.
+  virtual Literal* clone_impl() const = 0;
 };
 
 enum class AggregateFunctionType {
@@ -96,6 +112,13 @@ struct NafLiteral : BodyItem {
   std::unique_ptr<Literal> literal;
 
   NafLiteral() : BodyItem(NafLiteralKind), naf(false) {}
+
+  std::unique_ptr<NafLiteral> clone() const {
+    return std::unique_ptr<NafLiteral>(clone_impl());
+  }
+
+ protected:
+  NafLiteral* clone_impl() const override;  // covariant with BodyItem*
 };
 
 using NafLiterals = std::unique_ptr<std::vector<std::unique_ptr<NafLiteral>>>;
@@ -106,6 +129,8 @@ struct AggregateElement {
 
   AggregateElement(Terms t, NafLiterals l)
       : terms(std::move(t)), literals(std::move(l)) {}
+
+  std::unique_ptr<AggregateElement> clone() const;
 };
 
 using AggregateElements =
@@ -121,6 +146,9 @@ struct Aggregate : BodyItem {
   AggregateElements elements;
 
   Aggregate() : BodyItem(AggregateKind) {}
+
+ protected:
+  Aggregate* clone_impl() const override;  // covariant with BodyItem*
 };
 
 struct BuiltinAtom : Literal {
@@ -129,6 +157,9 @@ struct BuiltinAtom : Literal {
   BinopType op;
 
   BuiltinAtom() : Literal(BuiltinAtomKind), op(BinopType::kEQUAL) {}
+
+ protected:
+  BuiltinAtom* clone_impl() const override;  // covariant with Literal*
 };
 
 struct ClassicalLiteral : Literal {
@@ -137,6 +168,13 @@ struct ClassicalLiteral : Literal {
   Terms args;
 
   ClassicalLiteral() : Literal(ClassicalLiteralKind), negated(false) {}
+
+  std::unique_ptr<ClassicalLiteral> clone() const {
+    return std::unique_ptr<ClassicalLiteral>(clone_impl());
+  }
+
+ protected:
+  ClassicalLiteral* clone_impl() const override;  // covariant with Literal*
 };
 
 struct Disjunction : Head {
@@ -182,12 +220,16 @@ struct Atom : Term {
 
   Atom(std::string name, Terms args)
       : Term(AtomKind), name(std::move(name)), args(std::move(args)) {}
+
+  std::unique_ptr<Term> clone() const override;
 };
 
 struct Number : Term {
   std::uint64_t value;  // TODO: use an unlimited precision bignum
 
   Number(std::uint64_t value) : Term(NumberKind), value(value) {}
+
+  std::unique_ptr<Term> clone() const override;
 };
 
 struct String : Term {
@@ -195,6 +237,8 @@ struct String : Term {
 
   String(std::string_view value)
       : Term(StringKind), value(std::string(value)) {}
+
+  std::unique_ptr<Term> clone() const override;
 };
 
 struct Variable : Term {
@@ -202,10 +246,14 @@ struct Variable : Term {
 
   Variable(std::string_view name)
       : Term(VariableKind), name(std::string(name)) {}
+
+  std::unique_ptr<Term> clone() const override;
 };
 
 struct AnonymousVariable : Term {
   AnonymousVariable() : Term(AnonymousVariableKind) {}
+
+  std::unique_ptr<Term> clone() const override;
 };
 
 struct NegatedTerm : Term {
@@ -213,6 +261,8 @@ struct NegatedTerm : Term {
 
   NegatedTerm(std::unique_ptr<Term> term)
       : Term(NegatedTermKind), term(std::move(term)) {}
+
+  std::unique_ptr<Term> clone() const override;
 };
 
 enum class OperationType { kPLUS, kMINUS, kTIMES, kDIV };
@@ -228,6 +278,8 @@ struct TermOperation : Term {
         op(o),
         left(std::move(l)),
         right(std::move(r)) {}
+
+  std::unique_ptr<Term> clone() const override;
 };
 
 #endif  // AST_H_

@@ -196,7 +196,7 @@ void format_head(std::string* fmt, const Head& head) {
     }
     case Head::DisjunctionKind: {
       const Disjunction& disjunction = static_cast<const Disjunction&>(head);
-      absl::StrAppend(fmt, absl::StrJoin(disjunction.literals, " OR ",
+      absl::StrAppend(fmt, absl::StrJoin(disjunction.literals, " | ",
                                          [](std::string* out, const auto& lit) {
                                            format_classical_literal(out, *lit);
                                          }));
