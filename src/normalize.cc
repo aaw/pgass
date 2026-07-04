@@ -1,10 +1,79 @@
 #include "normalize.h"
 
+#include <cstddef>
+#include <string>
+#include <utility>
+
+#include "absl/container/btree_set.h"
 #include "absl/strings/str_cat.h"
 #include "collect.h"
 #include "macros.h"
 
 namespace {
+
+// Builds an argument list of `arity` fresh variables 'X0', 'X1', ..., or
+// nullptr when arity is 0 so an atom formats as 'p' rather than 'p()'.
+Terms fresh_variable_args(size_t arity) {
+  if (arity == 0) return nullptr;
+  auto args = std::make_unique<std::vector<std::unique_ptr<Term>>>();
+  for (size_t k = 0; k < arity; ++k) {
+    args->push_back(std::make_unique<Variable>(absl::StrCat("X", k)));
+  }
+  return args;
+}
+
+// Wraps a fresh classical atom 'id(args)' in a non-negated body item.
+std::unique_ptr<BodyItem> positive_atom_item(const std::string& id,
+                                             Terms args) {
+  auto literal = std::make_unique<ClassicalLiteral>();
+  literal->id = id;
+  literal->args = std::move(args);
+  auto naf = std::make_unique<NafLiteral>();
+  naf->literal = std::move(literal);
+  return naf;
+}
+
+/* Eliminate classical (strong) negation by renaming each classically negated
+   literal '-p(args)' to a fresh positive predicate '_neg_p(args)', then, for
+   every predicate p/n that occurred negated, appending an integrity constraint
+   forbidding p and its negation from both holding:
+
+     :- p(X0, ..., Xn-1), _neg_p(X0, ..., Xn-1).
+*/
+absl::Status remove_classical_negation(Program& prog) {
+  // Predicate name / arity pairs seen classically negated. Ordered so the
+  // appended constraints are emitted deterministically.
+  absl::btree_set<std::pair<std::string, size_t>> negated;
+  auto rewrite = [&](ClassicalLiteral& literal) {
+    if (!literal.negated) return;
+    size_t arity = literal.args ? literal.args->size() : 0;
+    negated.emplace(literal.id, arity);
+    literal.id = absl::StrCat("_neg_", literal.id);
+    literal.negated = false;
+  };
+
+  for (auto& statement : *prog.statements) {
+    if (statement->head) {
+      collect::for_each_classical_literal(*statement->head, rewrite);
+    }
+    if (statement->body) {
+      collect::for_each_classical_literal(*statement->body, rewrite);
+    }
+  }
+  if (prog.query && prog.query->lit) rewrite(*prog.query->lit);
+
+  for (const auto& [name, arity] : negated) {
+    auto items = std::make_unique<std::vector<std::unique_ptr<BodyItem>>>();
+    items->push_back(positive_atom_item(name, fresh_variable_args(arity)));
+    items->push_back(positive_atom_item(absl::StrCat("_neg_", name),
+                                        fresh_variable_args(arity)));
+    auto constraint = std::make_unique<Statement>();
+    constraint->body = std::make_unique<Body>();
+    constraint->body->items = std::move(items);
+    prog.statements->push_back(std::move(constraint));
+  }
+  return absl::OkStatus();
+}
 
 // Deep-copies the items of `body` (possibly null) into a fresh item vector.
 std::unique_ptr<std::vector<std::unique_ptr<BodyItem>>> clone_body_items(
@@ -159,6 +228,7 @@ absl::Status normalize_choice_rules(Program& prog) {
 }  // namespace
 
 absl::Status normalize(Program& prog) {
+  RETURN_IF_ERROR(remove_classical_negation(prog));
   RETURN_IF_ERROR(normalize_choice_rules(prog));
   return absl::OkStatus();
 }

@@ -121,6 +121,75 @@ TEST_F(NormalizeTest, TestNormalizeMultipleChoiceRules) {
   )"));
 }
 
+TEST_F(NormalizeTest, TestRemoveClassicalNegationSimple) {
+  std::string program = R"(
+    -p :- q.
+  )";
+
+  Parser parser(program);
+  auto prog = parser.parse_program();
+  ASSERT_TRUE(prog.ok()) << prog.status();
+  ASSERT_TRUE(normalize(**prog).ok());
+
+  EXPECT_THAT(**prog, EquivalentToSource(R"(
+    _neg_p :- q.
+    :- p, _neg_p.
+  )"));
+}
+
+TEST_F(NormalizeTest, TestRemoveClassicalNegationWithArgs) {
+  std::string program = R"(
+    -p(X) :- q(X).
+  )";
+
+  Parser parser(program);
+  auto prog = parser.parse_program();
+  ASSERT_TRUE(prog.ok()) << prog.status();
+  ASSERT_TRUE(normalize(**prog).ok());
+
+  EXPECT_THAT(**prog, EquivalentToSource(R"(
+    _neg_p(X) :- q(X).
+    :- p(X0), _neg_p(X0).
+  )"));
+}
+
+TEST_F(NormalizeTest, TestRemoveClassicalNegationInBodyAndQuery) {
+  std::string program = R"(
+    r :- -p, not -q.
+    -p?
+  )";
+
+  Parser parser(program);
+  auto prog = parser.parse_program();
+  ASSERT_TRUE(prog.ok()) << prog.status();
+  ASSERT_TRUE(normalize(**prog).ok());
+
+  EXPECT_THAT(**prog, EquivalentToSource(R"(
+    r :- _neg_p, not _neg_q.
+    :- p, _neg_p.
+    :- q, _neg_q.
+    _neg_p?
+  )"));
+}
+
+TEST_F(NormalizeTest, TestRemoveClassicalNegationOneConstraintPerPredicate) {
+  std::string program = R"(
+    -p :- a.
+    -p :- b.
+  )";
+
+  Parser parser(program);
+  auto prog = parser.parse_program();
+  ASSERT_TRUE(prog.ok()) << prog.status();
+  ASSERT_TRUE(normalize(**prog).ok());
+
+  EXPECT_THAT(**prog, EquivalentToSource(R"(
+    _neg_p :- a.
+    _neg_p :- b.
+    :- p, _neg_p.
+  )"));
+}
+
 TEST_F(NormalizeTest, TestNormalizeChoiceWithVars) {
   std::string program = R"(
     { p(X, Y) : q(X) } <= 1 :- r(Y).

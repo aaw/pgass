@@ -33,6 +33,16 @@ void collect_variables(const Literal& literal,
 void collect_variables(const Term& term, std::vector<std::string>& out);
 void collect_variables(const Literal& literal, std::vector<std::string>& out);
 
+// Invokes `visit` on every ClassicalLiteral reachable through the node, in
+// left-to-right order. The reference is mutable so callers can rewrite literals
+// in place (e.g. eliminating classical negation). BuiltinAtoms carry no
+// predicate id and are skipped.
+using ClassicalLiteralVisitor = std::function<void(ClassicalLiteral&)>;
+void for_each_classical_literal(Head& head,
+                                const ClassicalLiteralVisitor& visit);
+void for_each_classical_literal(Body& body,
+                                const ClassicalLiteralVisitor& visit);
+
 }  // namespace collect
 
 #endif  // COLLECT_H_

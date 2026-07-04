@@ -62,6 +62,7 @@ target_link_libraries(normalize_lib
   PUBLIC
     parse_lib
   PRIVATE
+    absl::btree
     absl::check
     absl::flat_hash_set
     collect_lib

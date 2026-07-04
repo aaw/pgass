@@ -59,6 +59,20 @@ void push_unique(std::string_view name, std::vector<std::string>& out) {
   }
 }
 
+void for_each_classical_literal(Literal& literal,
+                                const ClassicalLiteralVisitor& visit) {
+  if (literal.kind == Literal::ClassicalLiteralKind) {
+    visit(static_cast<ClassicalLiteral&>(literal));
+  }
+}
+
+void for_each_classical_literal(std::vector<std::unique_ptr<NafLiteral>>& nafs,
+                                const ClassicalLiteralVisitor& visit) {
+  for (auto& naf : nafs) {
+    if (naf->literal) for_each_classical_literal(*naf->literal, visit);
+  }
+}
+
 }  // namespace
 
 void collect_variables(const Term& term,
@@ -79,6 +93,54 @@ void collect_variables(const Term& term, std::vector<std::string>& out) {
 void collect_variables(const Literal& literal, std::vector<std::string>& out) {
   for_each_variable(literal,
                     [&](std::string_view name) { push_unique(name, out); });
+}
+
+void for_each_classical_literal(Head& head,
+                                const ClassicalLiteralVisitor& visit) {
+  switch (head.kind) {
+    case Head::DisjunctionKind: {
+      auto& disjunction = static_cast<Disjunction&>(head);
+      for (auto& literal : disjunction.literals) visit(*literal);
+      break;
+    }
+    case Head::ChoiceKind: {
+      auto& choice = static_cast<Choice&>(head);
+      if (choice.elements) {
+        for (auto& element : *choice.elements) {
+          if (element->literal) visit(*element->literal);
+          if (element->conditions) {
+            for_each_classical_literal(*element->conditions, visit);
+          }
+        }
+      }
+      break;
+    }
+  }
+}
+
+void for_each_classical_literal(Body& body,
+                                const ClassicalLiteralVisitor& visit) {
+  if (!body.items) return;
+  for (auto& item : *body.items) {
+    switch (item->kind) {
+      case BodyItem::NafLiteralKind: {
+        auto& naf = static_cast<NafLiteral&>(*item);
+        if (naf.literal) for_each_classical_literal(*naf.literal, visit);
+        break;
+      }
+      case BodyItem::AggregateKind: {
+        auto& aggregate = static_cast<Aggregate&>(*item);
+        if (aggregate.elements) {
+          for (auto& element : *aggregate.elements) {
+            if (element->literals) {
+              for_each_classical_literal(*element->literals, visit);
+            }
+          }
+        }
+        break;
+      }
+    }
+  }
 }
 
 }  // namespace collect

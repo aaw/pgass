@@ -27,8 +27,6 @@ Normalization
   has no answer sets. What does clingo do for this type of program? I think we should reject
   during normalization if we detect.
 
-* Remove classical negation: -p becomes _neg_p along with new rule ":- p, _neg_p"
-
 * Rewrite weak constraints. ":~ node(X), color(X, red). [1@0, X]" becomes
   "_viol(0, 1, X) :- node(X), color(X, red)." along with a side-channel directive
   of "cost at level L is the sum of W over all true _viol(L, W, ...) atoms" to
