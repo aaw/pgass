@@ -1,6 +1,7 @@
 #include "normalize.h"
 
 #include "absl/strings/str_cat.h"
+#include "collect.h"
 #include "macros.h"
 
 namespace {
@@ -13,6 +14,32 @@ std::unique_ptr<std::vector<std::unique_ptr<BodyItem>>> clone_body_items(
     for (const auto& item : *body->items) items->push_back(item->clone());
   }
   return items;
+}
+
+// Collects, in first-occurrence order, the variables of a choice element: the
+// ones in its literal followed by the ones introduced by its conditions. The
+// auxiliary '_crN' atom must carry these so each ground instance of the element
+// is counted (and chosen) separately.
+std::vector<std::string> element_variables(const ChoiceElement& element) {
+  std::vector<std::string> names;
+  collect::collect_variables(*element.literal, names);
+  if (element.conditions) {
+    for (const auto& cond : *element.conditions) {
+      collect::collect_variables(*cond->literal, names);
+    }
+  }
+  return names;
+}
+
+// Builds an argument list of variables from `names`, or nullptr when empty so
+// the auxiliary atom formats as '_crN' rather than '_crN()'.
+Terms variables_as_args(const std::vector<std::string>& names) {
+  if (names.empty()) return nullptr;
+  auto args = std::make_unique<std::vector<std::unique_ptr<Term>>>();
+  for (const auto& name : names) {
+    args->push_back(std::make_unique<Variable>(name));
+  }
+  return args;
 }
 
 /* Transform each rule of the form:
@@ -76,12 +103,15 @@ absl::Status normalize_choice_rules(Program& prog) {
     // and the counting aggregate below refer to the same variables. The counter
     // is program-wide so ids don't clash across multiple choice rules.
     std::vector<std::string> ids;
+    std::vector<std::vector<std::string>> vars;
     ids.reserve(elements.size());
+    vars.reserve(elements.size());
     for (size_t e = 0; e < elements.size(); ++e) {
       ids.push_back(absl::StrCat("_cr", i++));
+      vars.push_back(element_variables(*elements[e]));
     }
 
-    // One disjunctive rule per element: 'pN | _crN :- conditions, body.'
+    // One disjunctive rule per element: 'pN | _crN(vars) :- conditions, body.'
     for (size_t e = 0; e < elements.size(); ++e) {
       const ChoiceElement& element = *elements[e];
 
@@ -89,6 +119,7 @@ absl::Status normalize_choice_rules(Program& prog) {
       disjunction->literals.push_back(element.literal->clone());
       auto aux = std::make_unique<ClassicalLiteral>();
       aux->id = ids[e];
+      aux->args = variables_as_args(vars[e]);
       disjunction->literals.push_back(std::move(aux));
 
       auto items = clone_body_items(body);
@@ -128,7 +159,7 @@ absl::Status normalize_choice_rules(Program& prog) {
       const ChoiceElement& element = *elements[e];
 
       auto terms = std::make_unique<std::vector<std::unique_ptr<Term>>>();
-      terms->push_back(std::make_unique<Atom>(ids[e], nullptr));
+      terms->push_back(std::make_unique<Atom>(ids[e], variables_as_args(vars[e])));
 
       auto literals =
           std::make_unique<std::vector<std::unique_ptr<NafLiteral>>>();

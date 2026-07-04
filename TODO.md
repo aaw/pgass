@@ -1,9 +1,6 @@
 Normalization
 =============
 
-* Make choice rule auto-generated variables (_cr0, _cr1, ...) take args like the spec describes.
-  Example for test: { p(X) : q(X) } <= 1 :- r.
-
 * Remove integrity constraint normalization, don't need for QF_IDL translation.
 
 * Add head disjunction normalization:

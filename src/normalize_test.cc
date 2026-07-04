@@ -140,4 +140,20 @@ TEST_F(NormalizeTest, TestNormalizeMultipleChoiceRules) {
   )"));
 }
 
+TEST_F(NormalizeTest, TestNormalizeChoiceWithVars) {
+  std::string program = R"(
+    { p(X, Y) : q(X) } <= 1 :- r(Y).
+  )";
+
+  Parser parser(program);
+  auto prog = parser.parse_program();
+  ASSERT_TRUE(prog.ok()) << prog.status();
+  ASSERT_TRUE(normalize(**prog).ok());
+
+  EXPECT_THAT(**prog, EquivalentToSource(R"(
+    p(X, Y) | _cr0(X, Y) :- q(X), r(Y).
+    _ic0 :- r(Y), not #count{ _cr0(X, Y): p(X, Y), q(X) } <= 1, not _ic0.
+  )"));
+}
+
 }  // namespace

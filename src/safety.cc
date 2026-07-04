@@ -9,6 +9,7 @@
 #include "absl/status/status.h"
 #include "absl/strings/str_cat.h"
 #include "absl/strings/str_join.h"
+#include "collect.h"
 
 // ASP safety requires that every variable in a rule body be bound: reachable
 // by ground values without guessing. The three binding sources are:
@@ -33,42 +34,6 @@ bool is_subset(const absl::flat_hash_set<T>& a,
   return true;
 }
 
-// Collects all variable names appearing anywhere in `term` into `vars`.
-void collect_vars_in_term(const std::unique_ptr<Term>& term,
-                          absl::flat_hash_set<std::string_view>& vars) {
-  switch (term->kind) {
-    case Term::AtomKind: {
-      auto* atom = static_cast<Atom*>(term.get());
-      for (const auto& pterm : *(atom->args)) {
-        collect_vars_in_term(pterm, vars);
-      }
-      break;
-    }
-    case Term::NumberKind:
-      break;
-    case Term::StringKind:
-      break;
-    case Term::VariableKind: {
-      auto* variable = static_cast<Variable*>(term.get());
-      vars.insert(variable->name);
-      break;
-    }
-    case Term::AnonymousVariableKind:
-      break;
-    case Term::NegatedTermKind: {
-      auto* negated_term = static_cast<NegatedTerm*>(term.get());
-      collect_vars_in_term(negated_term->term, vars);
-      break;
-    }
-    case Term::TermOperationKind: {
-      auto* term_op = static_cast<TermOperation*>(term.get());
-      collect_vars_in_term(term_op->left, vars);
-      collect_vars_in_term(term_op->right, vars);
-      break;
-    }
-  }
-}
-
 // Updates `bound_vars` and `vars` for a builtin atom (e.g. `X = Y + 1`).
 // Binds the lone variable on either side of an equality if the other side is
 // fully bound. Always records all variables in the atom in `vars`.
@@ -76,8 +41,8 @@ void propagate_atom_bindings(const BuiltinAtom* atom,
                              absl::flat_hash_set<std::string_view>& bound_vars,
                              absl::flat_hash_set<std::string_view>& vars) {
   absl::flat_hash_set<std::string_view> lhs_vars, rhs_vars;
-  collect_vars_in_term(atom->left, lhs_vars);
-  collect_vars_in_term(atom->right, rhs_vars);
+  collect::collect_variables(*atom->left, lhs_vars);
+  collect::collect_variables(*atom->right, rhs_vars);
   if (atom->left->kind == Term::VariableKind && atom->op == BinopType::kEQUAL &&
       is_subset(rhs_vars, bound_vars)) {
     CHECK_EQ(lhs_vars.size(), static_cast<std::size_t>(1));
@@ -115,9 +80,7 @@ void propagate_naf_literal(const NafLiteral* naf_lit,
     case Literal::ClassicalLiteralKind: {
       auto* classical_lit = static_cast<ClassicalLiteral*>(lit);
       absl::flat_hash_set<std::string_view> cl_vars;
-      for (const auto& term : *(classical_lit->args)) {
-        collect_vars_in_term(term, cl_vars);
-      }
+      collect::collect_variables(*classical_lit, cl_vars);
       for (const std::string_view var : cl_vars) {
         vars.insert(var);
         if (!naf_lit->naf) bound_vars.insert(var);
@@ -198,10 +161,10 @@ absl::Status verify_safe(const Program& prog) {
 
             // First, collect vars in aggregate lower and upper bounds, if any.
             if (aggregate->lb_term != nullptr) {
-              collect_vars_in_term(aggregate->lb_term, vars);
+              collect::collect_variables(*aggregate->lb_term, vars);
             }
             if (aggregate->ub_term != nullptr) {
-              collect_vars_in_term(aggregate->ub_term, vars);
+              collect::collect_variables(*aggregate->ub_term, vars);
             }
 
             // Outer bound variables are in scope inside the aggregate body.

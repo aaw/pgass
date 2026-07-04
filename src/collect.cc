@@ -1,0 +1,84 @@
+#include "collect.h"
+
+#include <algorithm>
+
+namespace collect {
+
+void for_each_variable(const Term& term, const VariableVisitor& visit) {
+  switch (term.kind) {
+    case Term::VariableKind:
+      visit(static_cast<const Variable&>(term).name);
+      break;
+    case Term::AtomKind: {
+      const auto& atom = static_cast<const Atom&>(term);
+      if (atom.args) {
+        for (const auto& arg : *atom.args) for_each_variable(*arg, visit);
+      }
+      break;
+    }
+    case Term::NegatedTermKind:
+      for_each_variable(*static_cast<const NegatedTerm&>(term).term, visit);
+      break;
+    case Term::TermOperationKind: {
+      const auto& op = static_cast<const TermOperation&>(term);
+      for_each_variable(*op.left, visit);
+      for_each_variable(*op.right, visit);
+      break;
+    }
+    case Term::NumberKind:
+    case Term::StringKind:
+    case Term::AnonymousVariableKind:
+      break;
+  }
+}
+
+void for_each_variable(const Literal& literal, const VariableVisitor& visit) {
+  switch (literal.kind) {
+    case Literal::ClassicalLiteralKind: {
+      const auto& cl = static_cast<const ClassicalLiteral&>(literal);
+      if (cl.args) {
+        for (const auto& arg : *cl.args) for_each_variable(*arg, visit);
+      }
+      break;
+    }
+    case Literal::BuiltinAtomKind: {
+      const auto& ba = static_cast<const BuiltinAtom&>(literal);
+      if (ba.left) for_each_variable(*ba.left, visit);
+      if (ba.right) for_each_variable(*ba.right, visit);
+      break;
+    }
+  }
+}
+
+namespace {
+
+// Appends `name` to `out` unless it is already present.
+void push_unique(std::string_view name, std::vector<std::string>& out) {
+  if (std::find(out.begin(), out.end(), name) == out.end()) {
+    out.emplace_back(name);
+  }
+}
+
+}  // namespace
+
+void collect_variables(const Term& term,
+                       absl::flat_hash_set<std::string_view>& out) {
+  for_each_variable(term, [&](std::string_view name) { out.insert(name); });
+}
+
+void collect_variables(const Literal& literal,
+                       absl::flat_hash_set<std::string_view>& out) {
+  for_each_variable(literal, [&](std::string_view name) { out.insert(name); });
+}
+
+void collect_variables(const Term& term, std::vector<std::string>& out) {
+  for_each_variable(term,
+                    [&](std::string_view name) { push_unique(name, out); });
+}
+
+void collect_variables(const Literal& literal, std::vector<std::string>& out) {
+  for_each_variable(literal,
+                    [&](std::string_view name) { push_unique(name, out); });
+}
+
+}  // namespace collect

@@ -1,0 +1,38 @@
+#ifndef COLLECT_H_
+#define COLLECT_H_
+
+#include <functional>
+#include <string>
+#include <string_view>
+#include <vector>
+
+#include "absl/container/flat_hash_set.h"
+#include "ast.h"
+
+// Helpers for scanning the AST to find things. Today that means variable
+// collection; grounding and translation are expected to grow more queries
+// (e.g. constant/predicate collection) alongside these.
+namespace collect {
+
+// Invokes `visit` once per variable occurrence within the node, in left-to-
+// right order. Repeated variables are visited repeatedly; callers that want
+// distinct names should dedupe (or use a collect_variables overload).
+using VariableVisitor = std::function<void(std::string_view)>;
+void for_each_variable(const Term& term, const VariableVisitor& visit);
+void for_each_variable(const Literal& literal, const VariableVisitor& visit);
+
+// Inserts every variable name occurring in the node into `out`.
+void collect_variables(const Term& term,
+                       absl::flat_hash_set<std::string_view>& out);
+void collect_variables(const Literal& literal,
+                       absl::flat_hash_set<std::string_view>& out);
+
+// Appends the distinct variable names occurring in the node to `out`, in
+// first-occurrence order, skipping any already present. Useful when the order
+// of variables matters (e.g. synthesizing an argument list).
+void collect_variables(const Term& term, std::vector<std::string>& out);
+void collect_variables(const Literal& literal, std::vector<std::string>& out);
+
+}  // namespace collect
+
+#endif  // COLLECT_H_

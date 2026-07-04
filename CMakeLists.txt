@@ -37,6 +37,14 @@ target_link_libraries(parse_lib
     absl::strings
 )
 
+add_library(collect_lib STATIC src/collect.cc)
+target_compile_options(collect_lib PRIVATE -Wall -Wextra -Werror)
+target_link_libraries(collect_lib
+  PUBLIC
+    parse_lib
+    absl::flat_hash_set
+)
+
 add_library(safety_lib STATIC src/safety.cc)
 target_compile_options(safety_lib PRIVATE -Wall -Wextra -Werror)
 target_link_libraries(safety_lib
@@ -45,6 +53,7 @@ target_link_libraries(safety_lib
   PRIVATE
     absl::check
     absl::flat_hash_set
+    collect_lib
 )
 
 add_library(normalize_lib STATIC src/normalize.cc)
@@ -55,6 +64,7 @@ target_link_libraries(normalize_lib
   PRIVATE
     absl::check
     absl::flat_hash_set
+    collect_lib
 )
 
 add_library(format_lib STATIC src/format.cc)
@@ -105,7 +115,18 @@ target_link_libraries(normalize_test
     GTest::gmock
 )
 
+add_executable(collect_test src/collect_test.cc)
+target_compile_options(collect_test PRIVATE -Wall -Wextra -Werror)
+target_link_libraries(collect_test
+  PRIVATE
+    collect_lib
+    parse_lib
+    GTest::gtest_main
+    GTest::gmock
+)
+
 include(GoogleTest)
 gtest_discover_tests(parse_test)
 gtest_discover_tests(safety_test)
 gtest_discover_tests(normalize_test)
+gtest_discover_tests(collect_test)
