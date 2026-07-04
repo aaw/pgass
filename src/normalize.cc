@@ -11,13 +11,17 @@
 
 namespace {
 
-// Builds an argument list of `arity` fresh variables 'X0', 'X1', ..., or
-// nullptr when arity is 0 so an atom formats as 'p' rather than 'p()'.
+// Builds an argument list of `arity` fresh variables, or nullptr when arity is
+// 0 so an atom formats as 'p' rather than 'p()'. A single argument is named 'X';
+// several are numbered 'X1', 'X2', ... by position. The names must be distinct
+// per position (so each position of p is tied to the same position of _neg_p)
+// but shared between the two atoms in the constraint that uses them.
 Terms fresh_variable_args(size_t arity) {
   if (arity == 0) return nullptr;
   auto args = std::make_unique<std::vector<std::unique_ptr<Term>>>();
   for (size_t k = 0; k < arity; ++k) {
-    args->push_back(std::make_unique<Variable>(absl::StrCat("X", k)));
+    std::string name = arity == 1 ? "X" : absl::StrCat("X", k + 1);
+    args->push_back(std::make_unique<Variable>(std::move(name)));
   }
   return args;
 }
@@ -36,9 +40,9 @@ std::unique_ptr<BodyItem> positive_atom_item(const std::string& id,
 /* Eliminate classical (strong) negation by renaming each classically negated
    literal '-p(args)' to a fresh positive predicate '_neg_p(args)', then, for
    every predicate p/n that occurred negated, appending an integrity constraint
-   forbidding p and its negation from both holding:
+   forbidding p and its negation from both holding on the same argument tuple:
 
-     :- p(X0, ..., Xn-1), _neg_p(X0, ..., Xn-1).
+     :- p(X1, ..., Xn), _neg_p(X1, ..., Xn).
 */
 absl::Status remove_classical_negation(Program& prog) {
   // Predicate name / arity pairs seen classically negated. Ordered so the
