@@ -65,25 +65,6 @@ TEST_F(NormalizeTest, TestNoNormalization) {
   EXPECT_THAT(**prog, EquivalentToSource(program));
 }
 
-TEST_F(NormalizeTest, TestNormalizeIntegrityConstraints) {
-  std::string program = R"(
-    :- good(a), not bad(b).
-    :- edge(X, Y).
-    reachable(a, b)?
-  )";
-
-  Parser parser(program);
-  auto prog = parser.parse_program();
-  ASSERT_TRUE(prog.ok()) << prog.status();
-  ASSERT_TRUE(normalize(**prog).ok());
-
-  EXPECT_THAT(**prog, EquivalentToSource(R"(
-    _ic0 :- good(a), not bad(b), not _ic0.
-    _ic1 :- edge(X, Y), not _ic1.
-    reachable(a, b)?
-  )"));
-}
-
 TEST_F(NormalizeTest, TestNormalizeChoiceRuleSimple) {
   std::string program = R"(
     { p1; p2; p3 } :- q1.
@@ -117,7 +98,7 @@ TEST_F(NormalizeTest, TestNormalizeChoiceRuleComplex) {
     c | _cr2 :- c1, c2, x, y, not z.
     d | _cr3 :- x, y, not z.
     e | _cr4 :- x, y, not z.
-    _ic0 :- x, y, not z, not 1 < #count{ _cr0: a, a1, a2, _cr1: b, _cr2: c, c1, c2, _cr3: d, _cr4: e } <= 4, not _ic0.
+    :- x, y, not z, not 1 < #count{ _cr0: a, a1, a2, _cr1: b, _cr2: c, c1, c2, _cr3: d, _cr4: e } <= 4.
   )"));
 }
 
@@ -152,7 +133,7 @@ TEST_F(NormalizeTest, TestNormalizeChoiceWithVars) {
 
   EXPECT_THAT(**prog, EquivalentToSource(R"(
     p(X, Y) | _cr0(X, Y) :- q(X), r(Y).
-    _ic0 :- r(Y), not #count{ _cr0(X, Y): p(X, Y), q(X) } <= 1, not _ic0.
+    :- r(Y), not #count{ _cr0(X, Y): p(X, Y), q(X) } <= 1.
   )"));
 }
 

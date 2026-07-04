@@ -1,8 +1,6 @@
 Normalization
 =============
 
-* Remove integrity constraint normalization, don't need for QF_IDL translation.
-
 * Add head disjunction normalization:
 
   a | b | c :- d, e, not f
