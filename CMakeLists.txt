@@ -56,6 +56,16 @@ target_link_libraries(safety_lib
     collect_lib
 )
 
+add_library(graph_lib STATIC src/graph.cc)
+target_compile_options(graph_lib PRIVATE -Wall -Wextra -Werror)
+target_link_libraries(graph_lib
+  PUBLIC
+    parse_lib
+    absl::flat_hash_map
+  PRIVATE
+    collect_lib
+)
+
 add_library(normalize_lib STATIC src/normalize.cc)
 target_compile_options(normalize_lib PRIVATE -Wall -Wextra -Werror)
 target_link_libraries(normalize_lib
@@ -64,8 +74,10 @@ target_link_libraries(normalize_lib
   PRIVATE
     absl::btree
     absl::check
+    absl::flat_hash_map
     absl::flat_hash_set
     collect_lib
+    graph_lib
 )
 
 add_library(format_lib STATIC src/format.cc)
@@ -126,8 +138,19 @@ target_link_libraries(collect_test
     GTest::gmock
 )
 
+add_executable(graph_test src/graph_test.cc)
+target_compile_options(graph_test PRIVATE -Wall -Wextra -Werror)
+target_link_libraries(graph_test
+  PRIVATE
+    graph_lib
+    parse_lib
+    GTest::gtest_main
+    GTest::gmock
+)
+
 include(GoogleTest)
 gtest_discover_tests(parse_test)
 gtest_discover_tests(safety_test)
 gtest_discover_tests(normalize_test)
 gtest_discover_tests(collect_test)
+gtest_discover_tests(graph_test)

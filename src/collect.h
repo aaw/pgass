@@ -43,6 +43,21 @@ void for_each_classical_literal(Head& head,
 void for_each_classical_literal(Body& body,
                                 const ClassicalLiteralVisitor& visit);
 
+// Invokes `visit(literal, negated)` for each classical literal in `nafs`,
+// where `negated` combines the literal's own 'not' with `negated_context`
+// (e.g. an enclosing default-negated aggregate).
+using NegatedClassicalLiteralVisitor =
+    std::function<void(ClassicalLiteral&, bool)>;
+void for_each_classical_literal(std::vector<std::unique_ptr<NafLiteral>>& nafs,
+                                bool negated_context,
+                                const NegatedClassicalLiteralVisitor& visit);
+
+// Invokes `visit(literal, negated)` for every classical literal in `body`,
+// including ones inside aggregate elements (additionally negated by the
+// aggregate's own 'not').
+void for_each_classical_literal(Body& body,
+                                const NegatedClassicalLiteralVisitor& visit);
+
 }  // namespace collect
 
 #endif  // COLLECT_H_

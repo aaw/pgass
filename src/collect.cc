@@ -143,4 +143,44 @@ void for_each_classical_literal(Body& body,
   }
 }
 
+void for_each_classical_literal(std::vector<std::unique_ptr<NafLiteral>>& nafs,
+                                bool negated_context,
+                                const NegatedClassicalLiteralVisitor& visit) {
+  for (auto& naf : nafs) {
+    if (naf->literal && naf->literal->kind == Literal::ClassicalLiteralKind) {
+      auto& cl = static_cast<ClassicalLiteral&>(*naf->literal);
+      visit(cl, negated_context || naf->naf);
+    }
+  }
+}
+
+void for_each_classical_literal(Body& body,
+                                const NegatedClassicalLiteralVisitor& visit) {
+  if (!body.items) return;
+  for (auto& item : *body.items) {
+    switch (item->kind) {
+      case BodyItem::NafLiteralKind: {
+        auto& naf = static_cast<NafLiteral&>(*item);
+        if (naf.literal && naf.literal->kind == Literal::ClassicalLiteralKind) {
+          auto& cl = static_cast<ClassicalLiteral&>(*naf.literal);
+          visit(cl, naf.naf);
+        }
+        break;
+      }
+      case BodyItem::AggregateKind: {
+        auto& aggregate = static_cast<Aggregate&>(*item);
+        if (aggregate.elements) {
+          for (auto& element : *aggregate.elements) {
+            if (element->literals) {
+              for_each_classical_literal(*element->literals, aggregate.naf,
+                                         visit);
+            }
+          }
+        }
+        break;
+      }
+    }
+  }
+}
+
 }  // namespace collect

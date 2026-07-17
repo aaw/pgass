@@ -5,8 +5,10 @@
 #include <utility>
 
 #include "absl/container/btree_set.h"
+#include "absl/container/flat_hash_map.h"
 #include "absl/strings/str_cat.h"
 #include "collect.h"
+#include "graph.h"
 #include "macros.h"
 
 namespace {
@@ -229,10 +231,96 @@ absl::Status normalize_choice_rules(Program& prog) {
   return absl::OkStatus();
 }
 
+/* Split each disjunctive head into normal rules by shifting the other disjuncts
+   into the body as default-negated literals (Ben-Eliyahu & Dechter 1994):
+
+     a | b | c :- body.
+
+   becomes
+
+     a :- body, not b, not c.
+     b :- body, not a, not c.
+     c :- body, not a, not b.
+
+   The shift only preserves answer sets when the program is head-cycle-free, so
+   we first reject any disjunctive rule whose head atoms are not all in distinct
+   strongly connected components of the positive dependency graph. Example:
+
+     a | b.  a :- b.  b :- a.
+
+   has the single answer set {a, b}, but its shift is unsatisfiable; a and b sit
+   in one positive SCC, so we refuse to normalize it.
+*/
+absl::Status split_head_disjunctions(Program& prog) {
+  const PredGraph graph = build_pred_graph(prog);
+  const std::vector<int> component =
+      strongly_connected_components(graph.pos_succ);
+
+  // Reject head cycles before rewriting anything, so a rejected program leaves
+  // prog untouched rather than half-shifted.
+  for (const auto& statement : *prog.statements) {
+    if (statement->head == nullptr ||
+        statement->head->kind != Head::DisjunctionKind) {
+      continue;
+    }
+    const auto& disjunction = static_cast<const Disjunction&>(*statement->head);
+    if (disjunction.literals.size() < 2) continue;
+
+    absl::flat_hash_map<int, std::string> component_owner;
+    for (const auto& literal : disjunction.literals) {
+      // Every head predicate was interned while building the graph.
+      const int id = graph.id_of.at(pred_key(*literal));
+      auto [it, inserted] =
+          component_owner.try_emplace(component[id], literal->id);
+      if (!inserted) {
+        return absl::InvalidArgumentError(absl::StrCat(
+            "head-cycle between '", it->second, "' and '", literal->id,
+            "': disjunctive rule is not head-cycle-free and cannot be "
+            "normalized"));
+      }
+    }
+  }
+
+  auto new_statements =
+      std::make_unique<std::vector<std::unique_ptr<Statement>>>();
+  for (auto& statement : *prog.statements) {
+    if (statement->head == nullptr ||
+        statement->head->kind != Head::DisjunctionKind ||
+        static_cast<Disjunction&>(*statement->head).literals.size() < 2) {
+      new_statements->push_back(std::move(statement));
+      continue;
+    }
+    const auto& disjunction = static_cast<Disjunction&>(*statement->head);
+    const size_t n = disjunction.literals.size();
+    for (size_t i = 0; i < n; ++i) {
+      auto head = std::make_unique<Disjunction>();
+      head->literals.push_back(disjunction.literals[i]->clone());
+
+      auto items = clone_body_items(statement->body.get());
+      for (size_t j = 0; j < n; ++j) {
+        if (j == i) continue;
+        auto naf = std::make_unique<NafLiteral>();
+        naf->naf = true;
+        naf->literal = disjunction.literals[j]->clone();
+        items->push_back(std::move(naf));
+      }
+
+      auto rule = std::make_unique<Statement>();
+      rule->head = std::move(head);
+      rule->body = std::make_unique<Body>();
+      rule->body->items = std::move(items);
+      new_statements->push_back(std::move(rule));
+    }
+  }
+  prog.statements = std::move(new_statements);
+  return absl::OkStatus();
+}
+
 }  // namespace
 
 absl::Status normalize(Program& prog) {
   RETURN_IF_ERROR(remove_classical_negation(prog));
   RETURN_IF_ERROR(normalize_choice_rules(prog));
+  RETURN_IF_ERROR(split_head_disjunctions(prog));
   return absl::OkStatus();
 }
