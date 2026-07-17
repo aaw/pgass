@@ -39,6 +39,58 @@ std::unique_ptr<BodyItem> positive_atom_item(const std::string& id,
   return naf;
 }
 
+/* Rewrite each weak constraint
+
+     :~ body. [w@l, t1, ..., tn]
+
+   into a rule defining '_viol', a single global violation-accumulator
+   predicate shared by every weak constraint in the program:
+
+     _viol(l, w, t1, ..., tn) :- body.
+
+   A missing level defaults to 0. '_viol' is reserved: later pipeline stages
+   (grounding/solving) are expected to treat every true _viol(L, W, ...) atom
+   as one unit of cost W at priority level L, and compute each level's total
+   as the sum of W over its true _viol atoms. Ordinary set semantics does the
+   rest for free: two groundings that agree on (l, w, t1, ..., tn) produce the
+   same ground atom, so they count as a single violation rather than two, as
+   required by weak-constraint semantics. This pass does not itself compute
+   per-level directives; it only emits the atoms a later stage will read.
+*/
+absl::Status rewrite_weak_constraints(Program& prog) {
+  auto new_statements =
+      std::make_unique<std::vector<std::unique_ptr<Statement>>>();
+  for (auto& statement : *prog.statements) {
+    if (!statement->weight) {
+      new_statements->push_back(std::move(statement));
+      continue;
+    }
+
+    auto args = std::make_unique<std::vector<std::unique_ptr<Term>>>();
+    args->push_back(statement->weight->level ? statement->weight->level->clone()
+                                              : std::make_unique<Number>(0));
+    args->push_back(statement->weight->weight->clone());
+    if (statement->weight->terms) {
+      for (const auto& term : *statement->weight->terms) {
+        args->push_back(term->clone());
+      }
+    }
+
+    auto viol = std::make_unique<ClassicalLiteral>();
+    viol->id = "_viol";
+    viol->args = std::move(args);
+    auto disjunction = std::make_unique<Disjunction>();
+    disjunction->literals.push_back(std::move(viol));
+
+    auto rule = std::make_unique<Statement>();
+    rule->head = std::move(disjunction);
+    rule->body = std::move(statement->body);
+    new_statements->push_back(std::move(rule));
+  }
+  prog.statements = std::move(new_statements);
+  return absl::OkStatus();
+}
+
 /* Eliminate classical (strong) negation by renaming each classically negated
    literal '-p(args)' to a fresh positive predicate '_neg_p(args)', then, for
    every predicate p/n that occurred negated, appending an integrity constraint
@@ -319,6 +371,7 @@ absl::Status split_head_disjunctions(Program& prog) {
 }  // namespace
 
 absl::Status normalize(Program& prog) {
+  RETURN_IF_ERROR(rewrite_weak_constraints(prog));
   RETURN_IF_ERROR(remove_classical_negation(prog));
   RETURN_IF_ERROR(normalize_choice_rules(prog));
   RETURN_IF_ERROR(split_head_disjunctions(prog));

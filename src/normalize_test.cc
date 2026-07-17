@@ -335,4 +335,66 @@ TEST_F(NormalizeTest, TestSplitHeadDisjunctionRejectsRepeatedHeadPredicate) {
   EXPECT_THAT(std::string(status.message()), HasSubstr("head-cycle"));
 }
 
+TEST_F(NormalizeTest, TestRewriteWeakConstraintSimple) {
+  std::string program = R"(
+    :~ node(X), color(X, red). [1@0, X]
+  )";
+
+  Parser parser(program);
+  auto prog = parser.parse_program();
+  ASSERT_TRUE(prog.ok()) << prog.status();
+  ASSERT_TRUE(normalize(**prog).ok());
+
+  EXPECT_THAT(**prog, EquivalentToSource(R"(
+    _viol(0, 1, X) :- node(X), color(X, red).
+  )"));
+}
+
+TEST_F(NormalizeTest, TestRewriteWeakConstraintDefaultLevel) {
+  std::string program = R"(
+    :~ q(X). [1, X]
+  )";
+
+  Parser parser(program);
+  auto prog = parser.parse_program();
+  ASSERT_TRUE(prog.ok()) << prog.status();
+  ASSERT_TRUE(normalize(**prog).ok());
+
+  EXPECT_THAT(**prog, EquivalentToSource(R"(
+    _viol(0, 1, X) :- q(X).
+  )"));
+}
+
+TEST_F(NormalizeTest, TestRewriteWeakConstraintNoTerms) {
+  std::string program = R"(
+    :~ q. [1@2]
+  )";
+
+  Parser parser(program);
+  auto prog = parser.parse_program();
+  ASSERT_TRUE(prog.ok()) << prog.status();
+  ASSERT_TRUE(normalize(**prog).ok());
+
+  EXPECT_THAT(**prog, EquivalentToSource(R"(
+    _viol(2, 1) :- q.
+  )"));
+}
+
+TEST_F(NormalizeTest, TestRewriteWeakConstraintMultiple) {
+  std::string program = R"(
+    :~ a(X). [1@0, X]
+    :~ b(X). [2@1, X]
+  )";
+
+  Parser parser(program);
+  auto prog = parser.parse_program();
+  ASSERT_TRUE(prog.ok()) << prog.status();
+  ASSERT_TRUE(normalize(**prog).ok());
+
+  EXPECT_THAT(**prog, EquivalentToSource(R"(
+    _viol(0, 1, X) :- a(X).
+    _viol(1, 2, X) :- b(X).
+  )"));
+}
+
 }  // namespace
