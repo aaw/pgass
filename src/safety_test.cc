@@ -198,4 +198,42 @@ TEST_F(SafetyTest, ErrorMessageUnsafeAggregate) {
             "unsafe aggregate in rule 'p/1'");
 }
 
+TEST_F(SafetyTest, TestWeakConstraintSafe) {
+  std::string_view src = ":~ p(X). [1@0, X]";
+  Parser parser(src);
+  auto prog = parser.parse_program();
+  ASSERT_TRUE(prog.ok()) << prog.status();
+  EXPECT_THAT(verify_safe(**prog), IsOk());
+}
+
+TEST_F(SafetyTest, TestWeakConstraintUnsafeDistinctnessTerm) {
+  // Y appears only in the distinctness terms, never in the body.
+  std::string_view src = ":~ p(X). [1@0, Y]";
+  Parser parser(src);
+  auto prog = parser.parse_program();
+  ASSERT_TRUE(prog.ok()) << prog.status();
+  EXPECT_THAT(verify_safe(**prog), Not(IsOk()));
+}
+
+TEST_F(SafetyTest, TestWeakConstraintUnsafeWeightAndLevel) {
+  // W and L are the weight and level themselves, neither bound by the body.
+  std::string_view src = ":~ p(X). [W@L, X]";
+  Parser parser(src);
+  auto prog = parser.parse_program();
+  ASSERT_TRUE(prog.ok()) << prog.status();
+  EXPECT_THAT(verify_safe(**prog), Not(IsOk()));
+}
+
+TEST_F(SafetyTest, ErrorMessageUnsafeWeakConstraint) {
+  std::string_view src = ":~ p(X). [1@0, Y]";
+  Parser parser(src);
+  auto prog = parser.parse_program();
+  ASSERT_TRUE(prog.ok()) << prog.status();
+  auto status = verify_safe(**prog);
+  ASSERT_THAT(status, Not(IsOk()));
+  EXPECT_EQ(status.message(),
+            "line 1: :~ p(X). [1@0, Y]\n"
+            "unsafe variable in rule 'weak constraint': Y");
+}
+
 }  // namespace

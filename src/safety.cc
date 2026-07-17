@@ -110,6 +110,7 @@ std::string format_source_line(std::string_view source, size_t pos) {
 // Returns a human-readable label for a rule's head (e.g. "p/2", "{p/1; q/2}",
 // or "integrity constraint").
 std::string head_description(const Statement& stmt) {
+  if (stmt.weight) return "weak constraint";
   if (stmt.head == nullptr) return "integrity constraint";
   if (auto* disj = dynamic_cast<const Disjunction*>(stmt.head.get())) {
     std::string result;
@@ -204,6 +205,21 @@ absl::Status verify_safe(const Program& prog) {
         }
       }
     } while (prev_num_bound < bound_vars.size());
+
+    // A weak constraint's weight, level, and distinctness terms must be bound
+    // by the body, same as any other variable use: they're the "head" of a
+    // weak constraint in everything but syntax.
+    if (statement->weight) {
+      collect::collect_variables(*statement->weight->weight, vars);
+      if (statement->weight->level) {
+        collect::collect_variables(*statement->weight->level, vars);
+      }
+      if (statement->weight->terms) {
+        for (const auto& term : *statement->weight->terms) {
+          collect::collect_variables(*term, vars);
+        }
+      }
+    }
 
     if (!is_subset(vars, bound_vars)) {
       std::vector<std::string> unbound;

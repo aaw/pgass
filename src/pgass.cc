@@ -57,7 +57,6 @@ int main(int argc, char** argv) {
     std::cerr << "pgass: safety error: " << safety.message() << "\n";
     return 1;
   }
-  return 0;
 
   auto normal = normalize(**program);
   if (!normal.ok()) {
