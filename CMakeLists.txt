@@ -54,6 +54,7 @@ target_link_libraries(safety_lib
     absl::check
     absl::flat_hash_set
     collect_lib
+    graph_lib
 )
 
 add_library(graph_lib STATIC src/graph.cc)

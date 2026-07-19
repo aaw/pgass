@@ -90,11 +90,32 @@ PredGraph build_pred_graph(const Program& const_prog) {
     };
     if (statement->head)
       for_each_head_condition(*statement->head, graph, add_edge);
-    if (statement->body) {
-      collect::for_each_classical_literal(
-          *statement->body, [&](ClassicalLiteral& cl, bool negated) {
-            add_edge(graph.intern(pred_key(cl)), negated);
-          });
+    if (statement->body && statement->body->items) {
+      for (auto& item : *statement->body->items) {
+        if (item->kind == BodyItem::NafLiteralKind) {
+          auto& naf = static_cast<NafLiteral&>(*item);
+          if (naf.literal && naf.literal->kind == Literal::ClassicalLiteralKind) {
+            auto& cl = static_cast<ClassicalLiteral&>(*naf.literal);
+            add_edge(graph.intern(pred_key(cl)), naf.naf);
+          }
+          continue;
+        }
+        auto& aggregate = static_cast<Aggregate&>(*item);
+        if (!aggregate.elements) continue;
+        for (auto& element : *aggregate.elements) {
+          if (!element->literals) continue;
+          collect::for_each_classical_literal(
+              *element->literals, aggregate.naf,
+              [&](ClassicalLiteral& cl, bool negated) {
+                int body_id = graph.intern(pred_key(cl));
+                add_edge(body_id, negated);
+                if (negated) return;
+                for (int head_id : heads) {
+                  graph.agg_edges.push_back({body_id, head_id, statement.get()});
+                }
+              });
+        }
+      }
     }
   }
   return graph;

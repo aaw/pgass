@@ -44,6 +44,19 @@ struct PredGraph {
   // signature -> id, for interning and lookups.
   absl::flat_hash_map<PredKey, int> id_of;
 
+  // One entry per predicate occurring un-negated inside an aggregate element,
+  // pointing at the head predicate of the rule containing that aggregate.
+  // Used to check the ASP-Core-2 restriction that aggregates may not be
+  // recursive: body_id and head_id must not share a positive-dependency
+  // strongly connected component. `statement` is the enclosing rule, kept for
+  // error reporting.
+  struct AggEdge {
+    int body_id;
+    int head_id;
+    const Statement* statement;
+  };
+  std::vector<AggEdge> agg_edges;
+
   // Returns the id for `key`, allocating a fresh node (and empty adjacency rows)
   // the first time it is seen.
   int intern(const PredKey& key);
@@ -52,7 +65,9 @@ struct PredGraph {
 // Builds the predicate dependency graph of `prog`. Atoms inside aggregates and
 // choice-element conditions count as body dependencies; a default-negated
 // aggregate makes all of its atoms negative dependencies. Builtin comparisons
-// carry no predicate and are ignored.
+// carry no predicate and are ignored. Also populates agg_edges: one entry per
+// un-negated predicate occurring inside an aggregate element, pointing at each
+// head predicate of the rule containing it.
 PredGraph build_pred_graph(const Program& prog);
 
 // Returns, for each of the n = succ.size() nodes, the id of its strongly

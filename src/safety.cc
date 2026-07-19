@@ -10,6 +10,7 @@
 #include "absl/strings/str_cat.h"
 #include "absl/strings/str_join.h"
 #include "collect.h"
+#include "graph.h"
 
 // ASP safety requires that every variable in a rule body be bound: reachable
 // by ground values without guessing. The three binding sources are:
@@ -245,6 +246,27 @@ absl::Status verify_safe(const Program& prog) {
   // classical literal args, and the binding there is intentionally existential
   // (e.g., p(X, 1, a)? means "does there exist an X such that p(X, 1, a) is
   // produced?") so there are no more questions of binding/safety at this point.
+
+  // ASP-Core-2 section 5 forbids recursive aggregates: no predicate occurring
+  // un-negated inside an aggregate element may share a positive-dependency
+  // strongly connected component with the head of the rule containing that
+  // aggregate. E.g. 'p(X) :- dom(X), #count{Y : p(Y)} >= X.' is rejected
+  // because p depends on itself through the aggregate, but a #count over a
+  // recursive 'reach' predicate is fine as long as the counting rule's own
+  // head isn't part of that recursion.
+  const PredGraph graph = build_pred_graph(prog);
+  const std::vector<int> component =
+      strongly_connected_components(graph.pos_succ);
+  for (const auto& edge : graph.agg_edges) {
+    if (component[edge.body_id] != component[edge.head_id]) continue;
+    return absl::InvalidArgumentError(absl::StrCat(
+        format_source_line(source, edge.statement->source_pos), "\n",
+        "recursive aggregate in rule '", head_description(*edge.statement),
+        "': '", graph.preds[edge.body_id].name, "/",
+        graph.preds[edge.body_id].arity,
+        "' is recursive with the rule's head and cannot be used inside an "
+        "aggregate"));
+  }
 
   return absl::OkStatus();
 }

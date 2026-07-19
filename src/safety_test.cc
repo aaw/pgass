@@ -198,6 +198,63 @@ TEST_F(SafetyTest, ErrorMessageUnsafeAggregate) {
             "unsafe aggregate in rule 'p/1'");
 }
 
+TEST_F(SafetyTest, TestRecursiveAggregateRejected) {
+  // ASP-Core-2 spec example: an aggregate over the very predicate it defines.
+  std::string_view src = "p(X) :- dom(X), #count{ Y : p(Y) } >= X.";
+  Parser parser(src);
+  auto prog = parser.parse_program();
+  ASSERT_TRUE(prog.ok()) << prog.status();
+  EXPECT_THAT(verify_safe(**prog), Not(IsOk()));
+}
+
+TEST_F(SafetyTest, TestAggregateOverUnrelatedRecursivePredicateAllowed) {
+  // ASP-Core-2 spec example: 'reach' is recursive, but the aggregate lives in
+  // a rule for 'big', which isn't part of that recursion, so this is fine.
+  std::string_view src =
+      "reach(X, Z) :- reach(X, Y), edge(Y, Z).\n"
+      "big :- #count{ X, Y : reach(X, Y) } >= 3.";
+  Parser parser(src);
+  auto prog = parser.parse_program();
+  ASSERT_TRUE(prog.ok()) << prog.status();
+  EXPECT_THAT(verify_safe(**prog), IsOk());
+}
+
+TEST_F(SafetyTest, TestRecursiveAggregateThroughMultipleRulesRejected) {
+  // p depends on q, q's aggregate depends on p: a two-rule positive cycle
+  // through the aggregate.
+  std::string_view src =
+      "p(X) :- dom(X), q(X).\n"
+      "q(X) :- dom(X), #count{ Y : p(Y) } >= X.";
+  Parser parser(src);
+  auto prog = parser.parse_program();
+  ASSERT_TRUE(prog.ok()) << prog.status();
+  EXPECT_THAT(verify_safe(**prog), Not(IsOk()));
+}
+
+TEST_F(SafetyTest, TestNegatedLiteralInAggregateDoesNotCountAsRecursive) {
+  // p(Y) only appears default-negated inside the aggregate, so it never
+  // creates a positive dependency and the rule is not rejected as recursive.
+  // dom(Y) binds Y so the aggregate itself stays safe.
+  std::string_view src = "p(X) :- dom(X), #count{ Y : dom(Y), not p(Y) } >= X.";
+  Parser parser(src);
+  auto prog = parser.parse_program();
+  ASSERT_TRUE(prog.ok()) << prog.status();
+  EXPECT_THAT(verify_safe(**prog), IsOk());
+}
+
+TEST_F(SafetyTest, ErrorMessageRecursiveAggregate) {
+  std::string_view src = "p(X) :- dom(X), #count{ Y : p(Y) } >= X.";
+  Parser parser(src);
+  auto prog = parser.parse_program();
+  ASSERT_TRUE(prog.ok()) << prog.status();
+  auto status = verify_safe(**prog);
+  ASSERT_THAT(status, Not(IsOk()));
+  EXPECT_EQ(status.message(),
+            "line 1: p(X) :- dom(X), #count{ Y : p(Y) } >= X.\n"
+            "recursive aggregate in rule 'p/1': 'p/1' is recursive with the "
+            "rule's head and cannot be used inside an aggregate");
+}
+
 TEST_F(SafetyTest, TestWeakConstraintSafe) {
   std::string_view src = ":~ p(X). [1@0, X]";
   Parser parser(src);

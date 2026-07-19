@@ -104,6 +104,37 @@ TEST_F(GraphTest, SccMultiNodeCycleSharesOneComponent) {
   EXPECT_EQ(component[1], component[2]);
 }
 
+TEST_F(GraphTest, AggregateLiteralCreatesAggEdgeToRuleHead) {
+  PredGraph graph = GraphOf("p(X) :- dom(X), #count{ Y : p(Y) } >= X.");
+  int p = IdOf(graph, "p", 1);
+  ASSERT_NE(p, -1);
+  ASSERT_EQ(graph.agg_edges.size(), 1);
+  EXPECT_EQ(graph.agg_edges[0].body_id, p);
+  EXPECT_EQ(graph.agg_edges[0].head_id, p);
+  // The aggregate literal still contributes a normal positive edge too, since
+  // aggregates otherwise participate in the dependency graph like any body
+  // literal.
+  EXPECT_TRUE(HasEdge(graph.pos_succ, p, p));
+}
+
+TEST_F(GraphTest, NegatedAggregateLiteralCreatesNoAggEdge) {
+  PredGraph graph = GraphOf("p(X) :- dom(X), #count{ Y : not p(Y) } >= X.");
+  EXPECT_TRUE(graph.agg_edges.empty());
+}
+
+TEST_F(GraphTest, AggregateEdgeTargetsEveryHeadOfEnclosingRule) {
+  PredGraph graph = GraphOf("a | b :- #count{ X : c(X) } >= 1.");
+  int a = IdOf(graph, "a", 0);
+  int b = IdOf(graph, "b", 0);
+  int c = IdOf(graph, "c", 1);
+  ASSERT_EQ(graph.agg_edges.size(), 2);
+  EXPECT_TRUE((graph.agg_edges[0].body_id == c && graph.agg_edges[0].head_id == a) ||
+              (graph.agg_edges[0].body_id == c && graph.agg_edges[0].head_id == b));
+  EXPECT_TRUE((graph.agg_edges[1].body_id == c && graph.agg_edges[1].head_id == a) ||
+              (graph.agg_edges[1].body_id == c && graph.agg_edges[1].head_id == b));
+  EXPECT_NE(graph.agg_edges[0].head_id, graph.agg_edges[1].head_id);
+}
+
 TEST_F(GraphTest, SccSeparateComponentsWithCrossEdge) {
   // 0 <-> 1 is one component; 2 <-> 3 is another; 1 -> 2 crosses but doesn't
   // merge them since it isn't part of a cycle back to 1.
