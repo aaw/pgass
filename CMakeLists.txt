@@ -148,7 +148,8 @@ target_link_libraries(collect_test
 )
 
 add_executable(aspif_test src/aspif_test.cc)
-target_compile_options(aspif_test PRIVATE -Wall -Wextra -Werror)
+target_compile_options(aspif_test PRIVATE
+  -Wall -Wextra -Werror -Wno-missing-field-initializers)
 target_link_libraries(aspif_test
   PRIVATE
     aspif_lib
