@@ -81,6 +81,14 @@ target_link_libraries(normalize_lib
     graph_lib
 )
 
+add_library(aspif_lib STATIC src/aspif.cc)
+target_compile_options(aspif_lib PRIVATE -Wall -Wextra -Werror)
+target_include_directories(aspif_lib PUBLIC src)
+target_link_libraries(aspif_lib
+  PRIVATE
+    absl::strings
+)
+
 add_library(format_lib STATIC src/format.cc)
 target_compile_options(format_lib PRIVATE -Wall -Wextra -Werror)
 target_link_libraries(format_lib
@@ -139,6 +147,15 @@ target_link_libraries(collect_test
     GTest::gmock
 )
 
+add_executable(aspif_test src/aspif_test.cc)
+target_compile_options(aspif_test PRIVATE -Wall -Wextra -Werror)
+target_link_libraries(aspif_test
+  PRIVATE
+    aspif_lib
+    GTest::gtest_main
+    GTest::gmock
+)
+
 add_executable(graph_test src/graph_test.cc)
 target_compile_options(graph_test PRIVATE -Wall -Wextra -Werror)
 target_link_libraries(graph_test
@@ -155,3 +172,4 @@ gtest_discover_tests(safety_test)
 gtest_discover_tests(normalize_test)
 gtest_discover_tests(collect_test)
 gtest_discover_tests(graph_test)
+gtest_discover_tests(aspif_test)
