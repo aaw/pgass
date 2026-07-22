@@ -74,6 +74,81 @@ TEST(GroundTest, RecursionReachesFixpoint) {
             "0\n");
 }
 
+TEST(GroundTest, NonRecursiveRuleSeesFullRecursiveFixpoint) {
+  // t/1 depends on r/2, which is recursive. If grounding ever processes t's
+  // rule before r has reached its fixpoint, t will be missing atoms. This
+  // pins down the current (correct) behavior so a future component-by-
+  // component rewrite of derive_atoms can be checked against it.
+  auto out = ground_source(
+      "e(a, b). e(b, c).\n"
+      "r(X, Y) :- e(X, Y).\n"
+      "r(X, Z) :- r(X, Y), e(Y, Z).\n"
+      "t(X) :- r(X, Y).");
+  ASSERT_TRUE(out.ok()) << out.status();
+  // e(a,b)=1, e(b,c)=2, r(a,b)=3, r(b,c)=4, r(a,c)=5, t(a)=6, t(b)=7. t(a)
+  // has two support rules: one from r(a,b), one from r(a,c), the atom r's
+  // recursion only derives on its second pass.
+  EXPECT_EQ(*out,
+            "asp 1 0 0\n"
+            "1 0 1 1 0 0\n"
+            "1 0 1 2 0 0\n"
+            "1 0 1 3 0 1 1\n"
+            "1 0 1 4 0 1 2\n"
+            "1 0 1 5 0 2 3 2\n"
+            "1 0 1 6 0 1 3\n"
+            "1 0 1 7 0 1 4\n"
+            "1 0 1 6 0 1 5\n"
+            "4 6 e(a,b) 1 1\n"
+            "4 6 e(b,c) 1 2\n"
+            "4 6 r(a,b) 1 3\n"
+            "4 6 r(b,c) 1 4\n"
+            "4 6 r(a,c) 1 5\n"
+            "4 4 t(a) 1 6\n"
+            "4 4 t(b) 1 7\n"
+            "0\n");
+}
+
+TEST(GroundTest, NegationAgainstUnrelatedRecursiveComponentKeepsDerivedAtom) {
+  // r/2 is its own recursive component and has no positive-dependency link
+  // to p/1 or s/1; s only refers to r through 'not'. r(a, c) only shows up
+  // once the recursion reaches its second pass, so this checks that emission
+  // sees it as derived and keeps 'not r(a, c)' in the body. If rules were
+  // ever emitted before r's component had fully run, this would wrongly look
+  // like r(a, c) is underivable and drop the negation instead.
+  auto out = ground_source(
+      "p(1). p(2).\n"
+      "e(a, b). e(b, c).\n"
+      "r(X, Y) :- e(X, Y).\n"
+      "r(X, Z) :- r(X, Y), e(Y, Z).\n"
+      "s(N) :- p(N), not r(a, c).");
+  ASSERT_TRUE(out.ok()) << out.status();
+  // p(1)=1, p(2)=2, e(a,b)=3, e(b,c)=4, r(a,b)=5, r(b,c)=6, r(a,c)=7. r(a,c)
+  // is derived through the recursion, so 'not r(a, c)' stays in both s(1)
+  // and s(2)'s bodies, negated: 's(1) :- p(1), not r(a, c).' and likewise for
+  // s(2).
+  EXPECT_EQ(*out,
+            "asp 1 0 0\n"
+            "1 0 1 1 0 0\n"
+            "1 0 1 2 0 0\n"
+            "1 0 1 3 0 0\n"
+            "1 0 1 4 0 0\n"
+            "1 0 1 5 0 1 3\n"
+            "1 0 1 6 0 1 4\n"
+            "1 0 1 7 0 2 5 4\n"
+            "1 0 1 8 0 2 1 -7\n"
+            "1 0 1 9 0 2 2 -7\n"
+            "4 4 p(1) 1 1\n"
+            "4 4 p(2) 1 2\n"
+            "4 6 e(a,b) 1 3\n"
+            "4 6 e(b,c) 1 4\n"
+            "4 6 r(a,b) 1 5\n"
+            "4 6 r(b,c) 1 6\n"
+            "4 6 r(a,c) 1 7\n"
+            "4 4 s(1) 1 8\n"
+            "4 4 s(2) 1 9\n"
+            "0\n");
+}
+
 TEST(GroundTest, NegationKeptWhenPossibleDroppedWhenNot) {
   auto out = ground_source("p(1). p(2). q(1). s(X) :- p(X), not q(X).");
   ASSERT_TRUE(out.ok()) << out.status();
