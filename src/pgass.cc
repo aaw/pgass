@@ -25,6 +25,11 @@ int main(int argc, char** argv) {
       "  Files are concatenated; reads from stdin if none are given.");
   std::vector<char*> positional = absl::ParseCommandLine(argc, argv);
 
+  if (absl::GetFlag(FLAGS_format) && absl::GetFlag(FLAGS_ground)) {
+    std::cerr << "pgass: --format and --ground cannot be combined\n";
+    return 1;
+  }
+
   std::string source;
   if (positional.size() <= 1) {
     source = std::string(std::istreambuf_iterator<char>(std::cin),
