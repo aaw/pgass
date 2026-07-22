@@ -144,6 +144,28 @@ TEST_F(GraphTest, SccSeparateComponentsWithCrossEdge) {
   EXPECT_EQ(component[0], component[1]);
   EXPECT_EQ(component[2], component[3]);
   EXPECT_NE(component[0], component[2]);
+  EXPECT_LT(component[0], component[2]);
+}
+
+TEST_F(GraphTest, SccComponentIdsAscendAlongAChain) {
+  // 0 -> 1 -> 2, no cycles: three singleton components.
+  std::vector<std::vector<int>> succ = {{1}, {2}, {}};
+  std::vector<int> component = strongly_connected_components(succ);
+  ASSERT_EQ(component.size(), 3);
+  EXPECT_LT(component[0], component[1]);
+  EXPECT_LT(component[1], component[2]);
+}
+
+TEST_F(GraphTest, SccComponentIdsAscendWithDiamondShapedDependencies) {
+  // 0 -> 1, 0 -> 2, 1 -> 3, 2 -> 3: 0 must precede 1 and 2, which must
+  // precede 3, regardless of visit order.
+  std::vector<std::vector<int>> succ = {{1, 2}, {3}, {3}, {}};
+  std::vector<int> component = strongly_connected_components(succ);
+  ASSERT_EQ(component.size(), 4);
+  EXPECT_LT(component[0], component[1]);
+  EXPECT_LT(component[0], component[2]);
+  EXPECT_LT(component[1], component[3]);
+  EXPECT_LT(component[2], component[3]);
 }
 
 }  // namespace

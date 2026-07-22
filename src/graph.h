@@ -71,9 +71,16 @@ struct PredGraph {
 PredGraph build_pred_graph(const Program& prog);
 
 // Returns, for each of the n = succ.size() nodes, the id of its strongly
-// connected component. Component ids are arbitrary but two nodes share one iff
-// they are mutually reachable through `succ`. Callers pass the adjacency they
-// care about, e.g. graph.pos_succ for the positive dependency graph.
+// connected component. Two nodes share a component iff they are mutually
+// reachable through `succ`. Callers pass the adjacency they care about, e.g.
+// graph.pos_succ for the positive dependency graph.
+//
+// Component ids come out in topological order: for every edge u -> v in
+// `succ` with component[u] != component[v], component[u] < component[v]. E.g.
+// for the predicate dependency graph (edges point from body predicates to
+// head predicates), a predicate's component id is always lower than the
+// component id of anything that depends on it, so iterating component ids in
+// ascending order visits a predicate before whatever needs its atoms.
 std::vector<int> strongly_connected_components(
     const std::vector<std::vector<int>>& succ);
 

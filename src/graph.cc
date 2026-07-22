@@ -127,6 +127,7 @@ std::vector<int> strongly_connected_components(
   std::vector<int> dfn(N, -1), low(N, -1), rep(N, -1), tarjan_stack;
   std::vector<bool> in_stack(N, false);
   int timer = 0;
+  int num_popped = 0;
 
   for (int i = 0; i < N; ++i) {
     if (dfn[i] != -1) continue;
@@ -168,12 +169,14 @@ std::vector<int> strongly_connected_components(
             int v = tarjan_stack.back();
             tarjan_stack.pop_back();
             in_stack[v] = false;
-            rep[v] = done;
+            rep[v] = num_popped;
             if (v == done) break;
           }
+          ++num_popped;
         }
       }
     }
   }
+  for (int& r : rep) r = num_popped - 1 - r;
   return rep;
 }
