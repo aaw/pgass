@@ -9,11 +9,14 @@
 #include "absl/log/check.h"
 #include "absl/strings/str_cat.h"
 #include "format.h"
+#include "ground.h"
 #include "normalize.h"
 #include "parse.h"
 #include "safety.h"
 
 ABSL_FLAG(bool, format, false, "Format the program and print to stdout");
+ABSL_FLAG(bool, ground, false,
+          "Ground the program, print it as aspif text, and exit");
 
 int main(int argc, char** argv) {
   absl::SetProgramUsageMessage(
@@ -62,6 +65,17 @@ int main(int argc, char** argv) {
   if (!normal.ok()) {
     std::cerr << "pgass: normalization error: " << normal.message() << "\n";
     return 1;
+  }
+
+  auto grounded = ground(**program);
+  if (!grounded.ok()) {
+    std::cerr << "pgass: grounding error: " << grounded.status().message()
+              << "\n";
+    return 1;
+  }
+  if (absl::GetFlag(FLAGS_ground)) {
+    std::cout << to_aspif(*grounded);
+    return 0;
   }
   return 0;
 }

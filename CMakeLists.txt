@@ -89,6 +89,19 @@ target_link_libraries(aspif_lib
     absl::strings
 )
 
+add_library(ground_lib STATIC src/ground.cc)
+target_compile_options(ground_lib PRIVATE -Wall -Wextra -Werror)
+target_link_libraries(ground_lib
+  PUBLIC
+    aspif_lib
+    parse_lib
+    absl::statusor
+  PRIVATE
+    absl::flat_hash_map
+    absl::strings
+    graph_lib
+)
+
 add_library(format_lib STATIC src/format.cc)
 target_compile_options(format_lib PRIVATE -Wall -Wextra -Werror)
 target_link_libraries(format_lib
@@ -101,6 +114,7 @@ target_compile_options(pgass PRIVATE -Wall -Wextra -Werror)
 target_link_libraries(pgass
   PRIVATE
     format_lib
+    ground_lib
     normalize_lib
     safety_lib
     absl::check
@@ -157,6 +171,16 @@ target_link_libraries(aspif_test
     GTest::gmock
 )
 
+add_executable(ground_test src/ground_test.cc)
+target_compile_options(ground_test PRIVATE -Wall -Wextra -Werror)
+target_link_libraries(ground_test
+  PRIVATE
+    ground_lib
+    normalize_lib
+    GTest::gtest_main
+    GTest::gmock
+)
+
 add_executable(graph_test src/graph_test.cc)
 target_compile_options(graph_test PRIVATE -Wall -Wextra -Werror)
 target_link_libraries(graph_test
@@ -174,3 +198,4 @@ gtest_discover_tests(normalize_test)
 gtest_discover_tests(collect_test)
 gtest_discover_tests(graph_test)
 gtest_discover_tests(aspif_test)
+gtest_discover_tests(ground_test)
