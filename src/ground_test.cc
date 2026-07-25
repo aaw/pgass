@@ -122,36 +122,85 @@ TEST(GroundTest, NegationAgainstUnrelatedRecursiveComponentKeepsDerivedAtom) {
       "r(X, Z) :- r(X, Y), e(Y, Z).\n"
       "s(N) :- p(N), not r(a, c).");
   ASSERT_TRUE(out.ok()) << out.status();
-  // p(1)=1, p(2)=2, e(a,b)=3, e(b,c)=4, r(a,b)=5, r(b,c)=6, r(a,c)=7. r(a,c)
-  // is derived through the recursion, so 'not r(a, c)' stays in both s(1)
-  // and s(2)'s bodies, negated: 's(1) :- p(1), not r(a, c).' and likewise for
-  // s(2).
+  // Components now derive in topological order before anything is emitted,
+  // so e/r (r's component has no positive edge to p or s) derive before
+  // p/s: e(a,b)=1, e(b,c)=2, r(a,b)=3, r(b,c)=4, r(a,c)=5, p(1)=6, p(2)=7.
+  // r(a,c) is derived through the recursion, so 'not r(a, c)' stays in both
+  // s(1) and s(2)'s bodies, negated: 's(1) :- p(1), not r(a, c).' and
+  // likewise for s(2).
   EXPECT_EQ(*out,
             "asp 1 0 0\n"
             "1 0 1 1 0 0\n"
             "1 0 1 2 0 0\n"
-            "1 0 1 3 0 0\n"
-            "1 0 1 4 0 0\n"
-            "1 0 1 5 0 1 3\n"
-            "1 0 1 6 0 1 4\n"
-            "1 0 1 7 0 2 5 4\n"
-            "1 0 1 8 0 2 1 -7\n"
-            "1 0 1 9 0 2 2 -7\n"
-            "4 4 p(1) 1 1\n"
-            "4 4 p(2) 1 2\n"
-            "4 6 e(a,b) 1 3\n"
-            "4 6 e(b,c) 1 4\n"
-            "4 6 r(a,b) 1 5\n"
-            "4 6 r(b,c) 1 6\n"
-            "4 6 r(a,c) 1 7\n"
+            "1 0 1 3 0 1 1\n"
+            "1 0 1 4 0 1 2\n"
+            "1 0 1 5 0 2 3 2\n"
+            "1 0 1 6 0 0\n"
+            "1 0 1 7 0 0\n"
+            "1 0 1 8 0 2 6 -5\n"
+            "1 0 1 9 0 2 7 -5\n"
+            "4 6 e(a,b) 1 1\n"
+            "4 6 e(b,c) 1 2\n"
+            "4 6 r(a,b) 1 3\n"
+            "4 6 r(b,c) 1 4\n"
+            "4 6 r(a,c) 1 5\n"
+            "4 4 p(1) 1 6\n"
+            "4 4 p(2) 1 7\n"
             "4 4 s(1) 1 8\n"
             "4 4 s(2) 1 9\n"
+            "0\n");
+}
+
+TEST(GroundTest, NegationAgainstLaterComponentKeepsDerivedAtom) {
+  // c/2 is defined before q/1 and p/1 in the source, so its component id ends
+  // up *higher* than p's: p's component has no positive edge into c (only
+  // 'not c' references it), while q positively reaches p, pulling p's whole
+  // component earlier in topological order. If grounding ever emits a
+  // component's rules right after deriving that component, instead of
+  // deriving every component first, it would process p before c has any
+  // atoms and wrongly conclude 'not c(x, z)' can never fail, dropping the
+  // negation instead of keeping it.
+  auto out = ground_source(
+      "a(x, y). a(y, z).\n"
+      "c(X, Y) :- a(X, Y).\n"
+      "c(X, Z) :- c(X, Y), a(Y, Z).\n"
+      "q(1). q(2).\n"
+      "p(N) :- q(N), not c(x, z).");
+  ASSERT_TRUE(out.ok()) << out.status();
+  // q's component (id 0) derives before p's (id 1), which derives before
+  // a/c's (ids 2-3): q(1)=1, q(2)=2, p(1)=3, p(2)=4, a(x,y)=5, a(y,z)=6,
+  // c(x,y)=7, c(y,z)=8, c(x,z)=9. c(x,z) is only derived on c's second pass,
+  // after p has already been derived, but since nothing is emitted until
+  // every component has derived, 'not c(x, z)' still stays in both p(1) and
+  // p(2)'s bodies, negated.
+  EXPECT_EQ(*out,
+            "asp 1 0 0\n"
+            "1 0 1 1 0 0\n"
+            "1 0 1 2 0 0\n"
+            "1 0 1 3 0 2 1 -9\n"
+            "1 0 1 4 0 2 2 -9\n"
+            "1 0 1 5 0 0\n"
+            "1 0 1 6 0 0\n"
+            "1 0 1 7 0 1 5\n"
+            "1 0 1 8 0 1 6\n"
+            "1 0 1 9 0 2 7 6\n"
+            "4 4 q(1) 1 1\n"
+            "4 4 q(2) 1 2\n"
+            "4 4 p(1) 1 3\n"
+            "4 4 p(2) 1 4\n"
+            "4 6 a(x,y) 1 5\n"
+            "4 6 a(y,z) 1 6\n"
+            "4 6 c(x,y) 1 7\n"
+            "4 6 c(y,z) 1 8\n"
+            "4 6 c(x,z) 1 9\n"
             "0\n");
 }
 
 TEST(GroundTest, NegationKeptWhenPossibleDroppedWhenNot) {
   auto out = ground_source("p(1). p(2). q(1). s(X) :- p(X), not q(X).");
   ASSERT_TRUE(out.ok()) << out.status();
+  // q/1 has no positive-dependency link to p/1 or s/1, so its singleton
+  // component derives before p's: q(1)=1, p(1)=2, p(2)=3, s(1)=4, s(2)=5.
   // q(1) is derivable, so 's(1) :- p(1), not q(1).' keeps the negation.
   // q(2) is not, so 'not q(2)' is dropped: 's(2) :- p(2).'.
   EXPECT_EQ(*out,
@@ -159,11 +208,11 @@ TEST(GroundTest, NegationKeptWhenPossibleDroppedWhenNot) {
             "1 0 1 1 0 0\n"
             "1 0 1 2 0 0\n"
             "1 0 1 3 0 0\n"
-            "1 0 1 4 0 2 1 -3\n"
-            "1 0 1 5 0 1 2\n"
-            "4 4 p(1) 1 1\n"
-            "4 4 p(2) 1 2\n"
-            "4 4 q(1) 1 3\n"
+            "1 0 1 4 0 2 2 -1\n"
+            "1 0 1 5 0 1 3\n"
+            "4 4 q(1) 1 1\n"
+            "4 4 p(1) 1 2\n"
+            "4 4 p(2) 1 3\n"
             "4 4 s(1) 1 4\n"
             "4 4 s(2) 1 5\n"
             "0\n");
@@ -186,25 +235,31 @@ TEST(GroundTest, ComparisonFiltersInstances) {
 TEST(GroundTest, ConstraintHasNoHead) {
   auto out = ground_source("p(1). q(1). :- p(X), q(X).");
   ASSERT_TRUE(out.ok()) << out.status();
+  // p and q are each their own singleton component with no edges between
+  // them (a constraint's body predicates get no outgoing edges at all), so
+  // q's component happens to derive first: q(1)=1, p(1)=2.
   EXPECT_EQ(*out,
             "asp 1 0 0\n"
             "1 0 1 1 0 0\n"
             "1 0 1 2 0 0\n"
-            "1 0 0 0 2 1 2\n"
-            "4 4 p(1) 1 1\n"
-            "4 4 q(1) 1 2\n"
+            "1 0 0 0 2 2 1\n"
+            "4 4 q(1) 1 1\n"
+            "4 4 p(1) 1 2\n"
             "0\n");
 }
 
 TEST(GroundTest, ZeroArityAtoms) {
   auto out = ground_source("p. q :- not p.");
   ASSERT_TRUE(out.ok()) << out.status();
+  // p and q are each singleton components with no positive edge between
+  // them ('not p' doesn't count), so q's component happens to derive first:
+  // q=1, p=2. 'not p' is still kept since p is derivable by emit time.
   EXPECT_EQ(*out,
             "asp 1 0 0\n"
-            "1 0 1 1 0 0\n"
-            "1 0 1 2 0 1 -1\n"
-            "4 1 p 1 1\n"
-            "4 1 q 1 2\n"
+            "1 0 1 1 0 1 -2\n"
+            "1 0 1 2 0 0\n"
+            "4 1 q 1 1\n"
+            "4 1 p 1 2\n"
             "0\n");
 }
 

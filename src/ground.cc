@@ -265,6 +265,21 @@ absl::StatusOr<std::vector<RuleView>> make_rule_views(const Program& prog) {
   return rules;
 }
 
+// Buckets rules by component[id_of[head predicate]]. Constraints (no head)
+// are skipped; they stay only in the flat `rules` list for emit_rules.
+std::vector<std::vector<RuleView>> bucket_rule_views(
+    const PredGraph& graph, const std::vector<int>& component,
+    const std::vector<RuleView>& rules) {
+  int num_components =
+      *std::max_element(component.begin(), component.end()) + 1;
+  std::vector<std::vector<RuleView>> bucket(num_components);
+  for (const RuleView& rv : rules) {
+    if (rv.head == nullptr) continue;
+    bucket[component[graph.id_of.at(pred_key(*rv.head))]].push_back(rv);
+  }
+  return bucket;
+}
+
 // One way to satisfy a rule body with the atoms in the store: a value for
 // each of the body's variables, plus the ASPIF atom each positive literal
 // matched, e.g. binding = {X: a, Y: b} and matched = {3} for 'edge(X, Y)'
@@ -437,12 +452,33 @@ void name_outputs(const Store& store, aspif::Program& result) {
 }  // namespace
 
 absl::StatusOr<aspif::Program> ground(const Program& prog) {
+  const PredGraph graph = build_pred_graph(prog);
+  const std::vector<int> component =
+      strongly_connected_components(graph.pos_succ);
   ASSIGN_OR_RETURN(std::vector<RuleView> rules, make_rule_views(prog));
+  std::vector<std::vector<RuleView>> rules_by_component =
+      bucket_rule_views(graph, component, rules);
+  std::vector<RuleView> headless_rules;
+  for (const auto& rule : rules) {
+    if (rule.head == nullptr) headless_rules.push_back(rule);
+  }
 
+  // Two passes: derive every component, then emit every component. A
+  // component's positive body literals depend only on earlier components,
+  // so deriving in ascending order gets those right. Negation is different:
+  // a 'not q' can point at a later component, since negation edges don't
+  // constrain component order. So by the time any component is emitted, q's
+  // final atom set already exists, and emit_rules can correctly decide
+  // whether q is derivable.
   aspif::Program result;
   Store store;
-  RETURN_IF_ERROR(derive_atoms(rules, store, result));
-  RETURN_IF_ERROR(emit_rules(rules, store, result));
+  for (const auto& component_rules : rules_by_component) {
+    RETURN_IF_ERROR(derive_atoms(component_rules, store, result));
+  }
+  for (const auto& component_rules : rules_by_component) {
+    RETURN_IF_ERROR(emit_rules(component_rules, store, result));
+  }
+  RETURN_IF_ERROR(emit_rules(headless_rules, store, result));
   name_outputs(store, result);
   return result;
 }
