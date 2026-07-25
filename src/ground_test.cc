@@ -488,10 +488,95 @@ TEST(GroundTest, ArithmeticRejected) {
   EXPECT_THAT(std::string(out.status().message()), HasSubstr("arithmetic"));
 }
 
-TEST(GroundTest, FunctionTermsRejected) {
-  auto out = ground_source("p(f(1)).");
-  ASSERT_FALSE(out.ok());
-  EXPECT_THAT(std::string(out.status().message()), HasSubstr("function"));
+TEST(GroundTest, FunctionTermsMatchArgumentByArgument) {
+  auto out = ground_source(
+      "p(f(1)). p(f(2)). p(g(a, b)).\n"
+      "q(X) :- p(f(X)).\n"
+      "r(Y) :- p(g(a, Y)).");
+  ASSERT_TRUE(out.ok()) << out.status();
+  // p(f(1))=1, p(f(2))=2, p(g(a,b))=3, r(b)=4, q(1)=5, q(2)=6. r's rule comes
+  // first because r/1 and q/1 are separate components and r's is grounded
+  // first.
+  EXPECT_EQ(*out,
+            "asp 1 0 0\n"
+            "1 0 1 1 0 0\n"
+            "1 0 1 2 0 0\n"
+            "1 0 1 3 0 0\n"
+            "1 0 1 4 0 1 3\n"
+            "1 0 1 5 0 1 1\n"
+            "1 0 1 6 0 1 2\n"
+            "4 7 p(f(1)) 1 1\n"
+            "4 7 p(f(2)) 1 2\n"
+            "4 9 p(g(a,b)) 1 3\n"
+            "4 4 r(b) 1 4\n"
+            "4 4 q(1) 1 5\n"
+            "4 4 q(2) 1 6\n"
+            "0\n");
+}
+
+TEST(GroundTest, NestedFunctionTerms) {
+  auto out = ground_source(
+      "p(f(g(1))).\n"
+      "q(X) :- p(f(g(X))).");
+  ASSERT_TRUE(out.ok()) << out.status();
+  EXPECT_EQ(*out,
+            "asp 1 0 0\n"
+            "1 0 1 1 0 0\n"
+            "1 0 1 2 0 1 1\n"
+            "4 10 p(f(g(1))) 1 1\n"
+            "4 4 q(1) 1 2\n"
+            "0\n");
+}
+
+TEST(GroundTest, FunctionTermNeedsSameNameAndArity) {
+  auto out = ground_source(
+      "p(f(1)). p(g(1)). p(f(1, 2)).\n"
+      "q(X) :- p(f(X)).");
+  ASSERT_TRUE(out.ok()) << out.status();
+  // Only p(f(1)) matches 'p(f(X))': g(1) has a different name and f(1,2) a
+  // different arity, so q(1) is the sole q atom.
+  EXPECT_EQ(*out,
+            "asp 1 0 0\n"
+            "1 0 1 1 0 0\n"
+            "1 0 1 2 0 0\n"
+            "1 0 1 3 0 0\n"
+            "1 0 1 4 0 1 1\n"
+            "4 7 p(f(1)) 1 1\n"
+            "4 7 p(g(1)) 1 2\n"
+            "4 9 p(f(1,2)) 1 3\n"
+            "4 4 q(1) 1 4\n"
+            "0\n");
+}
+
+TEST(GroundTest, RepeatedVariableInsideFunctionTerm) {
+  auto out = ground_source(
+      "p(f(1, 1)). p(f(1, 2)).\n"
+      "q(X) :- p(f(X, X)).");
+  ASSERT_TRUE(out.ok()) << out.status();
+  // f(1,2) can't bind X to both 1 and 2, so only f(1,1) gives q(1).
+  EXPECT_EQ(*out,
+            "asp 1 0 0\n"
+            "1 0 1 1 0 0\n"
+            "1 0 1 2 0 0\n"
+            "1 0 1 3 0 1 1\n"
+            "4 9 p(f(1,1)) 1 1\n"
+            "4 9 p(f(1,2)) 1 2\n"
+            "4 4 q(1) 1 3\n"
+            "0\n");
+}
+
+TEST(GroundTest, FunctionTermsSortAfterEveryAtomicValue) {
+  // ASP-Core-2 orders integers < symbolic constants < string constants <
+  // function terms, so lt/2 holds for every pair in that order.
+  auto out = ground_source(
+      "v(1). v(a). v(\"s\"). v(f(1)).\n"
+      "lt(X, Y) :- v(X), v(Y), X < Y.");
+  ASSERT_TRUE(out.ok()) << out.status();
+  EXPECT_THAT(*out, HasSubstr("lt(1,a)"));
+  EXPECT_THAT(*out, HasSubstr("lt(1,f(1))"));
+  EXPECT_THAT(*out, HasSubstr("lt(a,f(1))"));
+  // Nothing sorts before f(1), the string included.
+  EXPECT_THAT(*out, ::testing::Not(HasSubstr("lt(f(1),")));
 }
 
 }  // namespace

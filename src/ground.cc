@@ -18,48 +18,65 @@
 
 namespace {
 
-// A ground value: a number, a constant like abc, or a quoted string like
-// "abc". Values are atomic (function terms are not supported yet). The kind
-// order matches the ASP-Core-2 spec, which orders integers < symbolic
-// constants < string constants < functional terms.
+// A ground value: a number, a constant like abc, a quoted string like "abc",
+// or a function term like f(1, abc) whose arguments are themselves values.
+// The kind order matches the ASP-Core-2 spec, which orders integers <
+// symbolic constants < string constants < functional terms.
 struct Value {
-  enum Kind { kNumber, kConstant, kString };
+  enum Kind { kNumber, kConstant, kString, kFunction };
 
   Kind kind;
-  uint64_t number = 0;  // set only when kind == kNumber
-  std::string text;     // the constant's name or the string's contents
+  uint64_t number = 0;       // set only when kind == kNumber
+  std::string text;          // the constant's, string's, or function's name
+  std::vector<Value> args;   // set only when kind == kFunction, never empty
 
-  static Value make_number(uint64_t n) { return {kNumber, n, ""}; }
+  static Value make_number(uint64_t n) { return {kNumber, n, "", {}}; }
   static Value make_constant(std::string name) {
-    return {kConstant, 0, std::move(name)};
+    return {kConstant, 0, std::move(name), {}};
   }
   static Value make_string(std::string contents) {
-    return {kString, 0, std::move(contents)};
+    return {kString, 0, std::move(contents), {}};
+  }
+  static Value make_function(std::string name, std::vector<Value> args) {
+    return {kFunction, 0, std::move(name), std::move(args)};
   }
 
-  // The value as it prints in an answer set: 42, abc, or "abc".
+  // The value as it prints in an answer set: 42, abc, "abc", or f(1,abc).
   std::string printed() const {
     if (kind == kNumber) return absl::StrCat(number);
     if (kind == kString) return absl::StrCat("\"", text, "\"");
-    return text;
+    if (kind == kConstant) return text;
+    auto print_arg = [](std::string* out, const Value& value) {
+      out->append(value.printed());
+    };
+    return absl::StrCat(text, "(", absl::StrJoin(args, ",", print_arg), ")");
   }
 
   bool operator==(const Value&) const = default;
 
   template <typename H>
   friend H AbslHashValue(H h, const Value& v) {
-    return H::combine(std::move(h), v.kind, v.number, v.text);
+    return H::combine(std::move(h), v.kind, v.number, v.text, v.args);
   }
 };
 
 // Orders ground values per the ASP-Core-2 spec (see the comment on Value
-// above): numbers numerically, constants and strings lexicographically.
+// above): numbers numerically, constants and strings lexicographically, and
+// function terms by arity first, then name, then argument by argument.
 int compare_values(const Value& a, const Value& b) {
   if (a.kind != b.kind) return a.kind < b.kind ? -1 : 1;
   if (a.kind == Value::kNumber) {
     return a.number < b.number ? -1 : a.number > b.number ? 1 : 0;
   }
-  return a.text < b.text ? -1 : a.text > b.text ? 1 : 0;
+  if (a.kind == Value::kFunction && a.args.size() != b.args.size()) {
+    return a.args.size() < b.args.size() ? -1 : 1;
+  }
+  if (a.text != b.text) return a.text < b.text ? -1 : 1;
+  for (size_t k = 0; k < a.args.size(); ++k) {
+    int c = compare_values(a.args[k], b.args[k]);
+    if (c != 0) return c;
+  }
+  return 0;
 }
 
 // The argument values of one ground atom, e.g. {1, abc} for p(1, abc).
@@ -124,11 +141,14 @@ absl::StatusOr<Value> eval_term(const Term& term, const Binding& binding) {
       return Value::make_string(static_cast<const String&>(term).value);
     case Term::AtomKind: {
       const Atom& atom = static_cast<const Atom&>(term);
-      if (atom.args != nullptr) {
-        return absl::UnimplementedError(absl::StrCat(
-            "function terms are not supported yet: '", atom.name, "(...)'"));
+      if (atom.args == nullptr) return Value::make_constant(atom.name);
+      std::vector<Value> args;
+      args.reserve(atom.args->size());
+      for (const auto& arg : *atom.args) {
+        ASSIGN_OR_RETURN(Value value, eval_term(*arg, binding));
+        args.push_back(std::move(value));
       }
-      return Value::make_constant(atom.name);
+      return Value::make_function(atom.name, std::move(args));
     }
     case Term::VariableKind: {
       const std::string& name = static_cast<const Variable&>(term).name;
@@ -163,6 +183,41 @@ absl::StatusOr<Tuple> eval_args(const ClassicalLiteral& literal,
   return tuple;
 }
 
+// Tries to match one argument term against one stored value, extending
+// `binding` with whatever variables the match binds. Returns false on a
+// mismatch, in which case `binding` may already hold bindings from the part
+// that did match, so the caller must discard it.
+//
+// A function term matches value by value against a stored function of the
+// same name and arity, e.g. 'f(X, b)' matches a stored f(1, b) and binds
+// X to 1.
+absl::StatusOr<bool> match_term(const Term& arg, const Value& value,
+                                Binding& binding) {
+  if (arg.kind == Term::VariableKind) {
+    const std::string& name = static_cast<const Variable&>(arg).name;
+    auto [it, inserted] = binding.try_emplace(name, value);
+    return inserted || it->second == value;
+  }
+  if (arg.kind == Term::AnonymousVariableKind) return true;
+  if (arg.kind == Term::AtomKind) {
+    const Atom& atom = static_cast<const Atom&>(arg);
+    if (atom.args != nullptr) {
+      if (value.kind != Value::kFunction || value.text != atom.name ||
+          value.args.size() != atom.args->size()) {
+        return false;
+      }
+      for (size_t k = 0; k < value.args.size(); ++k) {
+        ASSIGN_OR_RETURN(bool ok,
+                         match_term(*(*atom.args)[k], value.args[k], binding));
+        if (!ok) return false;
+      }
+      return true;
+    }
+  }
+  ASSIGN_OR_RETURN(Value evaluated, eval_term(arg, binding));
+  return evaluated == value;
+}
+
 // Tries to match `literal`'s arguments against a stored tuple. On a match,
 // returns a copy of `binding` extended with any variables the match binds;
 // on a mismatch, returns nullopt. `tuple` has one value per argument: the
@@ -174,17 +229,9 @@ absl::StatusOr<std::optional<Binding>> match_args(
   Binding extended = binding;
   size_t n = literal.args ? literal.args->size() : 0;
   for (size_t k = 0; k < n; ++k) {
-    const Term& arg = *(*literal.args)[k];
-    if (arg.kind == Term::VariableKind) {
-      const std::string& name = static_cast<const Variable&>(arg).name;
-      auto [it, inserted] = extended.try_emplace(name, tuple[k]);
-      if (!inserted && it->second != tuple[k]) return std::nullopt;
-    } else if (arg.kind == Term::AnonymousVariableKind) {
-      continue;
-    } else {
-      ASSIGN_OR_RETURN(Value value, eval_term(arg, extended));
-      if (value != tuple[k]) return std::nullopt;
-    }
+    ASSIGN_OR_RETURN(bool ok,
+                     match_term(*(*literal.args)[k], tuple[k], extended));
+    if (!ok) return std::nullopt;
   }
   return extended;
 }
