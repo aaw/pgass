@@ -420,7 +420,8 @@ absl::StatusOr<std::vector<aspif::WeightedLit>> ground_agg_elements(
     BodyParts parts = split_naf_literals(element.literals);
     ASSIGN_OR_RETURN(
         std::vector<Instance> instances,
-        find_instances(parts, store, Instance{.binding = outer_binding}));
+        find_instances(parts, store,
+                        Instance{.binding = outer_binding, .matched = {}}));
     for (const Instance& instance : instances) {
       Tuple tuple;
       if (element.terms != nullptr) {
@@ -538,7 +539,8 @@ aspif::Lit negate_conjunction(const std::vector<aspif::Lit>& lits,
   }
   if (lits.size() == 1) return -lits[0];
   aspif::Atom conj = result.new_atom();
-  result.rules.push_back(aspif::Rule{.head = {conj}, .body = lits});
+  result.rules.push_back(
+      aspif::Rule{.head = {conj}, .body = lits, .weighted_body = {}});
   return -conj;
 }
 
@@ -583,6 +585,7 @@ absl::StatusOr<std::vector<aspif::Lit>> ground_aggregate(
     result.rules.push_back(
         aspif::Rule{.head = {low_ok},
                     .body_type = aspif::Rule::BodyType::kWeight,
+                    .body = {},
                     .lower_bound = *bounds.lower,
                     .weighted_body = weighted});
     extra.push_back(low_ok);
@@ -592,6 +595,7 @@ absl::StatusOr<std::vector<aspif::Lit>> ground_aggregate(
     result.rules.push_back(
         aspif::Rule{.head = {high_bad},
                     .body_type = aspif::Rule::BodyType::kWeight,
+                    .body = {},
                     .lower_bound = *bounds.upper + 1,
                     .weighted_body = weighted});
     extra.push_back(-high_bad);
@@ -601,17 +605,21 @@ absl::StatusOr<std::vector<aspif::Lit>> ground_aggregate(
     result.rules.push_back(
         aspif::Rule{.head = {low_eq},
                     .body_type = aspif::Rule::BodyType::kWeight,
+                    .body = {},
                     .lower_bound = k,
                     .weighted_body = weighted});
     aspif::Atom high_bad_eq = result.new_atom();
     result.rules.push_back(
         aspif::Rule{.head = {high_bad_eq},
                     .body_type = aspif::Rule::BodyType::kWeight,
+                    .body = {},
                     .lower_bound = k + 1,
                     .weighted_body = weighted});
     aspif::Atom eq_ok = result.new_atom();
     result.rules.push_back(
-        aspif::Rule{.head = {eq_ok}, .body = {low_eq, -high_bad_eq}});
+        aspif::Rule{.head = {eq_ok},
+                    .body = {low_eq, -high_bad_eq},
+                    .weighted_body = {}});
     extra.push_back(-eq_ok);
   }
 
