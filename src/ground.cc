@@ -7,6 +7,7 @@
 #include <utility>
 #include <vector>
 
+#include "absl/container/btree_map.h"
 #include "absl/container/flat_hash_map.h"
 #include "absl/status/status.h"
 #include "absl/status/statusor.h"
@@ -273,10 +274,6 @@ absl::StatusOr<std::vector<RuleView>> make_rule_views(const Program& prog) {
       const auto& head = static_cast<const Disjunction&>(*statement->head);
       if (head.literals.size() != 1) return not_normalized;
       rule.head = head.literals[0].get();
-      if (rule.head->id == "_viol") {
-        return absl::UnimplementedError(
-            "weak constraints are not supported yet");
-      }
     }
     rule.parts = split_body(statement->body.get());
     rules.push_back(std::move(rule));
@@ -704,6 +701,46 @@ absl::Status emit_rules(const std::vector<RuleView>& rules, const Store& store,
   return absl::OkStatus();
 }
 
+// Turns the ground _viol atoms into one ASPIF minimize statement per
+// priority level.
+//
+// normalize() rewrote each weak constraint ':~ body. [w@l, t1, ..., tn]' into
+// the ordinary rule '_viol(l, w, t1, ..., tn) :- body.', so the _viol atoms
+// in the store are already grounded and numbered like any others. Each one a
+// solver makes true is one violation costing w at level l, and a minimize
+// statement asks for exactly that: the sum of the weights of its true
+// literals, minimized. Weak-constraint set semantics comes along for free,
+// because two groundings agreeing on (l, w, t1, ..., tn) are the same ground
+// atom and so appear once.
+//
+// A level's literals are collected across every _viol arity in the program:
+// weak constraints with different numbers of terms give _viol different
+// arities, which are distinct predicates in the store but the same level.
+absl::Status emit_minimize(const Store& store, aspif::Program& result) {
+  absl::btree_map<int64_t, std::vector<aspif::WeightedLit>> by_level;
+  for (const PredKey& key : store.order) {
+    if (key.name != "_viol") continue;
+    for (const GroundAtom& atom : store.find(key)->atoms) {
+      // normalize() always puts the level and weight first, in that order.
+      const Value& level = atom.args[0];
+      const Value& weight = atom.args[1];
+      if (level.kind != Value::kNumber || weight.kind != Value::kNumber) {
+        return absl::InvalidArgumentError(absl::StrCat(
+            "a weak constraint's weight and level must be numbers, but got "
+            "[",
+            weight.printed(), "@", level.printed(), "]"));
+      }
+      by_level[static_cast<int64_t>(level.number)].push_back(
+          {.lit = atom.id, .weight = static_cast<int64_t>(weight.number)});
+    }
+  }
+  for (auto& [level, lits] : by_level) {
+    result.minimize.push_back(
+        aspif::Minimize{.priority = level, .lits = std::move(lits)});
+  }
+  return absl::OkStatus();
+}
+
 // Names every atom of a user-visible predicate ('_' prefixes are internal)
 // so answer sets print symbolically.
 void name_outputs(const Store& store, aspif::Program& result) {
@@ -755,6 +792,7 @@ absl::StatusOr<aspif::Program> ground(const Program& prog) {
     RETURN_IF_ERROR(emit_rules(component_rules, store, result));
   }
   RETURN_IF_ERROR(emit_rules(headless_rules, store, result));
+  RETURN_IF_ERROR(emit_minimize(store, result));
   name_outputs(store, result);
   return result;
 }

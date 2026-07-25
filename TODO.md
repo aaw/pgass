@@ -1,6 +1,5 @@
 # Grounder
 
-* Rewrite weak constraints (_viol instances) as ASPIF minimize statements.
 * Support function terms (currently rejected in eval_term).
 * Support arithmetic terms (NegatedTermKind, TermOperationKind; currently rejected in eval_term).
 * Support binding a variable via assignment (e.g. `X = Y + 1`), not just positive body literals.

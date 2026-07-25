@@ -401,6 +401,81 @@ TEST(GroundTest, AggregateDedupesEqualTuplesAcrossElements) {
             "0\n");
 }
 
+TEST(GroundTest, WeakConstraintBecomesMinimize) {
+  auto out = ground_source("p(1). p(2). :~ p(X). [1@0, X]");
+  ASSERT_TRUE(out.ok()) << out.status();
+  // p(1)=1, p(2)=2, then the _viol atoms normalization derived from the weak
+  // constraint: _viol(0,1,1)=3 and _viol(0,1,2)=4. Both sit at level 0 with
+  // weight 1, so they share one minimize statement. _viol starts with '_',
+  // so it stays out of the output statements.
+  EXPECT_EQ(*out,
+            "asp 1 0 0\n"
+            "1 0 1 1 0 0\n"
+            "1 0 1 2 0 0\n"
+            "1 0 1 3 0 1 1\n"
+            "1 0 1 4 0 1 2\n"
+            "2 0 2 3 1 4 1\n"
+            "4 4 p(1) 1 1\n"
+            "4 4 p(2) 1 2\n"
+            "0\n");
+}
+
+TEST(GroundTest, WeakConstraintsGroupByLevel) {
+  // Three weak constraints across two levels. The last one carries no terms,
+  // so it becomes _viol/2 while the others become _viol/3 -- different
+  // predicates in the store, but level 2 collects literals from both.
+  auto out = ground_source(
+      "a(1). b(2).\n"
+      ":~ a(X). [1@0, X]\n"
+      ":~ b(X). [3@2, X]\n"
+      ":~ a(X). [5@2]");
+  ASSERT_TRUE(out.ok()) << out.status();
+  // b(2)=1, a(1)=2, _viol(2,5)=3, _viol(0,1,1)=4, _viol(2,3,2)=5. Levels come
+  // out ascending: level 0 holds _viol(0,1,1) at weight 1; level 2 holds
+  // _viol(2,5) at weight 5 and _viol(2,3,2) at weight 3.
+  EXPECT_EQ(*out,
+            "asp 1 0 0\n"
+            "1 0 1 1 0 0\n"
+            "1 0 1 2 0 0\n"
+            "1 0 1 3 0 1 2\n"
+            "1 0 1 4 0 1 2\n"
+            "1 0 1 5 0 1 1\n"
+            "2 0 1 4 1\n"
+            "2 2 2 3 5 5 3\n"
+            "4 4 b(2) 1 1\n"
+            "4 4 a(1) 1 2\n"
+            "0\n");
+}
+
+TEST(GroundTest, WeakConstraintCountsEqualViolationsOnce) {
+  // Both weak constraints produce the tuple (0, 1, 1), which is one ground
+  // _viol atom however many rules derive it. So atom 3 gets two support
+  // rules but appears once in the minimize statement: violating both costs 1
+  // in total, not 2.
+  auto out = ground_source(
+      "a(1). b(1).\n"
+      ":~ a(X). [1@0, X]\n"
+      ":~ b(X). [1@0, X]");
+  ASSERT_TRUE(out.ok()) << out.status();
+  EXPECT_EQ(*out,
+            "asp 1 0 0\n"
+            "1 0 1 1 0 0\n"
+            "1 0 1 2 0 0\n"
+            "1 0 1 3 0 1 2\n"
+            "1 0 1 3 0 1 1\n"
+            "2 0 1 3 1\n"
+            "4 4 b(1) 1 1\n"
+            "4 4 a(1) 1 2\n"
+            "0\n");
+}
+
+TEST(GroundTest, WeakConstraintNonNumericWeightRejected) {
+  auto out = ground_source("p(a). :~ p(X). [X@0]");
+  EXPECT_FALSE(out.ok());
+  EXPECT_THAT(std::string(out.status().message()),
+              HasSubstr("weight and level must be numbers"));
+}
+
 TEST(GroundTest, MinMaxAggregatesRejected) {
   auto out = ground_source("p(1). q :- #max{ X : p(X) } >= 1.");
   ASSERT_FALSE(out.ok());
