@@ -35,6 +35,16 @@ TEST(GroundTest, Facts) {
             "0\n");
 }
 
+TEST(GroundTest, StringAtomPrintsWithOnePairOfQuotes) {
+  auto out = ground_source("p(\"a b\").");
+  ASSERT_TRUE(out.ok()) << out.status();
+  EXPECT_EQ(*out,
+            "asp 1 0 0\n"
+            "1 0 1 1 0 0\n"
+            "4 8 p(\"a b\") 1 1\n"
+            "0\n");
+}
+
 TEST(GroundTest, VariableRuleGroundsOncePerMatch) {
   auto out = ground_source("p(1). p(2). q(X) :- p(X).");
   ASSERT_TRUE(out.ok()) << out.status();
@@ -573,9 +583,10 @@ TEST(GroundTest, FunctionTermsSortAfterEveryAtomicValue) {
       "lt(X, Y) :- v(X), v(Y), X < Y.");
   ASSERT_TRUE(out.ok()) << out.status();
   EXPECT_THAT(*out, HasSubstr("lt(1,a)"));
+  EXPECT_THAT(*out, HasSubstr("lt(a,\"s\")"));
   EXPECT_THAT(*out, HasSubstr("lt(1,f(1))"));
   EXPECT_THAT(*out, HasSubstr("lt(a,f(1))"));
-  // Nothing sorts before f(1), the string included.
+  EXPECT_THAT(*out, HasSubstr("lt(\"s\",f(1))"));
   EXPECT_THAT(*out, ::testing::Not(HasSubstr("lt(f(1),")));
 }
 

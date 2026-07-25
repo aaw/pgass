@@ -233,7 +233,7 @@ struct Number : Term {
 };
 
 struct String : Term {
-  std::string value;
+  std::string value;  // the contents, without the surrounding quotes
 
   String(std::string_view value)
       : Term(StringKind), value(std::string(value)) {}

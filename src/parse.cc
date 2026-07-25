@@ -7,6 +7,17 @@
 #include "absl/strings/str_cat.h"
 #include "macros.h"
 
+namespace {
+
+// Drops the quotes surrounding a STRING token, so a String term holds just
+// the contents: the token "abc" becomes abc. Escape sequences inside are
+// left as they were written.
+std::string_view string_contents(std::string_view token_val) {
+  return token_val.substr(1, token_val.size() - 2);
+}
+
+}  // namespace
+
 Parser::Parser(std::string_view source) : lexer_(source) {}
 
 // <program> ::= [<statements>] [<query>]
@@ -148,7 +159,7 @@ absl::StatusOr<std::unique_ptr<Term>> Parser::parse_basic_term() {
   if (token.type == TokenType::kID) {
     return std::make_unique<Atom>(std::string(token.val), nullptr);
   } else if (token.type == TokenType::kSTRING) {
-    return std::make_unique<String>(token.val);
+    return std::make_unique<String>(string_contents(token.val));
   } else if (token.type == TokenType::kNUMBER) {
     uint64_t number;
     if (!absl::SimpleAtoi(token.val, &number)) {
@@ -698,7 +709,7 @@ absl::StatusOr<std::unique_ptr<Term>> Parser::parse_single_term() {
     }
     return std::make_unique<Number>(number);
   } else if (token.type == TokenType::kSTRING) {
-    return std::make_unique<String>(token.val);
+    return std::make_unique<String>(string_contents(token.val));
   } else if (token.type == TokenType::kVARIABLE) {
     return std::make_unique<Variable>(token.val);
   } else if (token.type == TokenType::kANONYMOUS_VARIABLE) {

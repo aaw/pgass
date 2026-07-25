@@ -97,7 +97,7 @@ TEST_F(ParserTest, ParseTerms) {
   EXPECT_EQ(dynamic_cast<Number*>(terms->at(1).get())->value, 456);
 
   EXPECT_NE(dynamic_cast<String*>(terms->at(2).get()), nullptr);
-  EXPECT_EQ(dynamic_cast<String*>(terms->at(2).get())->value, "\"hello\"");
+  EXPECT_EQ(dynamic_cast<String*>(terms->at(2).get())->value, "hello");
 }
 
 TEST_F(ParserTest, ParseTermArithmeticLeftAssociative) {

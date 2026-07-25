@@ -26,7 +26,7 @@ void format_term(std::string* fmt, const Term& term) {
     }
     case Term::StringKind: {
       const String& str = static_cast<const String&>(term);
-      absl::StrAppend(fmt, str.value);
+      absl::StrAppend(fmt, "\"", str.value, "\"");
       break;
     }
     case Term::VariableKind: {
