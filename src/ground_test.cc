@@ -479,11 +479,88 @@ TEST(GroundTest, WeakConstraintCountsEqualViolationsOnce) {
             "0\n");
 }
 
-TEST(GroundTest, WeakConstraintNonNumericWeightRejected) {
-  auto out = ground_source("p(a). :~ p(X). [X@0]");
-  EXPECT_FALSE(out.ok());
-  EXPECT_THAT(std::string(out.status().message()),
-              HasSubstr("weight and level must be numbers"));
+TEST(GroundTest, WeakConstraintNonNumericWeightCostsNothing) {
+  // The cost at a level sums the integer weights and ignores the rest, so
+  // the violation weighing 'a' drops out and only the one weighing 1 is
+  // minimized.
+  auto out = ground_source("p(a). p(1). :~ p(X). [X@0]");
+  ASSERT_TRUE(out.ok()) << out.status();
+  EXPECT_EQ(*out,
+            "asp 1 0 0\n"
+            "1 0 1 1 0 0\n"
+            "1 0 1 2 0 0\n"
+            "1 0 1 3 0 1 1\n"
+            "1 0 1 4 0 1 2\n"
+            "2 0 1 4 1\n"
+            "4 4 p(a) 1 1\n"
+            "4 4 p(1) 1 2\n"
+            "0\n");
+}
+
+TEST(GroundTest, SumIgnoresTuplesWithoutAnIntegerFirstTerm) {
+  // #sum adds up only the tuples whose first term is an integer, so q(a)
+  // contributes nothing and the weight body holds one literal, for p(1).
+  auto out = ground_source("p(1). q(a). r :- #sum{ X : p(X); Y : q(Y) } >= 1.");
+  ASSERT_TRUE(out.ok()) << out.status();
+  EXPECT_THAT(*out, HasSubstr("1 0 1 5 1 1 1 4 1\n"));
+}
+
+TEST(GroundTest, CountIncludesTuplesWithoutAnIntegerFirstTerm) {
+  // #count counts every tuple in the set, unlike #sum: both p(1) and q(a)
+  // land in the weight body, so the count reaches 2.
+  auto out =
+      ground_source("p(1). q(a). r :- #count{ X : p(X); Y : q(Y) } >= 2.");
+  ASSERT_TRUE(out.ok()) << out.status();
+  EXPECT_THAT(*out, HasSubstr("1 0 1 6 1 2 2 4 1 5 1\n"));
+}
+
+TEST(GroundTest, NegativeSumWeightFlipsTheLiteral) {
+  // ASPIF weights must be positive, so '-1 * [tuple 3]' becomes
+  // '-1 + 1 * [not tuple 3]' and the bound moves from 0 to 1: atom 4 holds
+  // exactly when p's tuple is false, which is when the sum reaches 0.
+  auto out = ground_source("p. q :- #sum{ -1 : p } >= 0.");
+  ASSERT_TRUE(out.ok()) << out.status();
+  EXPECT_EQ(*out,
+            "asp 1 0 0\n"
+            "1 0 1 1 0 0\n"
+            "1 0 1 3 0 1 1\n"
+            "1 0 1 4 1 1 1 -3 1\n"
+            "1 0 1 2 0 1 4\n"
+            "4 1 p 1 1\n"
+            "4 1 q 1 2\n"
+            "0\n");
+}
+
+TEST(GroundTest, BoundNoPositiveWeightCanMissBecomesAFact) {
+  // The sum is -1 or 0, so '>= -1' always holds. After the flip the bound is
+  // 0, which positive weights always reach, so atom 4 is a plain fact.
+  auto out = ground_source("p. q :- #sum{ -1 : p } >= -1.");
+  ASSERT_TRUE(out.ok()) << out.status();
+  EXPECT_EQ(*out,
+            "asp 1 0 0\n"
+            "1 0 1 1 0 0\n"
+            "1 0 1 3 0 1 1\n"
+            "1 0 1 4 0 0\n"
+            "1 0 1 2 0 1 4\n"
+            "4 1 p 1 1\n"
+            "4 1 q 1 2\n"
+            "0\n");
+}
+
+TEST(GroundTest, MixedSumWeightsFlipOnlyTheNegativeOnes) {
+  // '2 * [p] - 1 * [q] >= 2' becomes '2 * [p] + 1 * [not q] >= 3', which
+  // holds exactly when p is true and q is false.
+  auto out = ground_source("{p}. {q}. r :- #sum{ 2 : p; -1 : q } >= 2.");
+  ASSERT_TRUE(out.ok()) << out.status();
+  EXPECT_THAT(*out, HasSubstr("1 0 1 8 1 3 2 6 2 -7 1\n"));
+}
+
+TEST(GroundTest, ZeroSumWeightIsLeftOutOfTheWeightBody) {
+  // A tuple weighing 0 never changes the sum, so it gets no literal at all
+  // and the bound of 0 leaves atom 4 a fact.
+  auto out = ground_source("p. q :- #sum{ 0 : p } >= 0.");
+  ASSERT_TRUE(out.ok()) << out.status();
+  EXPECT_THAT(*out, HasSubstr("1 0 1 4 0 0\n"));
 }
 
 TEST(GroundTest, MinMaxAggregatesRejected) {
@@ -492,10 +569,116 @@ TEST(GroundTest, MinMaxAggregatesRejected) {
   EXPECT_THAT(std::string(out.status().message()), HasSubstr("#max"));
 }
 
-TEST(GroundTest, ArithmeticRejected) {
-  auto out = ground_source("p(1). q(X) :- p(X), X < 1 + 1.");
-  ASSERT_FALSE(out.ok());
-  EXPECT_THAT(std::string(out.status().message()), HasSubstr("arithmetic"));
+TEST(GroundTest, ArithmeticInHeadTerm) {
+  auto out = ground_source("p(1). p(2). q(X + 1) :- p(X).");
+  ASSERT_TRUE(out.ok()) << out.status();
+  EXPECT_EQ(*out,
+            "asp 1 0 0\n"
+            "1 0 1 1 0 0\n"
+            "1 0 1 2 0 0\n"
+            "1 0 1 3 0 1 1\n"
+            "1 0 1 4 0 1 2\n"
+            "4 4 p(1) 1 1\n"
+            "4 4 p(2) 1 2\n"
+            "4 4 q(2) 1 3\n"
+            "4 4 q(3) 1 4\n"
+            "0\n");
+}
+
+TEST(GroundTest, ArithmeticInComparison) {
+  auto out = ground_source("p(1). p(2). p(3). q(X) :- p(X), X < 1 + 1.");
+  ASSERT_TRUE(out.ok()) << out.status();
+  // Only p(1) passes 'X < 2', so q(1) is the sole q atom.
+  EXPECT_EQ(*out,
+            "asp 1 0 0\n"
+            "1 0 1 1 0 0\n"
+            "1 0 1 2 0 0\n"
+            "1 0 1 3 0 0\n"
+            "1 0 1 4 0 1 1\n"
+            "4 4 p(1) 1 1\n"
+            "4 4 p(2) 1 2\n"
+            "4 4 p(3) 1 3\n"
+            "4 4 q(1) 1 4\n"
+            "0\n");
+}
+
+TEST(GroundTest, DivisionTruncates) {
+  auto out = ground_source("p(7). q(X / 2) :- p(X).");
+  ASSERT_TRUE(out.ok()) << out.status();
+  EXPECT_THAT(*out, HasSubstr("q(3)"));
+}
+
+TEST(GroundTest, UnaryMinusGivesNegativeNumbers) {
+  auto out = ground_source("p(1). q(-X) :- p(X).");
+  ASSERT_TRUE(out.ok()) << out.status();
+  EXPECT_EQ(*out,
+            "asp 1 0 0\n"
+            "1 0 1 1 0 0\n"
+            "1 0 1 2 0 1 1\n"
+            "4 4 p(1) 1 1\n"
+            "4 5 q(-1) 1 2\n"
+            "0\n");
+}
+
+TEST(GroundTest, NegativeNumbersCompareBelowPositiveOnes) {
+  auto out = ground_source("v(1). v(2). lt(X, Y) :- v(X), v(Y), -X < -Y.");
+  ASSERT_TRUE(out.ok()) << out.status();
+  // -2 < -1, so lt(2,1) holds and lt(1,2) does not.
+  EXPECT_THAT(*out, HasSubstr("lt(2,1)"));
+  EXPECT_THAT(*out, ::testing::Not(HasSubstr("lt(1,2)")));
+}
+
+// ASP-Core-2 grounds a rule only over well-formed substitutions: one that
+// leaves an arithmetic term undefined builds no ground instance. So the
+// instances below are dropped one by one, and grounding still succeeds.
+
+TEST(GroundTest, ArithmeticOnNonNumberDropsTheInstance) {
+  auto out = ground_source("p(a). p(1). q(X) :- p(X), 1 < X + 1.");
+  ASSERT_TRUE(out.ok()) << out.status();
+  // 'a + 1' has no value, so X = a is dropped and only q(1) survives.
+  EXPECT_THAT(*out, HasSubstr("q(1)"));
+  EXPECT_THAT(*out, ::testing::Not(HasSubstr("q(a)")));
+}
+
+TEST(GroundTest, DivisionByZeroDropsTheInstance) {
+  auto out = ground_source("p(0). p(1). q(X) :- p(X), 2 / X > 1.");
+  ASSERT_TRUE(out.ok()) << out.status();
+  // '2 / 0' has no value, so X = 0 is dropped; 2 / 1 > 1 gives q(1).
+  EXPECT_THAT(*out, HasSubstr("q(1)"));
+  EXPECT_THAT(*out, ::testing::Not(HasSubstr("q(0)")));
+}
+
+TEST(GroundTest, IllFormedHeadTermDropsTheInstance) {
+  auto out = ground_source("p(0). p(2). q(4 / X) :- p(X).");
+  ASSERT_TRUE(out.ok()) << out.status();
+  EXPECT_EQ(*out,
+            "asp 1 0 0\n"
+            "1 0 1 1 0 0\n"
+            "1 0 1 2 0 0\n"
+            "1 0 1 3 0 1 2\n"
+            "4 4 p(0) 1 1\n"
+            "4 4 p(2) 1 2\n"
+            "4 4 q(2) 1 3\n"
+            "0\n");
+}
+
+TEST(GroundTest, IllFormedNegativeLiteralDropsTheInstance) {
+  auto out = ground_source("p(0). p(2). r(1). q(X) :- p(X), not r(4 / X).");
+  ASSERT_TRUE(out.ok()) << out.status();
+  // X = 0 makes 'not r(4 / 0)' ill-formed, so that whole instance is gone,
+  // not just the literal. X = 2 gives 'not r(2)', which r/1 never derived,
+  // so q(2) comes out as a fact.
+  EXPECT_THAT(*out, HasSubstr("q(2)"));
+  EXPECT_THAT(*out, ::testing::Not(HasSubstr("q(0)")));
+}
+
+TEST(GroundTest, IllFormedAggregateBoundDropsTheInstance) {
+  auto out = ground_source(
+      "d(0). d(2). p(1). q(X) :- d(X), #count{ Y : p(Y) } >= 4 / X.");
+  ASSERT_TRUE(out.ok()) << out.status();
+  // X = 0 makes the bound '4 / 0' ill-formed, so no q(0) is derived at all.
+  EXPECT_THAT(*out, HasSubstr("q(2)"));
+  EXPECT_THAT(*out, ::testing::Not(HasSubstr("q(0)")));
 }
 
 TEST(GroundTest, FunctionTermsMatchArgumentByArgument) {

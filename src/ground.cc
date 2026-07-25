@@ -26,11 +26,11 @@ struct Value {
   enum Kind { kNumber, kConstant, kString, kFunction };
 
   Kind kind;
-  uint64_t number = 0;       // set only when kind == kNumber
+  int64_t number = 0;        // set only when kind == kNumber
   std::string text;          // the constant's, string's, or function's name
   std::vector<Value> args;   // set only when kind == kFunction, never empty
 
-  static Value make_number(uint64_t n) { return {kNumber, n, "", {}}; }
+  static Value make_number(int64_t n) { return {kNumber, n, "", {}}; }
   static Value make_constant(std::string name) {
     return {kConstant, 0, std::move(name), {}};
   }
@@ -131,12 +131,33 @@ struct Store {
   }
 };
 
+absl::StatusOr<std::optional<Value>> eval_term(const Term& term,
+                                               const Binding& binding);
+
+// Evaluates a term that has to come out as a number, e.g. either side of a
+// '+'. Returns nullopt if it doesn't, e.g. for the 'a + 1' that 'X + 1'
+// becomes under the binding {X: a}: arithmetic is only defined on integers,
+// so that binding is ill-formed and its rule instance does not exist.
+absl::StatusOr<std::optional<int64_t>> eval_number(const Term& term,
+                                                   const Binding& binding) {
+  ASSIGN_OR_RETURN(std::optional<Value> value, eval_term(term, binding));
+  if (!value.has_value() || value->kind != Value::kNumber) return std::nullopt;
+  return value->number;
+}
+
 // Evaluates a term to its ground value, e.g. 'X' evaluates to 1 under the
 // binding {X: 1}. Every variable must already be bound.
-absl::StatusOr<Value> eval_term(const Term& term, const Binding& binding) {
+//
+// Returns nullopt when the binding leaves an arithmetic term undefined, e.g.
+// 'X / 0' or 'a + 1'. ASP-Core-2 calls such a binding ill-formed and builds
+// no ground instance from it, so callers drop the instance rather than
+// failing the whole grounding.
+absl::StatusOr<std::optional<Value>> eval_term(const Term& term,
+                                               const Binding& binding) {
   switch (term.kind) {
     case Term::NumberKind:
-      return Value::make_number(static_cast<const Number&>(term).value);
+      return Value::make_number(
+          static_cast<int64_t>(static_cast<const Number&>(term).value));
     case Term::StringKind:
       return Value::make_string(static_cast<const String&>(term).value);
     case Term::AtomKind: {
@@ -145,8 +166,9 @@ absl::StatusOr<Value> eval_term(const Term& term, const Binding& binding) {
       std::vector<Value> args;
       args.reserve(atom.args->size());
       for (const auto& arg : *atom.args) {
-        ASSIGN_OR_RETURN(Value value, eval_term(*arg, binding));
-        args.push_back(std::move(value));
+        ASSIGN_OR_RETURN(std::optional<Value> value, eval_term(*arg, binding));
+        if (!value.has_value()) return std::nullopt;
+        args.push_back(std::move(*value));
       }
       return Value::make_function(atom.name, std::move(args));
     }
@@ -164,23 +186,59 @@ absl::StatusOr<Value> eval_term(const Term& term, const Binding& binding) {
     case Term::AnonymousVariableKind:
       return absl::InvalidArgumentError(
           "'_' cannot appear in a position that must be ground");
-    default:  // NegatedTermKind, TermOperationKind
-      return absl::UnimplementedError("arithmetic is not supported yet");
+    case Term::NegatedTermKind: {
+      const NegatedTerm& negated = static_cast<const NegatedTerm&>(term);
+      ASSIGN_OR_RETURN(std::optional<int64_t> value,
+                       eval_number(*negated.term, binding));
+      if (!value.has_value()) return std::nullopt;
+      return Value::make_number(-*value);
+    }
+    case Term::TermOperationKind: {
+      const TermOperation& operation = static_cast<const TermOperation&>(term);
+      ASSIGN_OR_RETURN(std::optional<int64_t> left,
+                       eval_number(*operation.left, binding));
+      ASSIGN_OR_RETURN(std::optional<int64_t> right,
+                       eval_number(*operation.right, binding));
+      if (!left.has_value() || !right.has_value()) return std::nullopt;
+      switch (operation.op) {
+        case OperationType::kPLUS:
+          return Value::make_number(*left + *right);
+        case OperationType::kMINUS:
+          return Value::make_number(*left - *right);
+        case OperationType::kTIMES:
+          return Value::make_number(*left * *right);
+        case OperationType::kDIV:
+          // Division by zero has no value, so the binding is ill-formed.
+          if (*right == 0) return std::nullopt;
+          return Value::make_number(*left / *right);
+      }
+      return absl::InternalError("unknown arithmetic operator");
+    }
   }
+  return absl::InternalError("unknown term kind");
+}
+
+// Evaluates a list of terms under `binding`, e.g. the 'X, 2' of 'p(X, 2)'
+// evaluates to {1, 2} under the binding {X: 1}. Returns nullopt if any term
+// is ill-formed, e.g. the 'X / 0' of 'p(X / 0)'.
+absl::StatusOr<std::optional<Tuple>> eval_terms(const Terms& terms,
+                                                const Binding& binding) {
+  Tuple tuple;
+  if (terms == nullptr) return tuple;
+  tuple.reserve(terms->size());
+  for (const auto& term : *terms) {
+    ASSIGN_OR_RETURN(std::optional<Value> value, eval_term(*term, binding));
+    if (!value.has_value()) return std::nullopt;
+    tuple.push_back(std::move(*value));
+  }
+  return tuple;
 }
 
 // Evaluates each argument of a ground instance of `literal` under `binding`,
 // e.g. 'p(X, 2)' evaluates to {1, 2} under the binding {X: 1}.
-absl::StatusOr<Tuple> eval_args(const ClassicalLiteral& literal,
-                                const Binding& binding) {
-  Tuple tuple;
-  if (literal.args == nullptr) return tuple;
-  tuple.reserve(literal.args->size());
-  for (const auto& arg : *literal.args) {
-    ASSIGN_OR_RETURN(Value value, eval_term(*arg, binding));
-    tuple.push_back(std::move(value));
-  }
-  return tuple;
+absl::StatusOr<std::optional<Tuple>> eval_args(const ClassicalLiteral& literal,
+                                               const Binding& binding) {
+  return eval_terms(literal.args, binding);
 }
 
 // Tries to match one argument term against one stored value, extending
@@ -214,8 +272,10 @@ absl::StatusOr<bool> match_term(const Term& arg, const Value& value,
       return true;
     }
   }
-  ASSIGN_OR_RETURN(Value evaluated, eval_term(arg, binding));
-  return evaluated == value;
+  // An ill-formed term, e.g. 'X / 0', has no value at all, so it matches
+  // nothing.
+  ASSIGN_OR_RETURN(std::optional<Value> evaluated, eval_term(arg, binding));
+  return evaluated.has_value() && *evaluated == value;
 }
 
 // Tries to match `literal`'s arguments against a stored tuple. On a match,
@@ -376,14 +436,19 @@ bool builtin_holds(BinopType op, const Value& left, const Value& right) {
 }
 
 // Returns whether every comparison in the body holds under `binding`, e.g.
-// whether 'X < 2' holds given the binding {X: 1}.
+// whether 'X < 2' holds given the binding {X: 1}. A comparison with an
+// ill-formed side, e.g. 'X < 1 / 0', counts as not holding: the binding
+// builds no rule instance either way.
 absl::StatusOr<bool> comparisons_hold(const BodyParts& parts,
                                       const Binding& binding) {
   for (const NafLiteral* item : parts.comparisons) {
     const auto& builtin = static_cast<const BuiltinAtom&>(*item->literal);
-    ASSIGN_OR_RETURN(Value left, eval_term(*builtin.left, binding));
-    ASSIGN_OR_RETURN(Value right, eval_term(*builtin.right, binding));
-    bool holds = builtin_holds(builtin.op, left, right);
+    ASSIGN_OR_RETURN(std::optional<Value> left,
+                     eval_term(*builtin.left, binding));
+    ASSIGN_OR_RETURN(std::optional<Value> right,
+                     eval_term(*builtin.right, binding));
+    if (!left.has_value() || !right.has_value()) return false;
+    bool holds = builtin_holds(builtin.op, *left, *right);
     if (item->naf) holds = !holds;
     if (!holds) return false;
   }
@@ -433,15 +498,19 @@ absl::StatusOr<std::vector<Instance>> find_instances(
 // negated literal for each one that is still derivable in `store`. A literal
 // whose predicate was never derived at all can never be true, so it is
 // dropped as trivially satisfied instead of being negated.
-absl::StatusOr<std::vector<aspif::Lit>> negative_lits(
+//
+// Returns nullopt if one of the literals is ill-formed, e.g. 'not p(X / 0)':
+// that makes the whole rule instance nonexistent, not just this literal.
+absl::StatusOr<std::optional<std::vector<aspif::Lit>>> negative_lits(
     const std::vector<const ClassicalLiteral*>& negative,
     const Binding& binding, const Store& store) {
   std::vector<aspif::Lit> lits;
   for (const ClassicalLiteral* literal : negative) {
-    ASSIGN_OR_RETURN(Tuple tuple, eval_args(*literal, binding));
+    ASSIGN_OR_RETURN(std::optional<Tuple> tuple, eval_args(*literal, binding));
+    if (!tuple.has_value()) return std::nullopt;
     const PredData* data = store.find(pred_key(*literal));
     if (data == nullptr) continue;
-    const GroundAtom* atom = data->find(tuple);
+    const GroundAtom* atom = data->find(*tuple);
     if (atom == nullptr) continue;
     lits.push_back(-atom->id);
   }
@@ -469,22 +538,20 @@ absl::StatusOr<std::vector<aspif::WeightedLit>> ground_agg_elements(
         std::vector<Instance> instances,
         find_instances(parts, store, outer_binding));
     for (const Instance& instance : instances) {
-      Tuple tuple;
-      if (element.terms != nullptr) {
-        tuple.reserve(element.terms->size());
-        for (const auto& term : *element.terms) {
-          ASSIGN_OR_RETURN(Value value, eval_term(*term, instance.binding));
-          tuple.push_back(std::move(value));
-        }
-      }
+      // An element whose terms are ill-formed under this local binding
+      // contributes no tuple to the set.
+      ASSIGN_OR_RETURN(std::optional<Tuple> maybe_tuple,
+                       eval_terms(element.terms, instance.binding));
+      if (!maybe_tuple.has_value()) continue;
+      Tuple tuple = *std::move(maybe_tuple);
       int64_t weight = 1;
       if (agg.function == AggregateFunctionType::kAGGREGATE_SUM) {
-        if (tuple.empty() || tuple[0].kind != Value::kNumber) {
-          return absl::InvalidArgumentError(
-              "a #sum aggregate element must give a number as its first "
-              "term");
-        }
-        weight = static_cast<int64_t>(tuple[0].number);
+        // #sum adds up the tuples whose first term is an integer and ignores
+        // the others, e.g. '#sum{ 1 : p; a : q }' is just 1. A tuple that
+        // adds nothing needs no literal in the weight body at all. (#count
+        // does count such a tuple, which is why this only applies to #sum.)
+        if (tuple.empty() || tuple[0].kind != Value::kNumber) continue;
+        weight = tuple[0].number;
       }
 
       auto [it, inserted] = tuple_atoms.try_emplace(tuple, 0);
@@ -493,12 +560,13 @@ absl::StatusOr<std::vector<aspif::WeightedLit>> ground_agg_elements(
         weighted.push_back({.lit = it->second, .weight = weight});
       }
 
+      ASSIGN_OR_RETURN(std::optional<std::vector<aspif::Lit>> neg,
+                       negative_lits(parts.negative, instance.binding, store));
+      if (!neg.has_value()) continue;
       aspif::Rule support;
       support.head = {it->second};
       support.body = instance.matched;
-      ASSIGN_OR_RETURN(std::vector<aspif::Lit> neg,
-                       negative_lits(parts.negative, instance.binding, store));
-      support.body.insert(support.body.end(), neg.begin(), neg.end());
+      support.body.insert(support.body.end(), neg->begin(), neg->end());
       result.rules.push_back(std::move(support));
     }
   }
@@ -596,27 +664,51 @@ aspif::Lit negate_conjunction(const std::vector<aspif::Lit>& lits,
 // literals in `weighted` sum to at least `bound`, and returns it. ASPIF's
 // weight body is the only construct that can compare an aggregate against a
 // number, so every bound an aggregate can carry is expressed in terms of it.
+//
+// ASPIF weights must be positive, but a #sum element can weigh a negative
+// number, e.g. '#sum{ -1 : p }'. A negative weight w on literal l is rewritten
+// using w * [l] = w + (-w) * [not l], which flips the literal, negates its
+// weight, and leaves the constant w to fold into the bound. A weight of 0
+// never changes the sum, so its literal is left out.
 aspif::Atom at_least(int64_t bound,
                      const std::vector<aspif::WeightedLit>& weighted,
                      aspif::Program& result) {
+  std::vector<aspif::WeightedLit> positive;
+  positive.reserve(weighted.size());
+  int64_t lower = bound;
+  for (const aspif::WeightedLit& wl : weighted) {
+    if (wl.weight > 0) {
+      positive.push_back(wl);
+    } else if (wl.weight < 0) {
+      positive.push_back({.lit = -wl.lit, .weight = -wl.weight});
+      lower -= wl.weight;
+    }
+  }
+
   aspif::Atom atom = result.new_atom();
   aspif::Rule rule;
   rule.head = {atom};
-  rule.body_type = aspif::Rule::BodyType::kWeight;
-  rule.lower_bound = bound;
-  rule.weighted_body = weighted;
+  // Positive weights can only sum to 0 or more, so a bound of 0 or less holds
+  // no matter which literals are true: the atom is a fact instead.
+  if (lower > 0) {
+    rule.body_type = aspif::Rule::BodyType::kWeight;
+    rule.lower_bound = lower;
+    rule.weighted_body = std::move(positive);
+  }
   result.rules.push_back(std::move(rule));
   return atom;
 }
 
 // Evaluates one side of an aggregate's bound, e.g. the '3' in
 // '3 <= #count{...}'.
-absl::StatusOr<int64_t> eval_bound(const Term& term, const Binding& binding) {
-  ASSIGN_OR_RETURN(Value value, eval_term(term, binding));
-  if (value.kind != Value::kNumber) {
+absl::StatusOr<std::optional<int64_t>> eval_bound(const Term& term,
+                                                  const Binding& binding) {
+  ASSIGN_OR_RETURN(std::optional<Value> value, eval_term(term, binding));
+  if (!value.has_value()) return std::nullopt;
+  if (value->kind != Value::kNumber) {
     return absl::InvalidArgumentError("an aggregate bound must be a number");
   }
-  return static_cast<int64_t>(value.number);
+  return value->number;
 }
 
 // Grounds one Aggregate body item into the literals that must be appended to
@@ -625,7 +717,9 @@ absl::StatusOr<int64_t> eval_bound(const Term& term, const Binding& binding) {
 // by an ASPIF weight-body rule. Only #count and #sum are supported: they map
 // directly onto ASPIF's weight body, whereas #min/#max would need a
 // different (guess-and-check) encoding.
-absl::StatusOr<std::vector<aspif::Lit>> ground_aggregate(
+// Returns nullopt if one of the aggregate's bounds is ill-formed, which
+// makes the whole enclosing rule instance nonexistent.
+absl::StatusOr<std::optional<std::vector<aspif::Lit>>> ground_aggregate(
     const Aggregate& agg, const Binding& outer_binding, const Store& store,
     aspif::Program& result) {
   if (agg.function == AggregateFunctionType::kAGGREGATE_MAX ||
@@ -636,12 +730,16 @@ absl::StatusOr<std::vector<aspif::Lit>> ground_aggregate(
 
   AggBounds bounds;
   if (agg.lb_term != nullptr) {
-    ASSIGN_OR_RETURN(int64_t k, eval_bound(*agg.lb_term, outer_binding));
-    apply_lower_bound(k, agg.lb_op, bounds);
+    ASSIGN_OR_RETURN(std::optional<int64_t> k,
+                     eval_bound(*agg.lb_term, outer_binding));
+    if (!k.has_value()) return std::nullopt;
+    apply_lower_bound(*k, agg.lb_op, bounds);
   }
   if (agg.ub_term != nullptr) {
-    ASSIGN_OR_RETURN(int64_t k, eval_bound(*agg.ub_term, outer_binding));
-    apply_upper_bound(k, agg.ub_op, bounds);
+    ASSIGN_OR_RETURN(std::optional<int64_t> k,
+                     eval_bound(*agg.ub_term, outer_binding));
+    if (!k.has_value()) return std::nullopt;
+    apply_upper_bound(*k, agg.ub_op, bounds);
   }
 
   ASSIGN_OR_RETURN(std::vector<aspif::WeightedLit> weighted,
@@ -667,6 +765,32 @@ absl::StatusOr<std::vector<aspif::Lit>> ground_aggregate(
 
   if (!agg.naf) return extra;
   return std::vector<aspif::Lit>{negate_conjunction(extra, result)};
+}
+
+// Whether the body parts derive_atoms() otherwise ignores are well-formed
+// under `binding`: the arguments of every 'not' literal and each aggregate's
+// bounds. Ill-formed means the rule has no ground instance under this
+// binding, so its head atom must not be derived either, e.g. "q(X) :- p(X),
+// not r(4 / X)." derives no q(0), because 'not r(4 / 0)' cannot be ground.
+absl::StatusOr<bool> ignored_parts_are_well_formed(const BodyParts& parts,
+                                                   const Binding& binding) {
+  for (const ClassicalLiteral* literal : parts.negative) {
+    ASSIGN_OR_RETURN(std::optional<Tuple> tuple, eval_args(*literal, binding));
+    if (!tuple.has_value()) return false;
+  }
+  for (const Aggregate* aggregate : parts.aggregates) {
+    if (aggregate->lb_term != nullptr) {
+      ASSIGN_OR_RETURN(std::optional<int64_t> k,
+                       eval_bound(*aggregate->lb_term, binding));
+      if (!k.has_value()) return false;
+    }
+    if (aggregate->ub_term != nullptr) {
+      ASSIGN_OR_RETURN(std::optional<int64_t> k,
+                       eval_bound(*aggregate->ub_term, binding));
+      if (!k.has_value()) return false;
+    }
+  }
+  return true;
 }
 
 // Fills `store` with every atom that could appear in an answer set, by
@@ -703,8 +827,14 @@ absl::Status derive_atoms(const std::vector<RuleView>& rules, Store& store,
       ASSIGN_OR_RETURN(std::vector<Instance> instances,
                        find_instances(rule.parts, store));
       for (const Instance& instance : instances) {
-        ASSIGN_OR_RETURN(Tuple tuple, eval_args(*rule.head, instance.binding));
-        if (store.insert(pred_key(*rule.head), std::move(tuple), aspif_prog)) {
+        ASSIGN_OR_RETURN(
+            bool well_formed,
+            ignored_parts_are_well_formed(rule.parts, instance.binding));
+        if (!well_formed) continue;
+        ASSIGN_OR_RETURN(std::optional<Tuple> tuple,
+                         eval_args(*rule.head, instance.binding));
+        if (!tuple.has_value()) continue;
+        if (store.insert(pred_key(*rule.head), *std::move(tuple), aspif_prog)) {
           changed = true;
         }
       }
@@ -722,25 +852,42 @@ absl::Status emit_rules(const std::vector<RuleView>& rules, const Store& store,
     ASSIGN_OR_RETURN(std::vector<Instance> instances,
                      find_instances(rule.parts, store));
     for (const Instance& instance : instances) {
+      // The head is looked up last, once every reason to drop the instance
+      // has been ruled out: derive_atoms() dropped the same instances, so a
+      // head atom looked up for one of them would be missing from the store.
       aspif::Rule aspif_rule;
+      aspif_rule.body = instance.matched;
+      ASSIGN_OR_RETURN(
+          std::optional<std::vector<aspif::Lit>> neg,
+          negative_lits(rule.parts.negative, instance.binding, store));
+      if (!neg.has_value()) continue;
+      aspif_rule.body.insert(aspif_rule.body.end(), neg->begin(), neg->end());
+
+      bool well_formed = true;
+      for (const Aggregate* aggregate : rule.parts.aggregates) {
+        ASSIGN_OR_RETURN(
+            std::optional<std::vector<aspif::Lit>> extra,
+            ground_aggregate(*aggregate, instance.binding, store, result));
+        if (!extra.has_value()) {
+          well_formed = false;
+          break;
+        }
+        aspif_rule.body.insert(aspif_rule.body.end(), extra->begin(),
+                               extra->end());
+      }
+      if (!well_formed) continue;
+
       if (rule.head != nullptr) {
-        ASSIGN_OR_RETURN(Tuple tuple, eval_args(*rule.head, instance.binding));
+        ASSIGN_OR_RETURN(std::optional<Tuple> tuple,
+                         eval_args(*rule.head, instance.binding));
+        // An ill-formed head, e.g. the 'q(X / 0)' of "q(X / 0) :- p(X).",
+        // means this instance has no ground rule. derive_atoms() skipped it
+        // for the same reason, so nothing is missing from the store.
+        if (!tuple.has_value()) continue;
         // derive_atoms() added every derivable head atom, so this lookup
         // succeeds.
         aspif_rule.head.push_back(
-            store.find(pred_key(*rule.head))->find(tuple)->id);
-      }
-      aspif_rule.body = instance.matched;
-      ASSIGN_OR_RETURN(
-          std::vector<aspif::Lit> neg,
-          negative_lits(rule.parts.negative, instance.binding, store));
-      aspif_rule.body.insert(aspif_rule.body.end(), neg.begin(), neg.end());
-      for (const Aggregate* aggregate : rule.parts.aggregates) {
-        ASSIGN_OR_RETURN(
-            std::vector<aspif::Lit> extra,
-            ground_aggregate(*aggregate, instance.binding, store, result));
-        aspif_rule.body.insert(aspif_rule.body.end(), extra.begin(),
-                               extra.end());
+            store.find(pred_key(*rule.head))->find(*tuple)->id);
       }
       result.rules.push_back(std::move(aspif_rule));
     }
@@ -763,7 +910,10 @@ absl::Status emit_rules(const std::vector<RuleView>& rules, const Store& store,
 // A level's literals are collected across every _viol arity in the program:
 // weak constraints with different numbers of terms give _viol different
 // arities, which are distinct predicates in the store but the same level.
-absl::Status emit_minimize(const Store& store, aspif::Program& result) {
+//
+// A violation whose weight or level is not an integer, e.g. ':~ p(X). [X@0]'
+// where X binds to a constant, costs nothing at any level, so it is left out.
+void emit_minimize(const Store& store, aspif::Program& result) {
   absl::btree_map<int64_t, std::vector<aspif::WeightedLit>> by_level;
   for (const PredKey& key : store.order) {
     if (key.name != "_viol") continue;
@@ -772,20 +922,16 @@ absl::Status emit_minimize(const Store& store, aspif::Program& result) {
       const Value& level = atom.args[0];
       const Value& weight = atom.args[1];
       if (level.kind != Value::kNumber || weight.kind != Value::kNumber) {
-        return absl::InvalidArgumentError(absl::StrCat(
-            "a weak constraint's weight and level must be numbers, but got "
-            "[",
-            weight.printed(), "@", level.printed(), "]"));
+        continue;
       }
-      by_level[static_cast<int64_t>(level.number)].push_back(
-          {.lit = atom.id, .weight = static_cast<int64_t>(weight.number)});
+      by_level[level.number].push_back(
+          {.lit = atom.id, .weight = weight.number});
     }
   }
   for (auto& [level, lits] : by_level) {
     result.minimize.push_back(
         aspif::Minimize{.priority = level, .lits = std::move(lits)});
   }
-  return absl::OkStatus();
 }
 
 // Names every atom of a user-visible predicate ('_' prefixes are internal)
@@ -839,7 +985,7 @@ absl::StatusOr<aspif::Program> ground(const Program& prog) {
     RETURN_IF_ERROR(emit_rules(component_rules, store, result));
   }
   RETURN_IF_ERROR(emit_rules(headless_rules, store, result));
-  RETURN_IF_ERROR(emit_minimize(store, result));
+  emit_minimize(store, result);
   name_outputs(store, result);
   return result;
 }
