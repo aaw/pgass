@@ -263,10 +263,136 @@ TEST(GroundTest, ZeroArityAtoms) {
             "0\n");
 }
 
-TEST(GroundTest, AggregatesRejected) {
+TEST(GroundTest, CountAggregateLowerBound) {
+  // p=1, q=2. Emitting q's rule allocates the element's aux atom (3, backed
+  // by 'p') and the '>= 1' bound-check atom (4, a weight rule over {3: 1}).
   auto out = ground_source("p. q :- #count{ 1 : p } > 0.");
+  ASSERT_TRUE(out.ok()) << out.status();
+  EXPECT_EQ(*out,
+            "asp 1 0 0\n"
+            "1 0 1 1 0 0\n"
+            "1 0 1 3 0 1 1\n"
+            "1 0 1 4 1 1 1 3 1\n"
+            "1 0 1 2 0 1 4\n"
+            "4 1 p 1 1\n"
+            "4 1 q 1 2\n"
+            "0\n");
+}
+
+TEST(GroundTest, SumAggregateWeighsByFirstTerm) {
+  // w(1,3)=1, w(2,5)=2, q=3. The element's first term (the weight) is V, not
+  // I: aux atoms 4 and 5 back the two element instances, and the weight rule
+  // sums their weights (3 and 5) rather than counting them.
+  auto out = ground_source("w(1,3). w(2,5). q :- #sum{ V,I : w(I,V) } >= 4.");
+  ASSERT_TRUE(out.ok()) << out.status();
+  EXPECT_EQ(*out,
+            "asp 1 0 0\n"
+            "1 0 1 1 0 0\n"
+            "1 0 1 2 0 0\n"
+            "1 0 1 4 0 1 1\n"
+            "1 0 1 5 0 1 2\n"
+            "1 0 1 6 1 4 2 4 3 5 5\n"
+            "1 0 1 3 0 1 6\n"
+            "4 6 w(1,3) 1 1\n"
+            "4 6 w(2,5) 1 2\n"
+            "4 1 q 1 3\n"
+            "0\n");
+}
+
+TEST(GroundTest, CountAggregateCombinedLowerAndUpperBound) {
+  // Both bound sides are present, so both a "low_ok" atom (8, count >= 1)
+  // and a "high_bad" atom (9, count >= 3) get defined, and q's rule requires
+  // low_ok and not high_bad together.
+  auto out =
+      ground_source("p(1). p(2). p(3). q :- 1 <= #count{ X : p(X) } <= 2.");
+  ASSERT_TRUE(out.ok()) << out.status();
+  EXPECT_EQ(*out,
+            "asp 1 0 0\n"
+            "1 0 1 1 0 0\n"
+            "1 0 1 2 0 0\n"
+            "1 0 1 3 0 0\n"
+            "1 0 1 5 0 1 1\n"
+            "1 0 1 6 0 1 2\n"
+            "1 0 1 7 0 1 3\n"
+            "1 0 1 8 1 1 3 5 1 6 1 7 1\n"
+            "1 0 1 9 1 3 3 5 1 6 1 7 1\n"
+            "1 0 1 4 0 2 8 -9\n"
+            "4 4 p(1) 1 1\n"
+            "4 4 p(2) 1 2\n"
+            "4 4 p(3) 1 3\n"
+            "4 1 q 1 4\n"
+            "0\n");
+}
+
+TEST(GroundTest, NegatedAggregateNegatesTheWholeBoundConjunction) {
+  // This is the shape normalize.cc's choice-cardinality translation produces
+  // (':- body, not #count{...} <bounds>.'). Since both bound sides are
+  // present, negating requires a conjunction atom (7 := low_ok(5) and not
+  // high_bad(6)) before the constraint can require 'not' of that.
+  auto out = ground_source("p(1). p(2). :- not 1 <= #count{ X : p(X) } <= 2.");
+  ASSERT_TRUE(out.ok()) << out.status();
+  EXPECT_EQ(*out,
+            "asp 1 0 0\n"
+            "1 0 1 1 0 0\n"
+            "1 0 1 2 0 0\n"
+            "1 0 1 3 0 1 1\n"
+            "1 0 1 4 0 1 2\n"
+            "1 0 1 5 1 1 2 3 1 4 1\n"
+            "1 0 1 6 1 3 2 3 1 4 1\n"
+            "1 0 1 7 0 2 5 -6\n"
+            "1 0 0 0 1 -7\n"
+            "4 4 p(1) 1 1\n"
+            "4 4 p(2) 1 2\n"
+            "0\n");
+}
+
+TEST(GroundTest, CountAggregateEqualityUsesLowAndHighAuxAtoms) {
+  // '= 2' needs both a low_eq (count >= 2) and high_bad_eq (count >= 3) atom,
+  // combined into eq_ok (6 := low_eq and not high_bad_eq); q's rule requires
+  // eq_ok directly, != would require 'not eq_ok' instead.
+  auto out = ground_source("p(1). p(2). q :- #count{ X : p(X) } = 2.");
+  ASSERT_TRUE(out.ok()) << out.status();
+  EXPECT_EQ(*out,
+            "asp 1 0 0\n"
+            "1 0 1 1 0 0\n"
+            "1 0 1 2 0 0\n"
+            "1 0 1 4 0 1 1\n"
+            "1 0 1 5 0 1 2\n"
+            "1 0 1 6 1 2 2 4 1 5 1\n"
+            "1 0 1 7 1 3 2 4 1 5 1\n"
+            "1 0 1 3 0 2 6 -7\n"
+            "4 4 p(1) 1 1\n"
+            "4 4 p(2) 1 2\n"
+            "4 1 q 1 3\n"
+            "0\n");
+}
+
+TEST(GroundTest, AggregateDedupesEqualTuplesAcrossElements) {
+  // Two elements ('X : p(X)' and 'X : r(X)') both produce the tuple [1], so
+  // they share one aux atom (4) supported by two rules (one per element),
+  // and the weight rule only counts that shared atom once: the count can
+  // never reach 2, so q never derives even though both p(1) and r(1) hold.
+  auto out =
+      ground_source("p(1). r(1). q :- #count{ X : p(X) ; X : r(X) } >= 2.");
+  ASSERT_TRUE(out.ok()) << out.status();
+  EXPECT_EQ(*out,
+            "asp 1 0 0\n"
+            "1 0 1 1 0 0\n"
+            "1 0 1 2 0 0\n"
+            "1 0 1 4 0 1 2\n"
+            "1 0 1 4 0 1 1\n"
+            "1 0 1 5 1 2 1 4 1\n"
+            "1 0 1 3 0 1 5\n"
+            "4 4 r(1) 1 1\n"
+            "4 4 p(1) 1 2\n"
+            "4 1 q 1 3\n"
+            "0\n");
+}
+
+TEST(GroundTest, MinMaxAggregatesRejected) {
+  auto out = ground_source("p(1). q :- #max{ X : p(X) } >= 1.");
   ASSERT_FALSE(out.ok());
-  EXPECT_THAT(std::string(out.status().message()), HasSubstr("aggregate"));
+  EXPECT_THAT(std::string(out.status().message()), HasSubstr("#max"));
 }
 
 TEST(GroundTest, ArithmeticRejected) {

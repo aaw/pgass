@@ -1,5 +1,6 @@
 #include "ground.h"
 
+#include <algorithm>
 #include <cstdint>
 #include <optional>
 #include <string>
@@ -187,8 +188,7 @@ absl::StatusOr<std::optional<Binding>> match_args(
   return extended;
 }
 
-// One rule body, split into the three kinds of items grounding treats
-// differently.
+// One rule body, split into the kinds of items grounding treats differently.
 struct BodyParts {
   // Positive classical literals: matched against the store to bind
   // variables, e.g. 'edge(X, Y)' in "reachable(X, Y) :- edge(X, Y)."
@@ -197,25 +197,44 @@ struct BodyParts {
   std::vector<const NafLiteral*> comparisons;
   // 'not p(...)' literals: kept in the emitted ground rule.
   std::vector<const ClassicalLiteral*> negative;
+  // Aggregates, e.g. '#count{ X : p(X) } >= 2' in "q :- #count{ X : p(X) }
+  // >= 2.". An aggregate's own 'not' lives on the Aggregate node itself, not
+  // on a wrapping NafLiteral, so it isn't split into positive/negative here.
+  std::vector<const Aggregate*> aggregates;
 };
 
-absl::StatusOr<BodyParts> split_body(const Body* body) {
+// Sorts one naf_literal into the positive/comparisons/negative bucket of
+// `parts` it belongs in. Shared by rule bodies and aggregate element
+// conditions, which are both flat lists of naf_literals.
+void split_naf_literal(const NafLiteral& naf, BodyParts& parts) {
+  if (naf.literal->kind == Literal::BuiltinAtomKind) {
+    parts.comparisons.push_back(&naf);
+  } else if (naf.naf) {
+    parts.negative.push_back(
+        static_cast<const ClassicalLiteral*>(naf.literal.get()));
+  } else {
+    parts.positive.push_back(
+        static_cast<const ClassicalLiteral*>(naf.literal.get()));
+  }
+}
+
+BodyParts split_naf_literals(const NafLiterals& literals) {
+  BodyParts parts;
+  if (literals != nullptr) {
+    for (const auto& item : *literals) split_naf_literal(*item, parts);
+  }
+  return parts;
+}
+
+BodyParts split_body(const Body* body) {
   BodyParts parts;
   if (body == nullptr || body->items == nullptr) return parts;
   for (const auto& item : *body->items) {
     if (item->kind == BodyItem::AggregateKind) {
-      return absl::UnimplementedError("aggregates are not supported yet");
+      parts.aggregates.push_back(static_cast<const Aggregate*>(item.get()));
+      continue;
     }
-    const auto& naf = static_cast<const NafLiteral&>(*item);
-    if (naf.literal->kind == Literal::BuiltinAtomKind) {
-      parts.comparisons.push_back(&naf);
-    } else if (naf.naf) {
-      parts.negative.push_back(
-          static_cast<const ClassicalLiteral*>(naf.literal.get()));
-    } else {
-      parts.positive.push_back(
-          static_cast<const ClassicalLiteral*>(naf.literal.get()));
-    }
+    split_naf_literal(static_cast<const NafLiteral&>(*item), parts);
   }
   return parts;
 }
@@ -259,7 +278,7 @@ absl::StatusOr<std::vector<RuleView>> make_rule_views(const Program& prog) {
             "weak constraints are not supported yet");
       }
     }
-    ASSIGN_OR_RETURN(rule.parts, split_body(statement->body.get()));
+    rule.parts = split_body(statement->body.get());
     rules.push_back(std::move(rule));
   }
   return rules;
@@ -323,17 +342,20 @@ absl::StatusOr<bool> comparisons_hold(const BodyParts& parts,
   return true;
 }
 
-// Finds every way to satisfy the body with the atoms currently in the store.
-// Works through the positive literals left to right, extending each partial
-// instance with every stored tuple that matches, then keeps the instances
-// whose comparisons all hold. 'not' literals never filter here; the caller
-// decides what to do with them.
-absl::StatusOr<std::vector<Instance>> find_instances(const BodyParts& parts,
-                                                     const Store& store) {
-  // Start from a single empty instance: no variables bound, no atoms
-  // matched. Each positive literal below multiplies it out.
+// Finds every way to satisfy the body with the atoms currently in the store,
+// starting from `seed` (its binding and matched atoms so far). Works through
+// the positive literals left to right, extending each partial instance with
+// every stored tuple that matches, then keeps the instances whose
+// comparisons all hold. 'not' literals never filter here; the caller decides
+// what to do with them.
+//
+// `seed` lets a caller pre-bind variables from an enclosing scope, e.g.
+// grounding an aggregate element's condition starting from the enclosing
+// rule instance's binding.
+absl::StatusOr<std::vector<Instance>> find_instances(
+    const BodyParts& parts, const Store& store, Instance seed = Instance{}) {
   std::vector<Instance> instances;
-  instances.push_back(Instance{});
+  instances.push_back(std::move(seed));
   for (const ClassicalLiteral* literal : parts.positive) {
     const PredData* data = store.find(pred_key(*literal));
     // A predicate with no atoms at all means the body cannot be satisfied.
@@ -360,6 +382,243 @@ absl::StatusOr<std::vector<Instance>> find_instances(const BodyParts& parts,
   return passing;
 }
 
+// Evaluates each 'not p(...)' literal under `binding` and returns the
+// negated literal for each one that is still derivable in `store`. A literal
+// whose predicate was never derived at all can never be true, so it is
+// dropped as trivially satisfied instead of being negated.
+absl::StatusOr<std::vector<aspif::Lit>> negative_lits(
+    const std::vector<const ClassicalLiteral*>& negative,
+    const Binding& binding, const Store& store) {
+  std::vector<aspif::Lit> lits;
+  for (const ClassicalLiteral* literal : negative) {
+    ASSIGN_OR_RETURN(Tuple tuple, eval_args(*literal, binding));
+    const PredData* data = store.find(pred_key(*literal));
+    if (data == nullptr) continue;
+    const GroundAtom* atom = data->find(tuple);
+    if (atom == nullptr) continue;
+    lits.push_back(-atom->id);
+  }
+  return lits;
+}
+
+// Grounds one aggregate element into weighted literals, one per distinct
+// evaluated `terms` tuple (ASP-Core-2 aggregates range over a *set* of
+// tuples, so two elements or two groundings of the same element that
+// produce equal tuples must contribute only once). Each distinct tuple gets
+// a fresh auxiliary atom, supported by one plain rule per grounding that
+// produced it -- multiple such rules give the atom OR semantics for free,
+// exactly modeling "this tuple is in the set if any grounding satisfies it".
+absl::StatusOr<std::vector<aspif::WeightedLit>> ground_agg_elements(
+    const Aggregate& agg, const Binding& outer_binding, const Store& store,
+    aspif::Program& result) {
+  std::vector<aspif::WeightedLit> weighted;
+  if (agg.elements == nullptr) return weighted;
+
+  absl::flat_hash_map<Tuple, aspif::Atom> tuple_atoms;
+  for (const auto& element_ptr : *agg.elements) {
+    const AggregateElement& element = *element_ptr;
+    BodyParts parts = split_naf_literals(element.literals);
+    ASSIGN_OR_RETURN(
+        std::vector<Instance> instances,
+        find_instances(parts, store, Instance{.binding = outer_binding}));
+    for (const Instance& instance : instances) {
+      Tuple tuple;
+      if (element.terms != nullptr) {
+        tuple.reserve(element.terms->size());
+        for (const auto& term : *element.terms) {
+          ASSIGN_OR_RETURN(Value value, eval_term(*term, instance.binding));
+          tuple.push_back(std::move(value));
+        }
+      }
+      int64_t weight = 1;
+      if (agg.function == AggregateFunctionType::kAGGREGATE_SUM) {
+        if (tuple.empty() || tuple[0].kind != Value::kNumber) {
+          return absl::InvalidArgumentError(
+              "a #sum aggregate element must give a number as its first "
+              "term");
+        }
+        weight = static_cast<int64_t>(tuple[0].number);
+      }
+
+      auto [it, inserted] = tuple_atoms.try_emplace(tuple, 0);
+      if (inserted) {
+        it->second = result.new_atom();
+        weighted.push_back({.lit = it->second, .weight = weight});
+      }
+
+      aspif::Rule support;
+      support.head = {it->second};
+      support.body = instance.matched;
+      ASSIGN_OR_RETURN(std::vector<aspif::Lit> neg,
+                       negative_lits(parts.negative, instance.binding, store));
+      support.body.insert(support.body.end(), neg.begin(), neg.end());
+      result.rules.push_back(std::move(support));
+    }
+  }
+  return weighted;
+}
+
+// The aggregate bound requirements accumulated from its (up to two)
+// 'term binop' sides, e.g. "3 <= #count{...} < 7" contributes lower = 3 (from
+// '3 <=') and upper = 6 (from '< 7').
+struct AggBounds {
+  std::optional<int64_t> lower;    // the aggregate's value must be >= this.
+  std::optional<int64_t> upper;    // the aggregate's value must be <= this.
+  std::vector<int64_t> not_equal;  // the aggregate's value must differ from
+                                   // each of these.
+
+  void apply_lower(int64_t k) {
+    lower = lower.has_value() ? std::max(*lower, k) : k;
+  }
+  void apply_upper(int64_t k) {
+    upper = upper.has_value() ? std::min(*upper, k) : k;
+  }
+};
+
+// Folds the upper-bound side ('AGG op k', e.g. 'AGG <= 7') into `bounds`.
+void apply_upper_bound(int64_t k, BinopType op, AggBounds& bounds) {
+  switch (op) {
+    case BinopType::kLESS_OR_EQ:
+      bounds.apply_upper(k);
+      break;
+    case BinopType::kLESS:
+      bounds.apply_upper(k - 1);
+      break;
+    case BinopType::kGREATER_OR_EQ:
+      bounds.apply_lower(k);
+      break;
+    case BinopType::kGREATER:
+      bounds.apply_lower(k + 1);
+      break;
+    case BinopType::kEQUAL:
+      bounds.apply_lower(k);
+      bounds.apply_upper(k);
+      break;
+    case BinopType::kUNEQUAL:
+      bounds.not_equal.push_back(k);
+      break;
+  }
+}
+
+// Folds the lower-bound side ('k op AGG', e.g. '3 <= AGG') into `bounds`.
+void apply_lower_bound(int64_t k, BinopType op, AggBounds& bounds) {
+  switch (op) {
+    case BinopType::kLESS_OR_EQ:
+      bounds.apply_lower(k);
+      break;
+    case BinopType::kLESS:
+      bounds.apply_lower(k + 1);
+      break;
+    case BinopType::kGREATER_OR_EQ:
+      bounds.apply_upper(k);
+      break;
+    case BinopType::kGREATER:
+      bounds.apply_upper(k - 1);
+      break;
+    case BinopType::kEQUAL:
+      bounds.apply_lower(k);
+      bounds.apply_upper(k);
+      break;
+    case BinopType::kUNEQUAL:
+      bounds.not_equal.push_back(k);
+      break;
+  }
+}
+
+// Negates a conjunction of literals into a single literal: if there's at
+// most one literal, negating it directly is equivalent; otherwise a fresh
+// atom is defined as their conjunction so its negation can stand for "not
+// all of these hold".
+aspif::Lit negate_conjunction(const std::vector<aspif::Lit>& lits,
+                              aspif::Program& result) {
+  if (lits.empty()) {
+    // Negating an empty (vacuously true) conjunction is always false: a
+    // fresh atom with no supporting rule can never be derived.
+    return result.new_atom();
+  }
+  if (lits.size() == 1) return -lits[0];
+  aspif::Atom conj = result.new_atom();
+  result.rules.push_back(aspif::Rule{.head = {conj}, .body = lits});
+  return -conj;
+}
+
+// Grounds one Aggregate body item into the literals that must be appended to
+// the enclosing rule's body for the aggregate to hold, e.g. '#count{X :
+// p(X)} >= 2' grounds to a single literal referencing a fresh atom defined
+// by an ASPIF weight-body rule. Only #count and #sum are supported: they map
+// directly onto ASPIF's weight body, whereas #min/#max would need a
+// different (guess-and-check) encoding.
+absl::StatusOr<std::vector<aspif::Lit>> ground_aggregate(
+    const Aggregate& agg, const Binding& outer_binding, const Store& store,
+    aspif::Program& result) {
+  if (agg.function == AggregateFunctionType::kAGGREGATE_MAX ||
+      agg.function == AggregateFunctionType::kAGGREGATE_MIN) {
+    return absl::UnimplementedError(
+        "#min and #max aggregates are not supported yet");
+  }
+
+  AggBounds bounds;
+  if (agg.lb_term != nullptr) {
+    ASSIGN_OR_RETURN(Value v, eval_term(*agg.lb_term, outer_binding));
+    if (v.kind != Value::kNumber) {
+      return absl::InvalidArgumentError("an aggregate bound must be a number");
+    }
+    apply_lower_bound(static_cast<int64_t>(v.number), agg.lb_op, bounds);
+  }
+  if (agg.ub_term != nullptr) {
+    ASSIGN_OR_RETURN(Value v, eval_term(*agg.ub_term, outer_binding));
+    if (v.kind != Value::kNumber) {
+      return absl::InvalidArgumentError("an aggregate bound must be a number");
+    }
+    apply_upper_bound(static_cast<int64_t>(v.number), agg.ub_op, bounds);
+  }
+
+  ASSIGN_OR_RETURN(std::vector<aspif::WeightedLit> weighted,
+                   ground_agg_elements(agg, outer_binding, store, result));
+
+  // The conjunction of literals that together mean "the bound holds".
+  std::vector<aspif::Lit> extra;
+  if (bounds.lower.has_value()) {
+    aspif::Atom low_ok = result.new_atom();
+    result.rules.push_back(
+        aspif::Rule{.head = {low_ok},
+                    .body_type = aspif::Rule::BodyType::kWeight,
+                    .lower_bound = *bounds.lower,
+                    .weighted_body = weighted});
+    extra.push_back(low_ok);
+  }
+  if (bounds.upper.has_value()) {
+    aspif::Atom high_bad = result.new_atom();
+    result.rules.push_back(
+        aspif::Rule{.head = {high_bad},
+                    .body_type = aspif::Rule::BodyType::kWeight,
+                    .lower_bound = *bounds.upper + 1,
+                    .weighted_body = weighted});
+    extra.push_back(-high_bad);
+  }
+  for (int64_t k : bounds.not_equal) {
+    aspif::Atom low_eq = result.new_atom();
+    result.rules.push_back(
+        aspif::Rule{.head = {low_eq},
+                    .body_type = aspif::Rule::BodyType::kWeight,
+                    .lower_bound = k,
+                    .weighted_body = weighted});
+    aspif::Atom high_bad_eq = result.new_atom();
+    result.rules.push_back(
+        aspif::Rule{.head = {high_bad_eq},
+                    .body_type = aspif::Rule::BodyType::kWeight,
+                    .lower_bound = k + 1,
+                    .weighted_body = weighted});
+    aspif::Atom eq_ok = result.new_atom();
+    result.rules.push_back(
+        aspif::Rule{.head = {eq_ok}, .body = {low_eq, -high_bad_eq}});
+    extra.push_back(-eq_ok);
+  }
+
+  if (!agg.naf) return extra;
+  return std::vector<aspif::Lit>{negate_conjunction(extra, result)};
+}
+
 // Fills `store` with every atom that could appear in an answer set, by
 // running each rule against the atoms collected so far and repeating until a
 // full pass adds nothing new. Each new atom gets its ASPIF number from
@@ -369,6 +628,14 @@ absl::StatusOr<std::vector<Instance>> find_instances(const BodyParts& parts,
 // collected, p is collected too. That is deliberate: this phase only decides
 // which atoms can exist at all; emit_rules() emits the rule with the 'not r'
 // still in it, and the solver decides whether p is true.
+//
+// Aggregates are ignored the same way: a rule's aggregates are never checked
+// here, so a rule like 'p :- dom(X), #count{Y : q(X,Y)} >= 2.' derives p(x)
+// for every x in dom regardless of the count. safety.cc guarantees an
+// aggregate's own predicates can't be recursive with the rule's head, so by
+// the time this rule's component is emitted, the store for those predicates
+// is already complete and the real weight-body encoding constrains the
+// solver correctly.
 //
 // Atoms a rule derives are inserted into `store` right away, so a rule later
 // in the same pass already sees them. A rule never sees atoms from its own
@@ -414,13 +681,16 @@ absl::Status emit_rules(const std::vector<RuleView>& rules, const Store& store,
             store.find(pred_key(*rule.head))->find(tuple)->id);
       }
       aspif_rule.body = instance.matched;
-      for (const ClassicalLiteral* negative : rule.parts.negative) {
-        ASSIGN_OR_RETURN(Tuple tuple, eval_args(*negative, instance.binding));
-        const PredData* data = store.find(pred_key(*negative));
-        if (data == nullptr) continue;
-        const GroundAtom* atom = data->find(tuple);
-        if (atom == nullptr) continue;
-        aspif_rule.body.push_back(-atom->id);
+      ASSIGN_OR_RETURN(
+          std::vector<aspif::Lit> neg,
+          negative_lits(rule.parts.negative, instance.binding, store));
+      aspif_rule.body.insert(aspif_rule.body.end(), neg.begin(), neg.end());
+      for (const Aggregate* aggregate : rule.parts.aggregates) {
+        ASSIGN_OR_RETURN(
+            std::vector<aspif::Lit> extra,
+            ground_aggregate(*aggregate, instance.binding, store, result));
+        aspif_rule.body.insert(aspif_rule.body.end(), extra.begin(),
+                               extra.end());
       }
       result.rules.push_back(std::move(aspif_rule));
     }

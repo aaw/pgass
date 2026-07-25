@@ -1,6 +1,5 @@
 # Grounder
 
-* Rewrite aggregates as ASPIF "weight body"s.
 * Rewrite weak constraints (_viol instances) as ASPIF minimize statements.
 * Support function terms (currently rejected in eval_term).
 * Support arithmetic terms (NegatedTermKind, TermOperationKind; currently rejected in eval_term).
