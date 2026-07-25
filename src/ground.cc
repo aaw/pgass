@@ -51,7 +51,7 @@ struct Value {
   }
 };
 
-// Orders ground values per the ASP-Core-2 spec: (see the comment on Value
+// Orders ground values per the ASP-Core-2 spec (see the comment on Value
 // above): numbers numerically, constants and strings lexicographically.
 int compare_values(const Value& a, const Value& b) {
   if (a.kind != b.kind) return a.kind < b.kind ? -1 : 1;
@@ -289,8 +289,12 @@ absl::StatusOr<std::vector<RuleView>> make_rule_views(const Program& prog) {
 std::vector<std::vector<RuleView>> bucket_rule_views(
     const PredGraph& graph, const std::vector<int>& component,
     const std::vector<RuleView>& rules) {
+  // `component` is empty when the program mentions no predicate at all, e.g.
+  // ":- 1 < 2."
   int num_components =
-      *std::max_element(component.begin(), component.end()) + 1;
+      component.empty()
+          ? 0
+          : *std::max_element(component.begin(), component.end()) + 1;
   std::vector<std::vector<RuleView>> bucket(num_components);
   for (const RuleView& rv : rules) {
     if (rv.head == nullptr) continue;
@@ -342,20 +346,19 @@ absl::StatusOr<bool> comparisons_hold(const BodyParts& parts,
   return true;
 }
 
-// Finds every way to satisfy the body with the atoms currently in the store,
-// starting from `seed` (its binding and matched atoms so far). Works through
-// the positive literals left to right, extending each partial instance with
-// every stored tuple that matches, then keeps the instances whose
-// comparisons all hold. 'not' literals never filter here; the caller decides
-// what to do with them.
+// Finds every way to satisfy the body with the atoms currently in the store.
+// Works through the positive literals left to right, extending each partial
+// instance with every stored tuple that matches, then keeps the instances
+// whose comparisons all hold. 'not' literals never filter here; the caller
+// decides what to do with them.
 //
-// `seed` lets a caller pre-bind variables from an enclosing scope, e.g.
-// grounding an aggregate element's condition starting from the enclosing
-// rule instance's binding.
+// `seed_binding` lets a caller start from variables already bound by an
+// enclosing scope, e.g. grounding an aggregate element's condition under the
+// enclosing rule instance's binding.
 absl::StatusOr<std::vector<Instance>> find_instances(
-    const BodyParts& parts, const Store& store, Instance seed = Instance{}) {
+    const BodyParts& parts, const Store& store, Binding seed_binding = {}) {
   std::vector<Instance> instances;
-  instances.push_back(std::move(seed));
+  instances.push_back(Instance{std::move(seed_binding), {}});
   for (const ClassicalLiteral* literal : parts.positive) {
     const PredData* data = store.find(pred_key(*literal));
     // A predicate with no atoms at all means the body cannot be satisfied.
@@ -420,8 +423,7 @@ absl::StatusOr<std::vector<aspif::WeightedLit>> ground_agg_elements(
     BodyParts parts = split_naf_literals(element.literals);
     ASSIGN_OR_RETURN(
         std::vector<Instance> instances,
-        find_instances(parts, store,
-                        Instance{.binding = outer_binding, .matched = {}}));
+        find_instances(parts, store, outer_binding));
     for (const Instance& instance : instances) {
       Tuple tuple;
       if (element.terms != nullptr) {
@@ -539,9 +541,38 @@ aspif::Lit negate_conjunction(const std::vector<aspif::Lit>& lits,
   }
   if (lits.size() == 1) return -lits[0];
   aspif::Atom conj = result.new_atom();
-  result.rules.push_back(
-      aspif::Rule{.head = {conj}, .body = lits, .weighted_body = {}});
+  aspif::Rule rule;
+  rule.head = {conj};
+  rule.body = lits;
+  result.rules.push_back(std::move(rule));
   return -conj;
+}
+
+// Defines a fresh atom that holds exactly when the weights of the true
+// literals in `weighted` sum to at least `bound`, and returns it. ASPIF's
+// weight body is the only construct that can compare an aggregate against a
+// number, so every bound an aggregate can carry is expressed in terms of it.
+aspif::Atom at_least(int64_t bound,
+                     const std::vector<aspif::WeightedLit>& weighted,
+                     aspif::Program& result) {
+  aspif::Atom atom = result.new_atom();
+  aspif::Rule rule;
+  rule.head = {atom};
+  rule.body_type = aspif::Rule::BodyType::kWeight;
+  rule.lower_bound = bound;
+  rule.weighted_body = weighted;
+  result.rules.push_back(std::move(rule));
+  return atom;
+}
+
+// Evaluates one side of an aggregate's bound, e.g. the '3' in
+// '3 <= #count{...}'.
+absl::StatusOr<int64_t> eval_bound(const Term& term, const Binding& binding) {
+  ASSIGN_OR_RETURN(Value value, eval_term(term, binding));
+  if (value.kind != Value::kNumber) {
+    return absl::InvalidArgumentError("an aggregate bound must be a number");
+  }
+  return static_cast<int64_t>(value.number);
 }
 
 // Grounds one Aggregate body item into the literals that must be appended to
@@ -561,66 +592,33 @@ absl::StatusOr<std::vector<aspif::Lit>> ground_aggregate(
 
   AggBounds bounds;
   if (agg.lb_term != nullptr) {
-    ASSIGN_OR_RETURN(Value v, eval_term(*agg.lb_term, outer_binding));
-    if (v.kind != Value::kNumber) {
-      return absl::InvalidArgumentError("an aggregate bound must be a number");
-    }
-    apply_lower_bound(static_cast<int64_t>(v.number), agg.lb_op, bounds);
+    ASSIGN_OR_RETURN(int64_t k, eval_bound(*agg.lb_term, outer_binding));
+    apply_lower_bound(k, agg.lb_op, bounds);
   }
   if (agg.ub_term != nullptr) {
-    ASSIGN_OR_RETURN(Value v, eval_term(*agg.ub_term, outer_binding));
-    if (v.kind != Value::kNumber) {
-      return absl::InvalidArgumentError("an aggregate bound must be a number");
-    }
-    apply_upper_bound(static_cast<int64_t>(v.number), agg.ub_op, bounds);
+    ASSIGN_OR_RETURN(int64_t k, eval_bound(*agg.ub_term, outer_binding));
+    apply_upper_bound(k, agg.ub_op, bounds);
   }
 
   ASSIGN_OR_RETURN(std::vector<aspif::WeightedLit> weighted,
                    ground_agg_elements(agg, outer_binding, store, result));
 
-  // The conjunction of literals that together mean "the bound holds".
+  // The conjunction of literals that together mean "the bound holds". Only
+  // "at least" is available, so the other comparisons are phrased in terms of
+  // it: the value is at most 7 exactly when it isn't at least 8.
   std::vector<aspif::Lit> extra;
   if (bounds.lower.has_value()) {
-    aspif::Atom low_ok = result.new_atom();
-    result.rules.push_back(
-        aspif::Rule{.head = {low_ok},
-                    .body_type = aspif::Rule::BodyType::kWeight,
-                    .body = {},
-                    .lower_bound = *bounds.lower,
-                    .weighted_body = weighted});
-    extra.push_back(low_ok);
+    extra.push_back(at_least(*bounds.lower, weighted, result));
   }
   if (bounds.upper.has_value()) {
-    aspif::Atom high_bad = result.new_atom();
-    result.rules.push_back(
-        aspif::Rule{.head = {high_bad},
-                    .body_type = aspif::Rule::BodyType::kWeight,
-                    .body = {},
-                    .lower_bound = *bounds.upper + 1,
-                    .weighted_body = weighted});
-    extra.push_back(-high_bad);
+    extra.push_back(-at_least(*bounds.upper + 1, weighted, result));
   }
   for (int64_t k : bounds.not_equal) {
-    aspif::Atom low_eq = result.new_atom();
-    result.rules.push_back(
-        aspif::Rule{.head = {low_eq},
-                    .body_type = aspif::Rule::BodyType::kWeight,
-                    .body = {},
-                    .lower_bound = k,
-                    .weighted_body = weighted});
-    aspif::Atom high_bad_eq = result.new_atom();
-    result.rules.push_back(
-        aspif::Rule{.head = {high_bad_eq},
-                    .body_type = aspif::Rule::BodyType::kWeight,
-                    .body = {},
-                    .lower_bound = k + 1,
-                    .weighted_body = weighted});
-    aspif::Atom eq_ok = result.new_atom();
-    result.rules.push_back(
-        aspif::Rule{.head = {eq_ok},
-                    .body = {low_eq, -high_bad_eq},
-                    .weighted_body = {}});
-    extra.push_back(-eq_ok);
+    // The value equals k exactly when it is at least k but not at least
+    // k + 1, so requiring it to differ from k negates that conjunction.
+    aspif::Lit k_or_more = at_least(k, weighted, result);
+    aspif::Lit more_than_k = at_least(k + 1, weighted, result);
+    extra.push_back(negate_conjunction({k_or_more, -more_than_k}, result));
   }
 
   if (!agg.naf) return extra;

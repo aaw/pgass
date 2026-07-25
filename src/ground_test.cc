@@ -232,6 +232,18 @@ TEST(GroundTest, ComparisonFiltersInstances) {
             "0\n");
 }
 
+TEST(GroundTest, ProgramWithNoPredicates) {
+  // Nothing here names a predicate, so the dependency graph has no nodes at
+  // all and there are no components to ground. The constraint still comes
+  // out, with a body that's empty because '1 < 2' is decided at grounding.
+  auto out = ground_source(":- 1 < 2.");
+  ASSERT_TRUE(out.ok()) << out.status();
+  EXPECT_EQ(*out,
+            "asp 1 0 0\n"
+            "1 0 0 0 0\n"
+            "0\n");
+}
+
 TEST(GroundTest, ConstraintHasNoHead) {
   auto out = ground_source("p(1). q(1). :- p(X), q(X).");
   ASSERT_TRUE(out.ok()) << out.status();
