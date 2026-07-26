@@ -11,6 +11,7 @@
 #include "parse.h"
 
 using ::testing::HasSubstr;
+using ::testing::Not;
 
 namespace {
 
@@ -1095,6 +1096,26 @@ TEST(GroundTest, QueryOnAClassicallyNegatedLiteral) {
   auto out = ground_source("-p(1). -p(1)?");
   ASSERT_TRUE(out.ok()) << out.status();
   EXPECT_THAT(*out, HasSubstr("6 1 1\n"));
+}
+
+TEST(GroundTest, ClassicallyNegatedAtomPrintsUnderItsOriginalName) {
+  auto out = ground_source("-p(1). p(2).");
+  ASSERT_TRUE(out.ok()) << out.status();
+  EXPECT_THAT(*out, HasSubstr("4 4 p(2) 1 1\n"));
+  EXPECT_THAT(*out, HasSubstr("4 5 -p(1) 1 2\n"));
+}
+
+TEST(GroundTest, ZeroArityClassicallyNegatedAtomPrintsUnderItsOriginalName) {
+  auto out = ground_source("-p.");
+  ASSERT_TRUE(out.ok()) << out.status();
+  EXPECT_THAT(*out, HasSubstr("4 2 -p 1 1\n"));
+}
+
+TEST(GroundTest, PredicatesNormalizationInventsStayOutOfTheOutput) {
+  auto out = ground_source("p(1). { q(X) } :- p(X). :~ p(X). [1@0]");
+  ASSERT_TRUE(out.ok()) << out.status();
+  EXPECT_THAT(*out, Not(HasSubstr("_cr")));
+  EXPECT_THAT(*out, Not(HasSubstr("_viol")));
 }
 
 }  // namespace

@@ -20,6 +20,11 @@
 // and #sum aggregates, rewritten as ASPIF weight bodies, and weak constraints,
 // rewritten as ASPIF minimize statements. A query becomes an ASPIF assumption.
 // #min and #max aggregates are rejected with an error for now.
+//
+// `prog` must have passed verify_safe() and normalize(); ground() re-checks
+// neither. Grounding an unsafe program can run forever, e.g. 'p(0). p(S) :-
+// #count{ X : p(X) } = S.', where every new p atom gives the count one more
+// atom to range over.
 absl::StatusOr<aspif::Program> ground(const Program& prog);
 
 #endif  // GROUND_H_

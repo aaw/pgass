@@ -19,6 +19,7 @@
 #include "collect.h"
 #include "graph.h"
 #include "macros.h"
+#include "normalize.h"
 
 namespace {
 
@@ -85,6 +86,17 @@ int compare_values(const Value& a, const Value& b) {
 
 // The argument values of one ground atom, e.g. {1, abc} for p(1, abc).
 using Tuple = std::vector<Value>;
+
+// One ground atom as it prints, e.g. p(1,abc) for the predicate p/2 and the
+// tuple {1, abc}.
+std::string printed_atom(std::string_view name, const Tuple& args) {
+  if (args.empty()) return std::string(name);
+  auto print_arg = [](std::string* out, const Value& value) {
+    out->append(value.printed());
+  };
+  return absl::StrCat(name, "(", absl::StrJoin(args, ",", print_arg), ")");
+}
+
 // Variable name -> value, for one candidate rule instance, e.g. {X: 1, Y:
 // abc} while matching the body of "p(X, Y) :- q(X), r(Y)." against q(1) and
 // r(abc).
@@ -160,6 +172,8 @@ absl::StatusOr<std::optional<Value>> eval_term(const Term& term,
                                                const Binding& binding) {
   switch (term.kind) {
     case Term::NumberKind:
+      // TODO: wraps on this cast and on overflow below; TODO.md tracks moving
+      // to unlimited precision integers.
       return Value::make_number(
           static_cast<int64_t>(static_cast<const Number&>(term).value));
     case Term::StringKind:
@@ -1169,10 +1183,17 @@ absl::Status emit_rules(const std::vector<RuleView>& rules, const Store& store,
         // means this instance has no ground rule. derive_atoms() skipped it
         // for the same reason, so nothing is missing from the store.
         if (!tuple.has_value()) continue;
-        // derive_atoms() added every derivable head atom, so this lookup
-        // succeeds.
-        aspif_rule.head.push_back(
-            store.find(pred_key(*rule.head))->find(*tuple)->id);
+        // derive_atoms() added every derivable head atom, so a miss means the
+        // program never passed verify_safe().
+        const PredData* data = store.find(pred_key(*rule.head));
+        const GroundAtom* head = data == nullptr ? nullptr : data->find(*tuple);
+        if (head == nullptr) {
+          return absl::InternalError(absl::StrCat(
+              "grounding derived no atom for the head '",
+              printed_atom(rule.head->id, *tuple),
+              "'; was the program checked by verify_safe()?"));
+        }
+        aspif_rule.head.push_back(head->id);
       }
       result.rules.push_back(std::move(aspif_rule));
     }
@@ -1219,23 +1240,24 @@ void emit_minimize(const Store& store, aspif::Program& result) {
   }
 }
 
-// Names every atom of a user-visible predicate ('_' prefixes are internal)
-// so answer sets print symbolically.
+// Names every atom of a user-visible predicate so answer sets print
+// symbolically. '_' predicates are internal and stay hidden, apart from a
+// '_neg_p' standing for a classically negated '-p', which prints as '-p'.
 void name_outputs(const Store& store, aspif::Program& result) {
   for (const PredKey& key : store.order) {
-    if (!key.name.empty() && key.name[0] == '_') continue;
-    const PredData& data = *store.find(key);
-    for (const GroundAtom& atom : data.atoms) {
-      std::string name = key.name;
-      if (key.arity > 0) {
-        auto print_arg = [](std::string* out, const Value& value) {
-          out->append(value.printed());
-        };
-        absl::StrAppend(&name, "(", absl::StrJoin(atom.args, ",", print_arg),
-                        ")");
-      }
+    std::string predicate;
+    if (key.name.starts_with(kClassicalNegationPrefix)) {
+      predicate =
+          absl::StrCat("-", key.name.substr(kClassicalNegationPrefix.size()));
+    } else if (key.name.starts_with('_')) {
+      continue;
+    } else {
+      predicate = key.name;
+    }
+    for (const GroundAtom& atom : store.find(key)->atoms) {
       result.outputs.push_back(
-          aspif::Output{.name = std::move(name), .condition = {atom.id}});
+          aspif::Output{.name = printed_atom(predicate, atom.args),
+                        .condition = {atom.id}});
     }
   }
 }

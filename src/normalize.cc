@@ -106,7 +106,7 @@ absl::Status remove_classical_negation(Program& prog) {
     if (!literal.negated) return;
     size_t arity = literal.args ? literal.args->size() : 0;
     negated.emplace(literal.id, arity);
-    literal.id = absl::StrCat("_neg_", literal.id);
+    literal.id = absl::StrCat(kClassicalNegationPrefix, literal.id);
     literal.negated = false;
   };
 
@@ -123,8 +123,9 @@ absl::Status remove_classical_negation(Program& prog) {
   for (const auto& [name, arity] : negated) {
     auto items = std::make_unique<std::vector<std::unique_ptr<BodyItem>>>();
     items->push_back(positive_atom_item(name, fresh_variable_args(arity)));
-    items->push_back(positive_atom_item(absl::StrCat("_neg_", name),
-                                        fresh_variable_args(arity)));
+    items->push_back(
+        positive_atom_item(absl::StrCat(kClassicalNegationPrefix, name),
+                           fresh_variable_args(arity)));
     auto constraint = std::make_unique<Statement>();
     constraint->body = std::make_unique<Body>();
     constraint->body->items = std::move(items);
