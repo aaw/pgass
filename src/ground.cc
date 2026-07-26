@@ -26,6 +26,13 @@
 
 namespace {
 
+// --------------------------------------------------------------------------
+// Ground values and the store of derived atoms
+//
+// The values a variable can take, the atoms built out of them, and the
+// bindings that map a rule's variables to values while it is being ground.
+// --------------------------------------------------------------------------
+
 // A ground value: a number, a constant like abc, a quoted string like "abc",
 // or a function term like f(1, abc) whose arguments are themselves values.
 // The kind order matches the ASP-Core-2 spec, which orders integers <
@@ -50,15 +57,7 @@ struct Value {
   }
 
   // The value as it prints in an answer set: 42, abc, "abc", or f(1,abc).
-  std::string printed() const {
-    if (kind == kNumber) return absl::StrCat(number);
-    if (kind == kString) return absl::StrCat("\"", text, "\"");
-    if (kind == kConstant) return text;
-    auto print_arg = [](std::string* out, const Value& value) {
-      out->append(value.printed());
-    };
-    return absl::StrCat(text, "(", absl::StrJoin(args, ",", print_arg), ")");
-  }
+  std::string printed() const;
 
   bool operator==(const Value&) const = default;
 
@@ -98,6 +97,15 @@ std::string printed_atom(std::string_view name, const Tuple& args) {
     out->append(value.printed());
   };
   return absl::StrCat(name, "(", absl::StrJoin(args, ",", print_arg), ")");
+}
+
+// A function term prints exactly like an atom of the same name and arguments,
+// e.g. the f(1,abc) that is a value and the f(1,abc) that is an atom.
+std::string Value::printed() const {
+  if (kind == kNumber) return absl::StrCat(number);
+  if (kind == kString) return absl::StrCat("\"", text, "\"");
+  if (kind == kConstant) return text;
+  return printed_atom(text, args);
 }
 
 // A slot number for each variable occurrence in one rule, e.g. both X's of
@@ -149,8 +157,6 @@ class Binding {
   }
   void set(size_t slot, Value value) { values_[slot] = std::move(value); }
   void clear(size_t slot) { values_[slot].reset(); }
-
-  const VarSlots& slots() const { return *slots_; }
 
  private:
   const VarSlots* slots_;
@@ -240,13 +246,21 @@ struct Store {
   // Starts a derivation pass, so that what the last one derived becomes the
   // delta the next round of joins reads.
   void begin_pass() {
-    for (const PredKey& key : order) {
-      PredData& data = preds[key];
+    for (auto& [key, data] : preds) {
       data.size_before_prev_pass = data.size_before_pass;
       data.size_before_pass = data.atoms.size();
     }
   }
 };
+
+// --------------------------------------------------------------------------
+// Evaluating and matching terms
+//
+// Evaluating turns a term into its value under a binding, e.g. 'X + 1' into
+// 2 under {X: 1}. Matching is the other direction: it compares a term
+// against a stored value and binds whatever variables that takes, e.g.
+// matching 'f(X, b)' against a stored f(1, b) binds X to 1.
+// --------------------------------------------------------------------------
 
 absl::StatusOr<std::optional<Value>> eval_term(const Term& term,
                                                const Binding& binding);
@@ -351,13 +365,6 @@ absl::StatusOr<std::optional<Tuple>> eval_terms(const Terms& terms,
   return tuple;
 }
 
-// Evaluates each argument of a ground instance of `literal` under `binding`,
-// e.g. 'p(X, 2)' evaluates to {1, 2} under the binding {X: 1}.
-absl::StatusOr<std::optional<Tuple>> eval_args(const ClassicalLiteral& literal,
-                                               const Binding& binding) {
-  return eval_terms(literal.args, binding);
-}
-
 // Tries to match one argument term against one stored value, extending
 // `binding` with whatever variables the match binds and recording each of them
 // in `trail`. Returns false on a mismatch, in which case `binding` still holds
@@ -448,6 +455,14 @@ absl::StatusOr<bool> match_args(const ClassicalLiteral& literal,
   return true;
 }
 
+// --------------------------------------------------------------------------
+// Rules as the grounder sees them
+//
+// A statement's body is sorted into the kinds of item grounding handles
+// differently, and every variable the rule mentions is given a slot number,
+// so that grounding it can work with slots and vectors rather than names.
+// --------------------------------------------------------------------------
+
 // One rule body, split into the kinds of items grounding treats differently.
 struct BodyParts {
   // Positive classical literals: matched against the store to bind
@@ -520,13 +535,11 @@ struct RuleView {
 VarSlots make_var_slots(const RuleView& rule) {
   VarSlots slots;
   absl::flat_hash_map<std::string_view, size_t> by_name;
-  auto add_from = [&](const Literal& literal) {
+  // Takes a literal or an aggregate, whichever collect::for_each_variable
+  // overload fits the node.
+  auto add_from = [&](const auto& node) {
     collect::for_each_variable(
-        literal, [&](const Variable& var) { slots.add(var, by_name); });
-  };
-  auto add_from_term = [&](const Term& term) {
-    collect::for_each_variable(
-        term, [&](const Variable& var) { slots.add(var, by_name); });
+        node, [&](const Variable& var) { slots.add(var, by_name); });
   };
 
   if (rule.head != nullptr) add_from(*rule.head);
@@ -535,19 +548,7 @@ VarSlots make_var_slots(const RuleView& rule) {
   for (const ClassicalLiteral* literal : rule.parts.negative)
     add_from(*literal);
   for (const NafLiteral* naf : rule.parts.comparisons) add_from(*naf->literal);
-  for (const Aggregate* agg : rule.parts.aggregates) {
-    if (agg->lb_term != nullptr) add_from_term(*agg->lb_term);
-    if (agg->ub_term != nullptr) add_from_term(*agg->ub_term);
-    if (agg->elements == nullptr) continue;
-    for (const auto& element : *agg->elements) {
-      if (element->terms != nullptr) {
-        for (const auto& term : *element->terms) add_from_term(*term);
-      }
-      if (element->literals != nullptr) {
-        for (const auto& naf : *element->literals) add_from(*naf->literal);
-      }
-    }
-  }
+  for (const Aggregate* agg : rule.parts.aggregates) add_from(*agg);
   return slots;
 }
 
@@ -581,9 +582,10 @@ absl::StatusOr<std::vector<RuleView>> make_rule_views(const Program& prog) {
   return rules;
 }
 
-// Buckets rules by component[id_of[head predicate]]. Constraints (no head)
-// are skipped; they stay only in the flat `rules` list for emit_rules.
-std::vector<std::vector<RuleView>> bucket_rule_views(
+// Buckets rules by component[id_of[head predicate]], with the constraints,
+// which have no head and so no component, in one extra bucket at the end.
+// `rules` owns the RuleViews and must outlive the buckets.
+std::vector<std::vector<const RuleView*>> bucket_rule_views(
     const PredGraph& graph, const std::vector<int>& component,
     const std::vector<RuleView>& rules) {
   // `component` is empty when the program mentions no predicate at all, e.g.
@@ -592,13 +594,26 @@ std::vector<std::vector<RuleView>> bucket_rule_views(
       component.empty()
           ? 0
           : *std::max_element(component.begin(), component.end()) + 1;
-  std::vector<std::vector<RuleView>> bucket(num_components);
+  std::vector<std::vector<const RuleView*>> bucket(num_components + 1);
+  std::vector<const RuleView*>& constraints = bucket.back();
   for (const RuleView& rv : rules) {
-    if (rv.head == nullptr) continue;
-    bucket[component[graph.id_of.at(pred_key(*rv.head))]].push_back(rv);
+    if (rv.head == nullptr) {
+      constraints.push_back(&rv);
+      continue;
+    }
+    bucket[component[graph.id_of.at(pred_key(*rv.head))]].push_back(&rv);
   }
   return bucket;
 }
+
+// --------------------------------------------------------------------------
+// Satisfying a body: joins over the store
+//
+// find_instances() hands its caller every way to satisfy a body with the
+// atoms derived so far. It matches the positive literals against the store
+// one at a time, backtracking on a mismatch, then keeps the results whose
+// assignments, aggregates, and comparisons work out.
+// --------------------------------------------------------------------------
 
 // One way to satisfy a rule body with the atoms in the store: a value for
 // each of the body's variables, plus the ASPIF atom each positive literal
@@ -797,15 +812,23 @@ bool holds_anonymous_variable(const Term& term) {
   return false;
 }
 
-// Whether any argument of `literal` holds a '_', e.g. true for 'r(X, _)'. Such
-// a literal stands for a set of atoms rather than one, so it has to be matched
-// against the store rather than looked up in it.
-bool args_hold_anonymous_variable(const ClassicalLiteral& literal) {
-  if (literal.args == nullptr) return false;
+// Whether `arg` has a value of its own under `binding`, e.g. the 'Y' of
+// 'edge(Y, Z)' once Y is bound. An unbound variable or a '_' takes whatever
+// the atom holds in that position instead, so it has none.
+bool arg_is_ground(const Term& arg, const Binding& binding) {
+  return is_bound(arg, binding) && !holds_anonymous_variable(arg);
+}
+
+// Whether every argument of `literal` has a value under `binding`, e.g. true
+// for the 'r(X, 2)' of a binding holding X and false for 'r(X, _)'. Such a
+// literal names one atom, which the store can be looked up for; the others
+// stand for a set of atoms and have to be matched against it.
+bool args_are_ground(const ClassicalLiteral& literal, const Binding& binding) {
+  if (literal.args == nullptr) return true;
   for (const auto& arg : *literal.args) {
-    if (holds_anonymous_variable(*arg)) return true;
+    if (!arg_is_ground(*arg, binding)) return false;
   }
-  return false;
+  return true;
 }
 
 // The argument positions of `literal` whose terms have a value to look up, e.g.
@@ -816,10 +839,7 @@ std::vector<size_t> probeable_positions(const ClassicalLiteral& literal,
   std::vector<size_t> positions;
   if (literal.args == nullptr) return positions;
   for (size_t k = 0; k < literal.args->size(); ++k) {
-    const Term& arg = *(*literal.args)[k];
-    if (is_bound(arg, binding) && !holds_anonymous_variable(arg)) {
-      positions.push_back(k);
-    }
+    if (arg_is_ground(*(*literal.args)[k], binding)) positions.push_back(k);
   }
   return positions;
 }
@@ -1018,24 +1038,27 @@ absl::Status find_instances(
 }
 
 // The stored atoms `literal` stands for under `binding`: the one atom it names,
-// e.g. r(1, 2) for 'r(X, 2)' under {X: 1}, or, when it holds a '_', every
-// stored atom it matches, e.g. both r(1, 2) and r(3, 2) for 'r(_, 2)'. A
-// literal naming an atom the store does not hold comes back with none.
+// e.g. r(1, 2) for 'r(X, 2)' under {X: 1}, or, when an argument has no value of
+// its own, every stored atom it matches, e.g. both r(1, 2) and r(3, 2) for
+// 'r(_, 2)'. A literal naming an atom the store does not hold comes back with
+// none.
 absl::StatusOr<std::vector<aspif::Atom>> matching_atoms(
     const ClassicalLiteral& literal, const Binding& binding,
     const Store& store) {
   std::vector<aspif::Atom> matched;
   const PredData* data = store.find(pred_key(literal));
   if (data == nullptr) return matched;
-  if (!args_hold_anonymous_variable(literal)) {
-    ASSIGN_OR_RETURN(std::optional<Tuple> tuple, eval_args(literal, binding));
+  if (args_are_ground(literal, binding)) {
+    ASSIGN_OR_RETURN(std::optional<Tuple> tuple,
+                     eval_terms(literal.args, binding));
     if (!tuple.has_value()) return matched;
     const GroundAtom* atom = data->find(*tuple);
     if (atom != nullptr) matched.push_back(atom->id);
     return matched;
   }
-  // Matching binds the variables under the '_', e.g. the X of 'r(X, _)', which
-  // this literal's own scope has no use for, so it happens on a scratch copy.
+  // Matching binds the open arguments' variables, e.g. the X of 'r(X, _)' when
+  // X has no value yet, which this literal's own scope has no use for, so it
+  // happens on a scratch copy.
   Binding scratch = binding;
   for (const GroundAtom& atom : data->atoms) {
     BindingTrail trail(scratch);
@@ -1068,6 +1091,16 @@ absl::StatusOr<std::optional<std::vector<aspif::Lit>>> negative_lits(
   }
   return lits;
 }
+
+// --------------------------------------------------------------------------
+// Aggregates
+//
+// ASPIF has no aggregate statement, so a '#count{...} >= 2' becomes a fresh
+// atom defined by a weight-body rule over one auxiliary atom per tuple the
+// elements can produce. An aggregate whose value binds a variable, e.g.
+// '#count{...} = S', is handled before that, by splitting the rule instance
+// into one per value the aggregate can take.
+// --------------------------------------------------------------------------
 
 // One distinct tuple an aggregate's elements can produce, e.g. the [1] that
 // both elements of '#count{ X : p(X) ; X : r(X) }' produce once p(1) and r(1)
@@ -1184,25 +1217,8 @@ std::vector<size_t> agg_output_slots(const Aggregate& agg,
 absl::flat_hash_set<size_t> agg_variable_slots(const Aggregate& agg,
                                                const Binding& binding) {
   absl::flat_hash_set<size_t> slots;
-  auto add = [&](const Term& term) {
-    collect::for_each_variable(
-        term, [&](const Variable& var) { slots.insert(binding.slot_of(var)); });
-  };
-  if (agg.lb_term != nullptr) add(*agg.lb_term);
-  if (agg.ub_term != nullptr) add(*agg.ub_term);
-  if (agg.elements == nullptr) return slots;
-  for (const auto& element : *agg.elements) {
-    if (element->terms != nullptr) {
-      for (const auto& term : *element->terms) add(*term);
-    }
-    if (element->literals != nullptr) {
-      for (const auto& naf : *element->literals) {
-        collect::for_each_variable(*naf->literal, [&](const Variable& var) {
-          slots.insert(binding.slot_of(var));
-        });
-      }
-    }
-  }
+  collect::for_each_variable(
+      agg, [&](const Variable& var) { slots.insert(binding.slot_of(var)); });
   return slots;
 }
 
@@ -1512,6 +1528,16 @@ absl::StatusOr<std::optional<std::vector<aspif::Lit>>> ground_aggregate(
   return std::vector<aspif::Lit>{negate_conjunction(extra, result)};
 }
 
+// --------------------------------------------------------------------------
+// Building the ground program
+//
+// Two phases. derive_atoms() runs the rules to a fixpoint to find every atom
+// that could appear in an answer set and numbers it; emit_rules() then walks
+// the rules again and emits one ASPIF rule per instance, in terms of those
+// numbers. The rest turns the store into the program's minimize statements,
+// output names, and query assumption.
+// --------------------------------------------------------------------------
+
 // Whether the body parts derive_atoms() otherwise ignores are well-formed
 // under `binding`: the arguments of every 'not' literal and each aggregate's
 // bounds. Ill-formed means the rule has no ground instance under this
@@ -1553,7 +1579,7 @@ absl::Status derive_from_rule(const RuleView& rule,
                                                rule.parts, instance.binding));
         if (!well_formed) return absl::OkStatus();
         ASSIGN_OR_RETURN(std::optional<Tuple> tuple,
-                         eval_args(*rule.head, instance.binding));
+                         eval_terms(rule.head->args, instance.binding));
         if (!tuple.has_value()) return absl::OkStatus();
         if (store.insert(pred_key(*rule.head), *std::move(tuple), aspif_prog)) {
           changed = true;
@@ -1595,27 +1621,27 @@ absl::Status derive_from_rule(const RuleView& rule,
 // which is enough because nothing it reads can still change: it reaches the
 // store only through an aggregate binding a variable to its value, and those
 // predicates sit in an earlier component, as noted above.
-absl::Status derive_atoms(const std::vector<RuleView>& rules, Store& store,
-                          aspif::Program& aspif_prog) {
+absl::Status derive_atoms(const std::vector<const RuleView*>& rules,
+                          Store& store, aspif::Program& aspif_prog) {
   // The first pass reads the whole store. It is the only one that fires the
   // rules with no positive literals, and it derives the delta the passes below
   // start from.
   bool changed = false;
-  for (const RuleView& rule : rules) {
-    if (rule.head == nullptr) continue;
+  for (const RuleView* rule : rules) {
+    if (rule->head == nullptr) continue;
     RETURN_IF_ERROR(
-        derive_from_rule(rule, std::nullopt, store, aspif_prog, changed));
+        derive_from_rule(*rule, std::nullopt, store, aspif_prog, changed));
   }
 
   do {
     changed = false;
     store.begin_pass();
-    for (const RuleView& rule : rules) {
-      if (rule.head == nullptr) continue;
-      for (size_t position = 0; position < rule.parts.positive.size();
+    for (const RuleView* rule : rules) {
+      if (rule->head == nullptr) continue;
+      for (size_t position = 0; position < rule->parts.positive.size();
            ++position) {
         RETURN_IF_ERROR(
-            derive_from_rule(rule, position, store, aspif_prog, changed));
+            derive_from_rule(*rule, position, store, aspif_prog, changed));
       }
     }
   } while (changed);
@@ -1625,9 +1651,10 @@ absl::Status derive_atoms(const std::vector<RuleView>& rules, Store& store,
 // Emits one ASPIF rule per rule instance. A 'not q' whose atom q was never
 // derived by derive_atoms() can never be true, so the literal is dropped as
 // satisfied; otherwise it stays in the rule body, negated.
-absl::Status emit_rules(const std::vector<RuleView>& rules, const Store& store,
-                        aspif::Program& result) {
-  for (const RuleView& rule : rules) {
+absl::Status emit_rules(const std::vector<const RuleView*>& rules,
+                        const Store& store, aspif::Program& result) {
+  for (const RuleView* rule_ptr : rules) {
+    const RuleView& rule = *rule_ptr;
     RETURN_IF_ERROR(find_instances(
         rule.parts, store, Binding(rule.slots),
         [&](const Instance& instance) -> absl::Status {
@@ -1655,7 +1682,7 @@ absl::Status emit_rules(const std::vector<RuleView>& rules, const Store& store,
 
           if (rule.head != nullptr) {
             ASSIGN_OR_RETURN(std::optional<Tuple> tuple,
-                             eval_args(*rule.head, instance.binding));
+                             eval_terms(rule.head->args, instance.binding));
             // An ill-formed head, e.g. the 'q(X / 0)' of "q(X / 0) :- p(X).",
             // means this instance has no ground rule. derive_atoms() skipped it
             // for the same reason, so nothing is missing from the store.
@@ -1753,22 +1780,15 @@ void name_outputs(const Store& store, aspif::Program& result) {
 // nothing satisfies the query.
 absl::Status emit_query(const ClassicalLiteral& query, const Store& store,
                         aspif::Program& result) {
-  std::vector<aspif::Lit> matched;
-  const PredData* data = store.find(pred_key(query));
-  if (data != nullptr) {
-    // A query is its own scope, so its variables are numbered on their own
-    // rather than sharing a rule's slots.
-    VarSlots slots;
-    absl::flat_hash_map<std::string_view, size_t> by_name;
-    collect::for_each_variable(
-        query, [&](const Variable& var) { slots.add(var, by_name); });
-    Binding binding(slots);
-    for (const GroundAtom& atom : data->atoms) {
-      BindingTrail trail(binding);
-      ASSIGN_OR_RETURN(bool ok, match_args(query, atom.args, binding, trail));
-      if (ok) matched.push_back(atom.id);
-    }
-  }
+  // A query is its own scope, so its variables are numbered on their own rather
+  // than sharing a rule's slots, and they start out unbound: the query's atoms
+  // are whichever ones the store matches.
+  VarSlots slots;
+  absl::flat_hash_map<std::string_view, size_t> by_name;
+  collect::for_each_variable(
+      query, [&](const Variable& var) { slots.add(var, by_name); });
+  ASSIGN_OR_RETURN(std::vector<aspif::Atom> matched,
+                   matching_atoms(query, Binding(slots), store));
   // One match needs no atom of its own: assuming that atom means the same
   // thing, e.g. for a query with no variables in it at all.
   if (matched.size() == 1) {
@@ -1793,12 +1813,8 @@ absl::StatusOr<aspif::Program> ground(const Program& prog) {
   const std::vector<int> component =
       strongly_connected_components(graph.pos_succ);
   ASSIGN_OR_RETURN(std::vector<RuleView> rules, make_rule_views(prog));
-  std::vector<std::vector<RuleView>> rules_by_component =
+  std::vector<std::vector<const RuleView*>> rules_by_component =
       bucket_rule_views(graph, component, rules);
-  std::vector<RuleView> headless_rules;
-  for (const auto& rule : rules) {
-    if (rule.head == nullptr) headless_rules.push_back(rule);
-  }
 
   // Two passes: derive every component, then emit every component. A
   // component's positive body literals depend only on earlier components,
@@ -1807,6 +1823,9 @@ absl::StatusOr<aspif::Program> ground(const Program& prog) {
   // constrain component order. So by the time any component is emitted, q's
   // final atom set already exists, and emit_rules can correctly decide
   // whether q is derivable.
+  //
+  // The last bucket holds the constraints, which derive nothing and so are
+  // emitted after every atom exists.
   aspif::Program result;
   Store store;
   for (const auto& component_rules : rules_by_component) {
@@ -1815,7 +1834,6 @@ absl::StatusOr<aspif::Program> ground(const Program& prog) {
   for (const auto& component_rules : rules_by_component) {
     RETURN_IF_ERROR(emit_rules(component_rules, store, result));
   }
-  RETURN_IF_ERROR(emit_rules(headless_rules, store, result));
   emit_minimize(store, result);
   name_outputs(store, result);
   if (prog.query != nullptr && prog.query->lit != nullptr) {

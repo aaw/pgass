@@ -50,6 +50,23 @@ void for_each_variable(const Literal& literal, const VariableVisitor& visit) {
   }
 }
 
+void for_each_variable(const Aggregate& aggregate,
+                       const VariableVisitor& visit) {
+  if (aggregate.lb_term) for_each_variable(*aggregate.lb_term, visit);
+  if (aggregate.ub_term) for_each_variable(*aggregate.ub_term, visit);
+  if (!aggregate.elements) return;
+  for (const auto& element : *aggregate.elements) {
+    if (element->terms) {
+      for (const auto& term : *element->terms) for_each_variable(*term, visit);
+    }
+    if (element->literals) {
+      for (const auto& naf : *element->literals) {
+        if (naf->literal) for_each_variable(*naf->literal, visit);
+      }
+    }
+  }
+}
+
 namespace {
 
 // Appends `name` to `out` unless it is already present.

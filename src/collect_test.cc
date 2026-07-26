@@ -3,6 +3,8 @@
 #include <gmock/gmock.h>
 #include <gtest/gtest.h>
 
+#include <algorithm>
+
 #include "parse.h"
 
 using namespace ::testing;
@@ -66,6 +68,19 @@ TEST(CollectTest, BuiltinAtomVariablesSpanBothSides) {
   std::vector<std::string> vars;
   collect::collect_variables(*literal, vars);
   EXPECT_THAT(vars, ElementsAre("X", "Y"));
+}
+
+TEST(CollectTest, AggregateVariablesSpanBoundsTermsAndConditions) {
+  Parser parser("N < #count{ X : e(X, Y), Y > L }");
+  auto aggregate = parser.parse_aggregate();
+  ASSERT_TRUE(aggregate.ok()) << aggregate.status();
+  std::vector<std::string> vars;
+  collect::for_each_variable(**aggregate, [&](const Variable& var) {
+    if (std::find(vars.begin(), vars.end(), var.name) == vars.end()) {
+      vars.push_back(var.name);
+    }
+  });
+  EXPECT_THAT(vars, ElementsAre("N", "X", "Y", "L"));
 }
 
 TEST(CollectTest, AppendsToExistingVectorWithoutDuplicating) {

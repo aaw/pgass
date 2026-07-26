@@ -24,6 +24,10 @@ namespace collect {
 using VariableVisitor = std::function<void(const Variable&)>;
 void for_each_variable(const Term& term, const VariableVisitor& visit);
 void for_each_variable(const Literal& literal, const VariableVisitor& visit);
+// An aggregate's variables are the ones in its bounds, in its element terms,
+// and in its element conditions, e.g. N, X and Y for '#count{X : e(X, Y)} = N'.
+void for_each_variable(const Aggregate& aggregate,
+                       const VariableVisitor& visit);
 
 // Inserts every variable name occurring in the node into `out`.
 void collect_variables(const Term& term,
