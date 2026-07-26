@@ -773,4 +773,101 @@ TEST(GroundTest, FunctionTermsSortAfterEveryAtomicValue) {
   EXPECT_THAT(*out, ::testing::Not(HasSubstr("lt(f(1),")));
 }
 
+// An equality with an unbound variable on one side is an assignment: it gives
+// the variable the value of the other side rather than comparing the two.
+
+TEST(GroundTest, AssignmentBindsAVariable) {
+  auto out = ground_source("p(1). p(2). q(Y) :- p(X), Y = X + 1.");
+  ASSERT_TRUE(out.ok()) << out.status();
+  EXPECT_EQ(*out,
+            "asp 1 0 0\n"
+            "1 0 1 1 0 0\n"
+            "1 0 1 2 0 0\n"
+            "1 0 1 3 0 1 1\n"
+            "1 0 1 4 0 1 2\n"
+            "4 4 p(1) 1 1\n"
+            "4 4 p(2) 1 2\n"
+            "4 4 q(2) 1 3\n"
+            "4 4 q(3) 1 4\n"
+            "0\n");
+}
+
+TEST(GroundTest, AssignmentWorksWithTheVariableOnTheRight) {
+  auto out = ground_source("p(1). q(Y) :- p(X), X + 1 = Y.");
+  ASSERT_TRUE(out.ok()) << out.status();
+  EXPECT_THAT(*out, HasSubstr("q(2)"));
+}
+
+TEST(GroundTest, AssignmentChainsThroughAnotherAssignment) {
+  // Z needs Y, which the assignment to its left has not bound when the body
+  // is first scanned, so the scan has to come back around to it.
+  auto out = ground_source("p(1). q(Z) :- p(X), Z = Y + 1, Y = X + 1.");
+  ASSERT_TRUE(out.ok()) << out.status();
+  EXPECT_THAT(*out, HasSubstr("q(3)"));
+}
+
+TEST(GroundTest, AssignmentWithNoPositiveLiteralAtAll) {
+  auto out = ground_source("q(X) :- X = 1 + 1.");
+  ASSERT_TRUE(out.ok()) << out.status();
+  EXPECT_EQ(*out,
+            "asp 1 0 0\n"
+            "1 0 1 1 0 0\n"
+            "4 4 q(2) 1 1\n"
+            "0\n");
+}
+
+TEST(GroundTest, AssignmentBindsANonNumberValue) {
+  auto out = ground_source("p(a). q(Y) :- p(X), Y = f(X).");
+  ASSERT_TRUE(out.ok()) << out.status();
+  EXPECT_THAT(*out, HasSubstr("q(f(a))"));
+}
+
+TEST(GroundTest, AssignmentToABoundVariableIsAComparison) {
+  auto out = ground_source("p(1, 2). p(3, 4). p(5, 5). q(X) :- p(X, Y), X = Y.");
+  ASSERT_TRUE(out.ok()) << out.status();
+  // X is already bound by p, so 'X = Y' filters instead of assigning.
+  EXPECT_THAT(*out, HasSubstr("q(5)"));
+  EXPECT_THAT(*out, ::testing::Not(HasSubstr("q(1)")));
+  EXPECT_THAT(*out, ::testing::Not(HasSubstr("q(3)")));
+}
+
+TEST(GroundTest, IllFormedAssignmentDropsTheInstance) {
+  auto out = ground_source("p(0). p(2). q(Y) :- p(X), Y = 4 / X.");
+  ASSERT_TRUE(out.ok()) << out.status();
+  // '4 / 0' has no value, so X = 0 binds nothing and derives no q at all.
+  EXPECT_THAT(*out, HasSubstr("q(2)"));
+  EXPECT_EQ(out->find("q("), out->rfind("q("));
+}
+
+TEST(GroundTest, AssignmentBoundVariableUsedByALaterLiteral) {
+  auto out = ground_source(
+      "p(1). p(2). r(2).\n"
+      "q(X) :- p(X), Y = X + 1, not r(Y).");
+  ASSERT_TRUE(out.ok()) << out.status();
+  // X = 1 gives Y = 2, and r(2) is derived, so q(1) keeps 'not r(2)' in its
+  // body. X = 2 gives Y = 3, which r/1 never derived, so q(2) is a fact.
+  // r(2)=1, p(1)=2, p(2)=3, q(1)=4, q(2)=5: r/1 is its own component and is
+  // grounded before p/1.
+  EXPECT_EQ(*out,
+            "asp 1 0 0\n"
+            "1 0 1 1 0 0\n"
+            "1 0 1 2 0 0\n"
+            "1 0 1 3 0 0\n"
+            "1 0 1 4 0 2 2 -1\n"
+            "1 0 1 5 0 1 3\n"
+            "4 4 r(2) 1 1\n"
+            "4 4 p(1) 1 2\n"
+            "4 4 p(2) 1 3\n"
+            "4 4 q(1) 1 4\n"
+            "4 4 q(2) 1 5\n"
+            "0\n");
+}
+
+TEST(GroundTest, InequalityDoesNotAssign) {
+  auto out = ground_source("p(1). p(2). q(X) :- p(X), X != 2.");
+  ASSERT_TRUE(out.ok()) << out.status();
+  EXPECT_THAT(*out, HasSubstr("q(1)"));
+  EXPECT_THAT(*out, ::testing::Not(HasSubstr("q(2)")));
+}
+
 }  // namespace

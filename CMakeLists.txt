@@ -99,7 +99,9 @@ target_link_libraries(ground_lib
   PRIVATE
     absl::btree
     absl::flat_hash_map
+    absl::flat_hash_set
     absl::strings
+    collect_lib
     graph_lib
 )
 

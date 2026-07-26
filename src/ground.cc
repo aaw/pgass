@@ -4,15 +4,18 @@
 #include <cstdint>
 #include <optional>
 #include <string>
+#include <string_view>
 #include <utility>
 #include <vector>
 
 #include "absl/container/btree_map.h"
 #include "absl/container/flat_hash_map.h"
+#include "absl/container/flat_hash_set.h"
 #include "absl/status/status.h"
 #include "absl/status/statusor.h"
 #include "absl/strings/str_cat.h"
 #include "absl/strings/str_join.h"
+#include "collect.h"
 #include "graph.h"
 #include "macros.h"
 
@@ -176,10 +179,8 @@ absl::StatusOr<std::optional<Value>> eval_term(const Term& term,
       const std::string& name = static_cast<const Variable&>(term).name;
       auto it = binding.find(name);
       if (it == binding.end()) {
-        return absl::UnimplementedError(absl::StrCat(
-            "variable '", name,
-            "' is not bound by a positive body literal (binding through "
-            "assignment is not supported yet)"));
+        return absl::InvalidArgumentError(
+            absl::StrCat("variable '", name, "' is not bound by the rule body"));
       }
       return it->second;
     }
@@ -301,7 +302,9 @@ struct BodyParts {
   // Positive classical literals: matched against the store to bind
   // variables, e.g. 'edge(X, Y)' in "reachable(X, Y) :- edge(X, Y)."
   std::vector<const ClassicalLiteral*> positive;
-  // Comparisons like 'X < 2' (possibly under 'not'): decided once bound.
+  // Builtin atoms, e.g. 'X < 2' (possibly under 'not') or 'Y = X + 1'. An
+  // equality with an unbound variable on one side binds that variable; every
+  // other comparison is a test decided once the body is bound.
   std::vector<const NafLiteral*> comparisons;
   // 'not p(...)' literals: kept in the emitted ground rule.
   std::vector<const ClassicalLiteral*> negative;
@@ -435,21 +438,89 @@ bool builtin_holds(BinopType op, const Value& left, const Value& right) {
   return false;  // unreachable
 }
 
-// Returns whether every comparison in the body holds under `binding`, e.g.
-// whether 'X < 2' holds given the binding {X: 1}. A comparison with an
-// ill-formed side, e.g. 'X < 1 / 0', counts as not holding: the binding
-// builds no rule instance either way.
-absl::StatusOr<bool> comparisons_hold(const BodyParts& parts,
-                                      const Binding& binding) {
-  for (const NafLiteral* item : parts.comparisons) {
-    const auto& builtin = static_cast<const BuiltinAtom&>(*item->literal);
+// A comparison read as an assignment: the variable it binds and the term
+// whose value the variable takes, e.g. Y and 'X + 1' for 'Y = X + 1'.
+struct Assignment {
+  const std::string* name;
+  const Term* value;
+};
+
+// Reads `naf` as an assignment, e.g. 'Y = X + 1' assigns to Y. Only an
+// un-negated '=' with a still-unbound variable on one side assigns; anything
+// else, including 'Y = X + 1' once Y is bound, is a test and gets nullopt.
+std::optional<Assignment> assignment_of(const NafLiteral& naf,
+                                        const Binding& binding) {
+  const auto& builtin = static_cast<const BuiltinAtom&>(*naf.literal);
+  if (naf.naf || builtin.op != BinopType::kEQUAL) return std::nullopt;
+  if (builtin.left->kind == Term::VariableKind) {
+    const std::string& name = static_cast<const Variable&>(*builtin.left).name;
+    if (!binding.contains(name)) {
+      return Assignment{.name = &name, .value = builtin.right.get()};
+    }
+  }
+  if (builtin.right->kind == Term::VariableKind) {
+    const std::string& name = static_cast<const Variable&>(*builtin.right).name;
+    if (!binding.contains(name)) {
+      return Assignment{.name = &name, .value = builtin.left.get()};
+    }
+  }
+  return std::nullopt;
+}
+
+// Whether every variable in `term` already has a value, i.e. whether the term
+// can be evaluated at all.
+bool is_bound(const Term& term, const Binding& binding) {
+  absl::flat_hash_set<std::string_view> vars;
+  collect::collect_variables(term, vars);
+  for (std::string_view var : vars) {
+    if (!binding.contains(var)) return false;
+  }
+  return true;
+}
+
+// Extends `binding` with the variables the body's assignments bind, e.g. 'Y =
+// X + 1' adds {Y: 2} to the binding {X: 1}, and then returns whether every
+// remaining comparison holds, e.g. whether 'X < 2' holds given {X: 1}.
+//
+// Returns false, meaning the binding builds no rule instance, when a
+// comparison has an ill-formed side, e.g. 'X < 1 / 0', or when an assignment's
+// value is ill-formed, e.g. the 'Y = 1 / 0' that 'Y = 1 / X' becomes under
+// {X: 0}.
+absl::StatusOr<bool> apply_comparisons(const BodyParts& parts,
+                                       Binding& binding) {
+  std::vector<bool> assigns(parts.comparisons.size(), false);
+  // One assignment can bind a variable another one needs, e.g. 'Y = X + 1, Z =
+  // Y + 1', so passes repeat until a pass binds nothing new.
+  bool changed = true;
+  while (changed) {
+    changed = false;
+    for (size_t k = 0; k < parts.comparisons.size(); ++k) {
+      if (assigns[k]) continue;
+      std::optional<Assignment> assignment =
+          assignment_of(*parts.comparisons[k], binding);
+      if (!assignment.has_value()) continue;
+      if (!is_bound(*assignment->value, binding)) continue;
+      ASSIGN_OR_RETURN(std::optional<Value> value,
+                       eval_term(*assignment->value, binding));
+      if (!value.has_value()) return false;
+      binding.emplace(*assignment->name, *std::move(value));
+      assigns[k] = true;
+      changed = true;
+    }
+  }
+
+  // An assignment holds by construction, so only the tests are left to check.
+  for (size_t k = 0; k < parts.comparisons.size(); ++k) {
+    if (assigns[k]) continue;
+    const NafLiteral& item = *parts.comparisons[k];
+    const auto& builtin = static_cast<const BuiltinAtom&>(*item.literal);
     ASSIGN_OR_RETURN(std::optional<Value> left,
                      eval_term(*builtin.left, binding));
     ASSIGN_OR_RETURN(std::optional<Value> right,
                      eval_term(*builtin.right, binding));
     if (!left.has_value() || !right.has_value()) return false;
     bool holds = builtin_holds(builtin.op, *left, *right);
-    if (item->naf) holds = !holds;
+    if (item.naf) holds = !holds;
     if (!holds) return false;
   }
   return true;
@@ -458,8 +529,8 @@ absl::StatusOr<bool> comparisons_hold(const BodyParts& parts,
 // Finds every way to satisfy the body with the atoms currently in the store.
 // Works through the positive literals left to right, extending each partial
 // instance with every stored tuple that matches, then keeps the instances
-// whose comparisons all hold. 'not' literals never filter here; the caller
-// decides what to do with them.
+// whose assignments and comparisons work out. 'not' literals never filter
+// here; the caller decides what to do with them.
 //
 // `seed_binding` lets a caller start from variables already bound by an
 // enclosing scope, e.g. grounding an aggregate element's condition under the
@@ -488,7 +559,7 @@ absl::StatusOr<std::vector<Instance>> find_instances(
 
   std::vector<Instance> passing;
   for (Instance& instance : instances) {
-    ASSIGN_OR_RETURN(bool ok, comparisons_hold(parts, instance.binding));
+    ASSIGN_OR_RETURN(bool ok, apply_comparisons(parts, instance.binding));
     if (ok) passing.push_back(std::move(instance));
   }
   return passing;
@@ -703,6 +774,17 @@ aspif::Atom at_least(int64_t bound,
 // '3 <= #count{...}'.
 absl::StatusOr<std::optional<int64_t>> eval_bound(const Term& term,
                                                   const Binding& binding) {
+  // A still-unbound variable here is the '#count{...} = X' form, which binds X
+  // to the aggregate's value. Grounding can't do that: an ASPIF weight body
+  // only compares an aggregate against a number it already knows, so there is
+  // no value to hand back.
+  if (term.kind == Term::VariableKind &&
+      !binding.contains(static_cast<const Variable&>(term).name)) {
+    return absl::UnimplementedError(
+        absl::StrCat("variable '", static_cast<const Variable&>(term).name,
+                     "' is bound to an aggregate's value, which is not "
+                     "supported yet"));
+  }
   ASSIGN_OR_RETURN(std::optional<Value> value, eval_term(term, binding));
   if (!value.has_value()) return std::nullopt;
   if (value->kind != Value::kNumber) {
