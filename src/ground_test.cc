@@ -799,8 +799,8 @@ TEST(GroundTest, AssignmentWorksWithTheVariableOnTheRight) {
 }
 
 TEST(GroundTest, AssignmentChainsThroughAnotherAssignment) {
-  // Z needs Y, which the assignment to its left has not bound when the body
-  // is first scanned, so the scan has to come back around to it.
+  // Z takes its value from Y, which the assignment to its right binds, so the
+  // two are made in the opposite order from how they are written.
   auto out = ground_source("p(1). q(Z) :- p(X), Z = Y + 1, Y = X + 1.");
   ASSERT_TRUE(out.ok()) << out.status();
   EXPECT_THAT(*out, HasSubstr("q(3)"));
@@ -823,7 +823,8 @@ TEST(GroundTest, AssignmentBindsANonNumberValue) {
 }
 
 TEST(GroundTest, AssignmentToABoundVariableIsAComparison) {
-  auto out = ground_source("p(1, 2). p(3, 4). p(5, 5). q(X) :- p(X, Y), X = Y.");
+  auto out =
+      ground_source("p(1, 2). p(3, 4). p(5, 5). q(X) :- p(X, Y), X = Y.");
   ASSERT_TRUE(out.ok()) << out.status();
   // X is already bound by p, so 'X = Y' filters instead of assigning.
   EXPECT_THAT(*out, HasSubstr("q(5)"));
@@ -868,6 +869,162 @@ TEST(GroundTest, InequalityDoesNotAssign) {
   ASSERT_TRUE(out.ok()) << out.status();
   EXPECT_THAT(*out, HasSubstr("q(1)"));
   EXPECT_THAT(*out, ::testing::Not(HasSubstr("q(2)")));
+}
+
+// '#count{...} = S' with S unbound binds S to the aggregate's value. The
+// value depends on which atoms the solver makes true, so the rule is ground
+// once per value the aggregate can take, and each instance keeps the literals
+// that check for that value.
+
+TEST(GroundTest, CountAggregateValueBindsAVariable) {
+  auto out = ground_source("p. q(S) :- #count{ 1 : p } = S.");
+  ASSERT_TRUE(out.ok()) << out.status();
+  // The count is 0 or 1, so q(0)=2 and q(1)=3 are both ground. Each gets its
+  // own copy of the element's aux atom and bound checks: q(0) needs 'count >=
+  // 0' (5, a fact) and not 'count >= 1' (6), q(1) needs 'count >= 1' (8) and
+  // not 'count >= 2' (9). p is a fact, so a solver keeps only q(1).
+  EXPECT_EQ(*out,
+            "asp 1 0 0\n"
+            "1 0 1 1 0 0\n"
+            "1 0 1 4 0 1 1\n"
+            "1 0 1 5 0 0\n"
+            "1 0 1 6 1 1 1 4 1\n"
+            "1 0 1 2 0 2 5 -6\n"
+            "1 0 1 7 0 1 1\n"
+            "1 0 1 8 1 1 1 7 1\n"
+            "1 0 1 9 1 2 1 7 1\n"
+            "1 0 1 3 0 2 8 -9\n"
+            "4 1 p 1 1\n"
+            "4 4 q(0) 1 2\n"
+            "4 4 q(1) 1 3\n"
+            "0\n");
+}
+
+TEST(GroundTest, EmptyAggregateValueBindsZero) {
+  // No element can produce a tuple, so the only value the count can take is 0.
+  auto out = ground_source("q(S) :- #count{ X : p(X) } = S.");
+  ASSERT_TRUE(out.ok()) << out.status();
+  EXPECT_EQ(*out,
+            "asp 1 0 0\n"
+            "1 0 1 2 0 0\n"
+            "1 0 1 3 1 1 0\n"
+            "1 0 1 1 0 2 2 -3\n"
+            "4 4 q(0) 1 1\n"
+            "0\n");
+}
+
+TEST(GroundTest, AggregateValueBindsFromEitherSide) {
+  auto out = ground_source("p(1). p(2). q(S) :- S = #count{ X : p(X) }.");
+  ASSERT_TRUE(out.ok()) << out.status();
+  EXPECT_THAT(*out, HasSubstr("q(0)"));
+  EXPECT_THAT(*out, HasSubstr("q(1)"));
+  EXPECT_THAT(*out, HasSubstr("q(2)"));
+  EXPECT_THAT(*out, ::testing::Not(HasSubstr("q(3)")));
+}
+
+TEST(GroundTest, SumAggregateValueRangesOverSubsetSums) {
+  // Any subset of the two tuples can be in the set, so the sum is 0, 3, 5, or
+  // 8 -- not every number in between.
+  auto out =
+      ground_source("w(1,3). w(2,5). total(S) :- #sum{ V,I : w(I,V) } = S.");
+  ASSERT_TRUE(out.ok()) << out.status();
+  EXPECT_THAT(*out, HasSubstr("total(0)"));
+  EXPECT_THAT(*out, HasSubstr("total(3)"));
+  EXPECT_THAT(*out, HasSubstr("total(5)"));
+  EXPECT_THAT(*out, HasSubstr("total(8)"));
+  EXPECT_THAT(*out, ::testing::Not(HasSubstr("total(1)")));
+  EXPECT_THAT(*out, ::testing::Not(HasSubstr("total(4)")));
+}
+
+TEST(GroundTest, NegativeSumWeightsReachNegativeValues) {
+  auto out = ground_source("w(-2). w(3). total(S) :- #sum{ W : w(W) } = S.");
+  ASSERT_TRUE(out.ok()) << out.status();
+  EXPECT_THAT(*out, HasSubstr("total(-2)"));
+  EXPECT_THAT(*out, HasSubstr("total(0)"));
+  EXPECT_THAT(*out, HasSubstr("total(1)"));
+  EXPECT_THAT(*out, HasSubstr("total(3)"));
+}
+
+TEST(GroundTest, AggregateValueFeedsAnAssignment) {
+  auto out =
+      ground_source("p(1). p(2). q(T) :- #count{ X : p(X) } = S, T = S + 1.");
+  ASSERT_TRUE(out.ok()) << out.status();
+  EXPECT_THAT(*out, HasSubstr("q(1)"));
+  EXPECT_THAT(*out, HasSubstr("q(2)"));
+  EXPECT_THAT(*out, HasSubstr("q(3)"));
+  EXPECT_THAT(*out, ::testing::Not(HasSubstr("q(0)")));
+}
+
+TEST(GroundTest, ComparisonOnAnAggregateValueDropsInstances) {
+  // 'S > 1' is checked once the aggregate binds S, and rules out the
+  // instances for the values 0 and 1.
+  auto out = ground_source(
+      "p(1). p(2). p(3). big(S) :- #count{ X : p(X) } = S, S > 1.");
+  ASSERT_TRUE(out.ok()) << out.status();
+  EXPECT_THAT(*out, HasSubstr("big(2)"));
+  EXPECT_THAT(*out, HasSubstr("big(3)"));
+  EXPECT_THAT(*out, ::testing::Not(HasSubstr("big(0)")));
+  EXPECT_THAT(*out, ::testing::Not(HasSubstr("big(1)")));
+}
+
+TEST(GroundTest, AggregateValueBindsOncePerOuterInstance) {
+  auto out = ground_source(
+      "g(1). g(2). e(1,a). e(1,b). e(2,c).\n"
+      "deg(G, C) :- g(G), #count{ Y : e(G, Y) } = C.");
+  ASSERT_TRUE(out.ok()) << out.status();
+  // Group 1 has two edges and group 2 has one, so the counts range up to 2
+  // for g(1) and up to 1 for g(2).
+  EXPECT_THAT(*out, HasSubstr("deg(1,2)"));
+  EXPECT_THAT(*out, HasSubstr("deg(2,1)"));
+  EXPECT_THAT(*out, ::testing::Not(HasSubstr("deg(2,2)")));
+}
+
+TEST(GroundTest, AggregateWaitsForAVariableAnotherAggregateBinds) {
+  // The #count mentions X, which the #sum to its right binds, so the #count
+  // is ground once the #sum has picked a value for X. To the #count on its
+  // own, an unbound X reads as a local variable.
+  auto out = ground_source(
+      "n(2). e(0,x). e(2,b). e(2,c).\n"
+      "q(C) :- #count{ Y : e(X, Y) } = C, X = #sum{ Z : n(Z) }.");
+  ASSERT_TRUE(out.ok()) << out.status();
+  // The #sum is 0 or 2. X = 0 matches only e(0,x), so C is 0 or 1; X = 2
+  // matches e(2,b) and e(2,c), so C reaches 2.
+  EXPECT_THAT(*out, HasSubstr("q(0)"));
+  EXPECT_THAT(*out, HasSubstr("q(1)"));
+  EXPECT_THAT(*out, HasSubstr("q(2)"));
+  EXPECT_THAT(*out, ::testing::Not(HasSubstr("q(3)")));
+}
+
+TEST(GroundTest, TwoAggregatesEachBindTheirOwnVariable) {
+  auto out = ground_source(
+      "p(1). q(1).\n"
+      "r(A, B) :- #count{ X : p(X) } = A, #count{ Y : q(Y) } = B.");
+  ASSERT_TRUE(out.ok()) << out.status();
+  // Each count is 0 or 1 on its own, so the rule grounds over all four pairs.
+  EXPECT_THAT(*out, HasSubstr("r(0,0)"));
+  EXPECT_THAT(*out, HasSubstr("r(0,1)"));
+  EXPECT_THAT(*out, HasSubstr("r(1,0)"));
+  EXPECT_THAT(*out, HasSubstr("r(1,1)"));
+}
+
+TEST(GroundTest, NegatedAggregateDoesNotBindItsValue) {
+  // 'not #count{...} = S' only says the count differs from S, which pins S to
+  // nothing, so S stays unbound.
+  auto out = ground_source("p(1). q(S) :- not #count{ X : p(X) } = S.");
+  EXPECT_FALSE(out.ok());
+  EXPECT_THAT(out.status().message(),
+              HasSubstr("variable 'S' is not bound by the rule body"));
+}
+
+TEST(GroundTest, TooManyAggregateValuesRejected) {
+  // Powers of two give every sum from 0 to 2^13 - 1, past the cap on how many
+  // values one rule may be ground over.
+  auto out = ground_source(
+      "w(1). w(2). w(4). w(8). w(16). w(32). w(64). w(128). w(256). w(512).\n"
+      "w(1024). w(2048). w(4096).\n"
+      "total(S) :- #sum{ W : w(W) } = S.");
+  EXPECT_FALSE(out.ok());
+  EXPECT_THAT(out.status().message(), HasSubstr("more than 4096"));
 }
 
 }  // namespace

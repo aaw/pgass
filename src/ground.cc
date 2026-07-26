@@ -9,6 +9,7 @@
 #include <vector>
 
 #include "absl/container/btree_map.h"
+#include "absl/container/btree_set.h"
 #include "absl/container/flat_hash_map.h"
 #include "absl/container/flat_hash_set.h"
 #include "absl/status/status.h"
@@ -179,8 +180,8 @@ absl::StatusOr<std::optional<Value>> eval_term(const Term& term,
       const std::string& name = static_cast<const Variable&>(term).name;
       auto it = binding.find(name);
       if (it == binding.end()) {
-        return absl::InvalidArgumentError(
-            absl::StrCat("variable '", name, "' is not bound by the rule body"));
+        return absl::InvalidArgumentError(absl::StrCat(
+            "variable '", name, "' is not bound by the rule body"));
       }
       return it->second;
     }
@@ -441,9 +442,23 @@ bool builtin_holds(BinopType op, const Value& left, const Value& right) {
 // A comparison read as an assignment: the variable it binds and the term
 // whose value the variable takes, e.g. Y and 'X + 1' for 'Y = X + 1'.
 struct Assignment {
-  const std::string* name;
+  std::string_view name;
   const Term* value;
 };
+
+// The variable on one side of a comparison that still needs a value, e.g. the
+// Y of 'Y = X + 1'. A side that is not a plain variable, is not an equality,
+// or holds an already-bound variable gives nullopt.
+std::optional<std::string_view> unbound_var(const Term* term, BinopType op,
+                                            const Binding& binding) {
+  if (term == nullptr || op != BinopType::kEQUAL ||
+      term->kind != Term::VariableKind) {
+    return std::nullopt;
+  }
+  std::string_view name = static_cast<const Variable&>(*term).name;
+  if (binding.contains(name)) return std::nullopt;
+  return name;
+}
 
 // Reads `naf` as an assignment, e.g. 'Y = X + 1' assigns to Y. Only an
 // un-negated '=' with a still-unbound variable on one side assigns; anything
@@ -451,18 +466,16 @@ struct Assignment {
 std::optional<Assignment> assignment_of(const NafLiteral& naf,
                                         const Binding& binding) {
   const auto& builtin = static_cast<const BuiltinAtom&>(*naf.literal);
-  if (naf.naf || builtin.op != BinopType::kEQUAL) return std::nullopt;
-  if (builtin.left->kind == Term::VariableKind) {
-    const std::string& name = static_cast<const Variable&>(*builtin.left).name;
-    if (!binding.contains(name)) {
-      return Assignment{.name = &name, .value = builtin.right.get()};
-    }
+  if (naf.naf) return std::nullopt;
+  std::optional<std::string_view> left =
+      unbound_var(builtin.left.get(), builtin.op, binding);
+  if (left.has_value()) {
+    return Assignment{.name = *left, .value = builtin.right.get()};
   }
-  if (builtin.right->kind == Term::VariableKind) {
-    const std::string& name = static_cast<const Variable&>(*builtin.right).name;
-    if (!binding.contains(name)) {
-      return Assignment{.name = &name, .value = builtin.left.get()};
-    }
+  std::optional<std::string_view> right =
+      unbound_var(builtin.right.get(), builtin.op, binding);
+  if (right.has_value()) {
+    return Assignment{.name = *right, .value = builtin.left.get()};
   }
   return std::nullopt;
 }
@@ -479,58 +492,70 @@ bool is_bound(const Term& term, const Binding& binding) {
 }
 
 // Extends `binding` with the variables the body's assignments bind, e.g. 'Y =
-// X + 1' adds {Y: 2} to the binding {X: 1}, and then returns whether every
-// remaining comparison holds, e.g. whether 'X < 2' holds given {X: 1}.
+// X + 1' adds {Y: 2} to {X: 1}. An assignment whose value still holds an
+// unbound variable is left for a later call.
 //
-// Returns false, meaning the binding builds no rule instance, when a
-// comparison has an ill-formed side, e.g. 'X < 1 / 0', or when an assignment's
-// value is ill-formed, e.g. the 'Y = 1 / 0' that 'Y = 1 / X' becomes under
-// {X: 0}.
-absl::StatusOr<bool> apply_comparisons(const BodyParts& parts,
-                                       Binding& binding) {
-  std::vector<bool> assigns(parts.comparisons.size(), false);
-  // One assignment can bind a variable another one needs, e.g. 'Y = X + 1, Z =
-  // Y + 1', so passes repeat until a pass binds nothing new.
+// Returns false when an assignment's value is ill-formed, e.g. the 'Y = 1 / 0'
+// that 'Y = 1 / X' becomes under {X: 0}: the binding builds no rule instance.
+absl::StatusOr<bool> bind_assignments(const BodyParts& parts,
+                                      Binding& binding) {
+  // One assignment can bind a variable another needs, e.g. 'Y = X + 1, Z = Y +
+  // 1', so passes repeat until one binds nothing new. A pass skips the
+  // assignments already made: their variables are bound.
   bool changed = true;
   while (changed) {
     changed = false;
-    for (size_t k = 0; k < parts.comparisons.size(); ++k) {
-      if (assigns[k]) continue;
-      std::optional<Assignment> assignment =
-          assignment_of(*parts.comparisons[k], binding);
+    for (const NafLiteral* item : parts.comparisons) {
+      std::optional<Assignment> assignment = assignment_of(*item, binding);
       if (!assignment.has_value()) continue;
       if (!is_bound(*assignment->value, binding)) continue;
       ASSIGN_OR_RETURN(std::optional<Value> value,
                        eval_term(*assignment->value, binding));
       if (!value.has_value()) return false;
-      binding.emplace(*assignment->name, *std::move(value));
-      assigns[k] = true;
+      binding.emplace(assignment->name, *std::move(value));
       changed = true;
     }
   }
+  return true;
+}
 
-  // An assignment holds by construction, so only the tests are left to check.
-  for (size_t k = 0; k < parts.comparisons.size(); ++k) {
-    if (assigns[k]) continue;
-    const NafLiteral& item = *parts.comparisons[k];
-    const auto& builtin = static_cast<const BuiltinAtom&>(*item.literal);
+// Returns whether every comparison in the body holds under `binding`, e.g.
+// whether 'X < 2' holds given the binding {X: 1}. A comparison with an
+// ill-formed side, e.g. 'X < 1 / 0', counts as not holding: the binding builds
+// no rule instance either way.
+//
+// An assignment holds by construction: its variable holds exactly what the
+// other side evaluates to.
+absl::StatusOr<bool> comparisons_hold(const BodyParts& parts,
+                                      const Binding& binding) {
+  for (const NafLiteral* item : parts.comparisons) {
+    const auto& builtin = static_cast<const BuiltinAtom&>(*item->literal);
     ASSIGN_OR_RETURN(std::optional<Value> left,
                      eval_term(*builtin.left, binding));
     ASSIGN_OR_RETURN(std::optional<Value> right,
                      eval_term(*builtin.right, binding));
     if (!left.has_value() || !right.has_value()) return false;
     bool holds = builtin_holds(builtin.op, *left, *right);
-    if (item.naf) holds = !holds;
+    if (item->naf) holds = !holds;
     if (!holds) return false;
   }
   return true;
 }
 
+// find_instances() and bind_agg_outputs() call each other: grounding an
+// aggregate's elements needs find_instances() for the element conditions.
+// Aggregates cannot nest, so the recursion stops one level down.
+absl::StatusOr<std::vector<Instance>> bind_agg_outputs(
+    const BodyParts& parts, const Store& store,
+    std::vector<Instance> instances);
+
 // Finds every way to satisfy the body with the atoms currently in the store.
 // Works through the positive literals left to right, extending each partial
 // instance with every stored tuple that matches, then keeps the instances
-// whose assignments and comparisons work out. 'not' literals never filter
-// here; the caller decides what to do with them.
+// whose assignments and comparisons work out. An aggregate that binds a
+// variable to its value, e.g. '#count{X : p(X)} = S', splits each instance
+// into one per value it can take. 'not' literals never filter here; the
+// caller decides what to do with them.
 //
 // `seed_binding` lets a caller start from variables already bound by an
 // enclosing scope, e.g. grounding an aggregate element's condition under the
@@ -557,9 +582,20 @@ absl::StatusOr<std::vector<Instance>> find_instances(
     instances = std::move(extended);
   }
 
-  std::vector<Instance> passing;
+  std::vector<Instance> bound;
   for (Instance& instance : instances) {
-    ASSIGN_OR_RETURN(bool ok, apply_comparisons(parts, instance.binding));
+    ASSIGN_OR_RETURN(bool ok, bind_assignments(parts, instance.binding));
+    if (ok) bound.push_back(std::move(instance));
+  }
+  if (!parts.aggregates.empty()) {
+    ASSIGN_OR_RETURN(bound, bind_agg_outputs(parts, store, std::move(bound)));
+  }
+
+  // Every variable the body binds has a value by now, so all the comparisons
+  // are decidable, including any over an aggregate's value.
+  std::vector<Instance> passing;
+  for (Instance& instance : bound) {
+    ASSIGN_OR_RETURN(bool ok, comparisons_hold(parts, instance.binding));
     if (ok) passing.push_back(std::move(instance));
   }
   return passing;
@@ -588,26 +624,35 @@ absl::StatusOr<std::optional<std::vector<aspif::Lit>>> negative_lits(
   return lits;
 }
 
-// Grounds one aggregate element into weighted literals, one per distinct
-// evaluated `terms` tuple (ASP-Core-2 aggregates range over a *set* of
-// tuples, so two elements or two groundings of the same element that
-// produce equal tuples must contribute only once). Each distinct tuple gets
-// a fresh auxiliary atom, supported by one plain rule per grounding that
-// produced it -- multiple such rules give the atom OR semantics for free,
-// exactly modeling "this tuple is in the set if any grounding satisfies it".
-absl::StatusOr<std::vector<aspif::WeightedLit>> ground_agg_elements(
-    const Aggregate& agg, const Binding& outer_binding, const Store& store,
-    aspif::Program& result) {
-  std::vector<aspif::WeightedLit> weighted;
-  if (agg.elements == nullptr) return weighted;
+// One distinct tuple an aggregate's elements can produce, e.g. the [1] that
+// both elements of '#count{ X : p(X) ; X : r(X) }' produce once p(1) and r(1)
+// are derived.
+struct AggTuple {
+  Tuple tuple;
+  int64_t weight;  // what the tuple adds to the aggregate's value
+  // One body per grounding that puts the tuple in the set. Empty when every
+  // grounding has an ill-formed 'not' literal.
+  std::vector<std::vector<aspif::Lit>> supports;
+};
 
-  absl::flat_hash_map<Tuple, aspif::Atom> tuple_atoms;
+// Grounds an aggregate's elements against the store: the distinct tuples they
+// can produce, in first-produced order. ASP-Core-2 aggregates range over a
+// *set* of tuples, so two elements, or two groundings of one element, that
+// produce equal tuples give one AggTuple with two supports.
+//
+// Emits nothing, so a caller that only needs the values the aggregate can
+// take (see possible_values) adds no atoms or rules to the program.
+absl::StatusOr<std::vector<AggTuple>> collect_agg_tuples(
+    const Aggregate& agg, const Binding& outer_binding, const Store& store) {
+  std::vector<AggTuple> tuples;
+  if (agg.elements == nullptr) return tuples;
+
+  absl::flat_hash_map<Tuple, size_t> seen;  // tuple -> index into `tuples`
   for (const auto& element_ptr : *agg.elements) {
     const AggregateElement& element = *element_ptr;
     BodyParts parts = split_naf_literals(element.literals);
-    ASSIGN_OR_RETURN(
-        std::vector<Instance> instances,
-        find_instances(parts, store, outer_binding));
+    ASSIGN_OR_RETURN(std::vector<Instance> instances,
+                     find_instances(parts, store, outer_binding));
     for (const Instance& instance : instances) {
       // An element whose terms are ill-formed under this local binding
       // contributes no tuple to the set.
@@ -625,20 +670,190 @@ absl::StatusOr<std::vector<aspif::WeightedLit>> ground_agg_elements(
         weight = tuple[0].number;
       }
 
-      auto [it, inserted] = tuple_atoms.try_emplace(tuple, 0);
+      auto [it, inserted] = seen.try_emplace(tuple, tuples.size());
       if (inserted) {
-        it->second = result.new_atom();
-        weighted.push_back({.lit = it->second, .weight = weight});
+        tuples.push_back(AggTuple{.tuple = std::move(tuple), .weight = weight});
       }
 
       ASSIGN_OR_RETURN(std::optional<std::vector<aspif::Lit>> neg,
                        negative_lits(parts.negative, instance.binding, store));
       if (!neg.has_value()) continue;
-      aspif::Rule support;
-      support.head = {it->second};
-      support.body = instance.matched;
-      support.body.insert(support.body.end(), neg->begin(), neg->end());
-      result.rules.push_back(std::move(support));
+      std::vector<aspif::Lit> support = instance.matched;
+      support.insert(support.end(), neg->begin(), neg->end());
+      tuples[it->second].supports.push_back(std::move(support));
+    }
+  }
+  return tuples;
+}
+
+// A cap on how many values an aggregate may bind a variable to: each value
+// costs one ground instance of the rule.
+constexpr size_t kMaxAggregateValues = 4096;
+
+// The values an aggregate can take, in ascending order. Which tuples are in
+// the set is up to the solver, so the value is the sum of the weights of some
+// subset of them, e.g. {0, 1, 2} for a #count over two tuples and {0, 3, 5, 8}
+// for a #sum over tuples weighing 3 and 5.
+//
+// A value no answer set reaches, e.g. the 0 of a #count over a tuple backed
+// by a fact, is harmless: its rule instance carries the literals that check
+// for that value, which no answer set satisfies.
+absl::StatusOr<std::vector<int64_t>> possible_values(
+    const std::vector<AggTuple>& tuples) {
+  absl::btree_set<int64_t> reachable = {0};
+  for (const AggTuple& tuple : tuples) {
+    absl::btree_set<int64_t> extended = reachable;
+    for (int64_t sum : reachable) extended.insert(sum + tuple.weight);
+    if (extended.size() > kMaxAggregateValues) {
+      return absl::ResourceExhaustedError(absl::StrCat(
+          "an aggregate whose value binds a variable can take more than ",
+          kMaxAggregateValues, " different values"));
+    }
+    reachable = std::move(extended);
+  }
+  return std::vector<int64_t>(reachable.begin(), reachable.end());
+}
+
+// The variables an aggregate binds to its own value, e.g. the S of
+// '#sum{...} = S'. Either side can hold one (see unbound_var). A 'not'
+// aggregate binds nothing: it only says the value differs from the bound.
+std::vector<std::string_view> agg_output_vars(const Aggregate& agg,
+                                              const Binding& binding) {
+  std::vector<std::string_view> names;
+  if (agg.naf) return names;
+  std::optional<std::string_view> lower =
+      unbound_var(agg.lb_term.get(), agg.lb_op, binding);
+  if (lower.has_value()) names.push_back(*lower);
+  std::optional<std::string_view> upper =
+      unbound_var(agg.ub_term.get(), agg.ub_op, binding);
+  if (upper.has_value()) names.push_back(*upper);
+  return names;
+}
+
+// Every variable occurring anywhere in an aggregate: in its bounds, in its
+// element terms, and in its element conditions.
+absl::flat_hash_set<std::string_view> agg_variables(const Aggregate& agg) {
+  absl::flat_hash_set<std::string_view> vars;
+  if (agg.lb_term != nullptr) collect::collect_variables(*agg.lb_term, vars);
+  if (agg.ub_term != nullptr) collect::collect_variables(*agg.ub_term, vars);
+  if (agg.elements == nullptr) return vars;
+  for (const auto& element : *agg.elements) {
+    if (element->terms != nullptr) {
+      for (const auto& term : *element->terms) {
+        collect::collect_variables(*term, vars);
+      }
+    }
+    if (element->literals != nullptr) {
+      for (const auto& naf : *element->literals) {
+        collect::collect_variables(*naf->literal, vars);
+      }
+    }
+  }
+  return vars;
+}
+
+// Whether one of `pending` binds a variable `agg` mentions, e.g. the X of
+// 'q(C) :- #count{Y : e(X, Y)} = C, X = #sum{Z : n(Z)}.' The #count waits for
+// the #sum there: to the #count, an unbound X reads as a local variable.
+bool waits_for_another(const Aggregate& agg,
+                       const std::vector<const Aggregate*>& pending,
+                       const Binding& binding) {
+  absl::flat_hash_set<std::string_view> vars = agg_variables(agg);
+  for (const Aggregate* other : pending) {
+    if (other == &agg) continue;
+    for (std::string_view name : agg_output_vars(*other, binding)) {
+      if (vars.contains(name)) return true;
+    }
+  }
+  return false;
+}
+
+// Replaces each instance with one per value `agg` can take, binding `outputs`
+// to that value, e.g. 'q(S) :- #count{X : p(X)} = S.' with two derivable p
+// atoms turns one instance into three, binding S to 0, 1, and 2 in turn.
+absl::StatusOr<std::vector<Instance>> expand_over_values(
+    const Aggregate& agg, const std::vector<std::string_view>& outputs,
+    const BodyParts& parts, const Store& store,
+    const std::vector<Instance>& instances) {
+  std::vector<Instance> expanded;
+  for (const Instance& instance : instances) {
+    ASSIGN_OR_RETURN(std::vector<AggTuple> tuples,
+                     collect_agg_tuples(agg, instance.binding, store));
+    ASSIGN_OR_RETURN(std::vector<int64_t> values, possible_values(tuples));
+    for (int64_t value : values) {
+      Instance next = instance;
+      for (std::string_view name : outputs) {
+        next.binding.emplace(name, Value::make_number(value));
+      }
+      // The value can complete an assignment, e.g. the 'T = S + 1' of
+      // 'q(T) :- #count{X : p(X)} = S, T = S + 1.'
+      ASSIGN_OR_RETURN(bool ok, bind_assignments(parts, next.binding));
+      if (ok) expanded.push_back(std::move(next));
+    }
+  }
+  return expanded;
+}
+
+// Binds the variables the body's aggregates take their values from, splitting
+// each instance into one per value.
+//
+// An expanded instance carries the aggregate with its variable bound, so
+// emit_rules grounds it as an ordinary '= value' check. That check holds only
+// when the aggregate takes that value, so an answer set satisfies exactly one
+// of the instances an aggregate expands into.
+absl::StatusOr<std::vector<Instance>> bind_agg_outputs(
+    const BodyParts& parts, const Store& store,
+    std::vector<Instance> instances) {
+  std::vector<const Aggregate*> pending = parts.aggregates;
+  while (!pending.empty() && !instances.empty()) {
+    std::vector<const Aggregate*> waiting;
+    for (const Aggregate* agg : pending) {
+      if (instances.empty()) break;
+      // Every instance binds the same variables -- they all come out of the
+      // same body -- so the first one decides which are still unbound.
+      // Expanding an aggregate replaces the list, so this reads the current
+      // one each time around.
+      const Binding& sample = instances.front().binding;
+      std::vector<std::string_view> outputs = agg_output_vars(*agg, sample);
+      // An aggregate that binds nothing is a plain check on its value, which
+      // emit_rules handles.
+      if (outputs.empty()) continue;
+      if (waits_for_another(*agg, pending, sample)) {
+        waiting.push_back(agg);
+        continue;
+      }
+      ASSIGN_OR_RETURN(instances, expand_over_values(*agg, outputs, parts,
+                                                     store, instances));
+    }
+    // Aggregates left waiting on each other bind their variables in a cycle
+    // and can never be ground. verify_safe() rejects such a rule; stopping
+    // here leaves the variables unbound, which reports it as well.
+    if (waiting.size() == pending.size()) break;
+    pending = std::move(waiting);
+  }
+  return instances;
+}
+
+// Grounds an aggregate's elements into the weighted literals its value sums
+// over. Each distinct tuple gets a fresh auxiliary atom, supported by one
+// plain rule per grounding that produced it -- multiple such rules give the
+// atom OR semantics for free, exactly modeling "this tuple is in the set if
+// any grounding satisfies it".
+absl::StatusOr<std::vector<aspif::WeightedLit>> ground_agg_elements(
+    const Aggregate& agg, const Binding& outer_binding, const Store& store,
+    aspif::Program& result) {
+  ASSIGN_OR_RETURN(std::vector<AggTuple> tuples,
+                   collect_agg_tuples(agg, outer_binding, store));
+  std::vector<aspif::WeightedLit> weighted;
+  weighted.reserve(tuples.size());
+  for (const AggTuple& tuple : tuples) {
+    aspif::Atom atom = result.new_atom();
+    weighted.push_back({.lit = atom, .weight = tuple.weight});
+    for (const std::vector<aspif::Lit>& support : tuple.supports) {
+      aspif::Rule rule;
+      rule.head = {atom};
+      rule.body = support;
+      result.rules.push_back(std::move(rule));
     }
   }
   return weighted;
@@ -774,17 +989,9 @@ aspif::Atom at_least(int64_t bound,
 // '3 <= #count{...}'.
 absl::StatusOr<std::optional<int64_t>> eval_bound(const Term& term,
                                                   const Binding& binding) {
-  // A still-unbound variable here is the '#count{...} = X' form, which binds X
-  // to the aggregate's value. Grounding can't do that: an ASPIF weight body
-  // only compares an aggregate against a number it already knows, so there is
-  // no value to hand back.
-  if (term.kind == Term::VariableKind &&
-      !binding.contains(static_cast<const Variable&>(term).name)) {
-    return absl::UnimplementedError(
-        absl::StrCat("variable '", static_cast<const Variable&>(term).name,
-                     "' is bound to an aggregate's value, which is not "
-                     "supported yet"));
-  }
+  // In a '#count{...} = S', S holds the value this rule instance checks for:
+  // find_instances() split the instance over the values the aggregate can
+  // take.
   ASSIGN_OR_RETURN(std::optional<Value> value, eval_term(term, binding));
   if (!value.has_value()) return std::nullopt;
   if (value->kind != Value::kNumber) {
