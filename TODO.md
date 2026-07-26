@@ -1,2 +1,3 @@
 * Use unlimited precision integers for numbers and arithmetic. A number is a
   `uint64_t` in the AST and an `int64_t` once grounded. ASP-Core-2 doesn't bound integers.
+* Make transitive closure grounding as fast as gringo

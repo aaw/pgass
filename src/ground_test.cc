@@ -36,6 +36,83 @@ TEST(GroundTest, Facts) {
             "0\n");
 }
 
+// '_' matches whatever an atom holds in its position, so a join must compare
+// against it rather than looking atoms up by it, even when every other
+// argument of the literal is already bound.
+TEST(GroundTest, AnonymousVariableAlongsideBoundArguments) {
+  auto out = ground_source(
+      "p(1). p(2). r(1, a). r(2, b). r(3, c).\n"
+      "q(X) :- p(X), r(X, _).\n"
+      "s(X) :- p(X), r(X, f(_)).\n");
+  ASSERT_TRUE(out.ok()) << out.status();
+  EXPECT_THAT(*out, HasSubstr(" q(1) "));
+  EXPECT_THAT(*out, HasSubstr(" q(2) "));
+  EXPECT_THAT(*out, Not(HasSubstr(" q(3) ")));
+  EXPECT_THAT(*out, Not(HasSubstr(" s(")));
+}
+
+// 'not r(_, 2)' holds only when no stored r with 2 in its second argument is
+// true, so the emitted body has to negate every one of them at once.
+TEST(GroundTest, NotOverAnonymousVariableNegatesEveryMatchingAtom) {
+  auto out = ground_source(
+      "{ r(1, 2) }. { r(3, 2) }. { r(4, 5) }.\n"
+      "q :- not r(_, 2).\n");
+  ASSERT_TRUE(out.ok()) << out.status();
+  // The output statements below number r(1,2), r(3,2) and r(4,5) as atoms 5, 6
+  // and 7, so q rests on 'not 5' and 'not 6'. r(4,5) does not match.
+  EXPECT_THAT(*out, HasSubstr("1 0 1 1 0 2 -5 -6\n"));
+  EXPECT_THAT(*out, HasSubstr("4 6 r(1,2) 1 5\n"));
+  EXPECT_THAT(*out, HasSubstr("4 6 r(3,2) 1 6\n"));
+  EXPECT_THAT(*out, HasSubstr("4 6 r(4,5) 1 7\n"));
+}
+
+TEST(GroundTest, NotOverAnonymousVariableHoldsWhenNothingMatches) {
+  auto out = ground_source("r(1, 3). q :- not r(_, 2).\n");
+  ASSERT_TRUE(out.ok()) << out.status();
+  EXPECT_EQ(*out,
+            "asp 1 0 0\n"
+            "1 0 1 1 0 0\n"  // nothing to rule out, so q is a fact
+            "1 0 1 2 0 0\n"
+            "4 1 q 1 1\n"
+            "4 6 r(1,3) 1 2\n"
+            "0\n");
+}
+
+// Each rule instance rules out the atoms matching its own binding, so the
+// q(2) instance carries no 'not' literal at all.
+TEST(GroundTest, NotOverAnonymousVariableIsPerBinding) {
+  auto out = ground_source(
+      "p(1). p(2). r(1, a).\n"
+      "q(X) :- p(X), not r(X, _).\n");
+  ASSERT_TRUE(out.ok()) << out.status();
+  EXPECT_THAT(*out, HasSubstr("4 6 r(1,a) 1 1\n"));
+  EXPECT_THAT(*out, HasSubstr("1 0 1 4 0 2 2 -1\n"));  // q(1) :- p(1), not 1
+  EXPECT_THAT(*out, HasSubstr("1 0 1 5 0 1 3\n"));     // q(2) :- p(2)
+}
+
+TEST(GroundTest, NotOverAnonymousVariableNestedInAFunctionTerm) {
+  auto out = ground_source(
+      "p(f(1)). p(g(2)).\n"
+      "a :- not p(f(_)).\n"
+      "b :- not p(h(_)).\n");
+  ASSERT_TRUE(out.ok()) << out.status();
+  EXPECT_THAT(*out, HasSubstr("4 7 p(f(1)) 1 3\n"));
+  EXPECT_THAT(*out, HasSubstr("1 0 1 2 0 1 -3\n"));  // a :- not p(f(1))
+  EXPECT_THAT(*out, HasSubstr("1 0 1 1 0 0\n"));     // nothing matches h(_)
+  EXPECT_THAT(*out, HasSubstr("4 1 b 1 1\n"));
+}
+
+// An argument with no value at all is different from one matching no stored
+// atom: the rule instance does not exist, so its head is never derived.
+TEST(GroundTest, NotWithAnIllFormedArgumentDropsTheInstance) {
+  auto out = ground_source(
+      "p(0). p(2). r(2).\n"
+      "q(X) :- p(X), not r(4 / X).\n");
+  ASSERT_TRUE(out.ok()) << out.status();
+  EXPECT_THAT(*out, Not(HasSubstr(" q(0) ")));
+  EXPECT_THAT(*out, HasSubstr(" q(2) "));
+}
+
 TEST(GroundTest, ProgramWithNoStatementsGroundsToAnEmptyAspifProgram) {
   auto out = ground_source("% just a comment\n");
   ASSERT_TRUE(out.ok()) << out.status();
@@ -439,7 +516,7 @@ TEST(GroundTest, WeakConstraintBecomesMinimize) {
 
 TEST(GroundTest, WeakConstraintsGroupByLevel) {
   // Three weak constraints across two levels. The last one carries no terms,
-  // so it becomes _viol/2 while the others become _viol/3 -- different
+  // so it becomes _viol/2 while the others become _viol/3, which are
   // predicates in the store, but level 2 collects literals from both.
   auto out = ground_source(
       "a(1). b(2).\n"
@@ -944,7 +1021,7 @@ TEST(GroundTest, AggregateValueBindsFromEitherSide) {
 
 TEST(GroundTest, SumAggregateValueRangesOverSubsetSums) {
   // Any subset of the two tuples can be in the set, so the sum is 0, 3, 5, or
-  // 8 -- not every number in between.
+  // 8, not every number in between.
   auto out =
       ground_source("w(1,3). w(2,5). total(S) :- #sum{ V,I : w(I,V) } = S.");
   ASSERT_TRUE(out.ok()) << out.status();

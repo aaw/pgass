@@ -115,6 +115,12 @@ struct PredData {
   std::vector<GroundAtom> atoms;             // in first-derived order
   absl::flat_hash_map<Tuple, size_t> index;  // args -> position in `atoms`
 
+  // How many atoms the predicate had when the current derivation pass started,
+  // and when the previous one did. Atoms are only ever appended, so the ones in
+  // between are what the previous pass derived.
+  size_t size_before_pass = 0;
+  size_t size_before_prev_pass = 0;
+
   const GroundAtom* find(const Tuple& args) const {
     auto it = index.find(args);
     return it == index.end() ? nullptr : &atoms[it->second];
@@ -144,6 +150,16 @@ struct Store {
     if (!is_new) return false;
     data.atoms.push_back(GroundAtom{std::move(tuple), aspif_prog.new_atom()});
     return true;
+  }
+
+  // Starts a derivation pass, so that what the last one derived becomes the
+  // delta the next round of joins reads.
+  void begin_pass() {
+    for (const PredKey& key : order) {
+      PredData& data = preds[key];
+      data.size_before_prev_pass = data.size_before_pass;
+      data.size_before_pass = data.atoms.size();
+    }
   }
 };
 
@@ -292,6 +308,39 @@ absl::StatusOr<bool> match_term(const Term& arg, const Value& value,
   // nothing.
   ASSIGN_OR_RETURN(std::optional<Value> evaluated, eval_term(arg, binding));
   return evaluated.has_value() && *evaluated == value;
+}
+
+// Whether `term` can match anything at all under `binding`: the question
+// match_term answers, asked without a value to compare against. A '_' matches
+// whatever sits opposite it, so it always can, but 'X / 0' has no value at all,
+// so it never can.
+absl::StatusOr<bool> can_match(const Term& term, const Binding& binding) {
+  if (term.kind == Term::AnonymousVariableKind) return true;
+  if (term.kind == Term::AtomKind) {
+    const Atom& atom = static_cast<const Atom&>(term);
+    if (atom.args != nullptr) {
+      for (const auto& arg : *atom.args) {
+        ASSIGN_OR_RETURN(bool ok, can_match(*arg, binding));
+        if (!ok) return false;
+      }
+      return true;
+    }
+  }
+  ASSIGN_OR_RETURN(std::optional<Value> value, eval_term(term, binding));
+  return value.has_value();
+}
+
+// Whether every argument of `literal` can match, e.g. false for the 'r(4 / 0)'
+// that 'r(4 / X)' becomes under {X: 0}. Such a literal has no ground instance
+// at all, which is different from having one that no stored atom matches.
+absl::StatusOr<bool> args_can_match(const ClassicalLiteral& literal,
+                                    const Binding& binding) {
+  if (literal.args == nullptr) return true;
+  for (const auto& arg : *literal.args) {
+    ASSIGN_OR_RETURN(bool ok, can_match(*arg, binding));
+    if (!ok) return false;
+  }
+  return true;
 }
 
 // Tries to match `literal`'s arguments against a stored tuple. On a match,
@@ -553,6 +602,121 @@ absl::StatusOr<bool> comparisons_hold(const BodyParts& parts,
   return true;
 }
 
+// The stretch of one predicate's atoms a join step reads, as positions into
+// PredData::atoms.
+struct AtomRange {
+  size_t begin = 0;
+  size_t end = 0;
+};
+
+// Which atoms a join step reads at the positive literal in `position`. Without
+// a delta position it reads all of them. With one it reads what the previous
+// pass derived at that literal and what existed before this pass at the others,
+// so it skips the instances an earlier pass already found.
+AtomRange scan_range(const PredData& data, std::optional<size_t> delta_position,
+                     size_t position) {
+  if (!delta_position.has_value()) return {0, data.atoms.size()};
+  if (position == *delta_position) {
+    return {data.size_before_prev_pass, data.size_before_pass};
+  }
+  return {0, data.size_before_pass};
+}
+
+// Whether `term` holds a '_' anywhere, e.g. the 'f(_)' of 'p(f(_))'. Such a
+// term has no value of its own: it takes whatever the atom holds there.
+bool holds_anonymous_variable(const Term& term) {
+  switch (term.kind) {
+    case Term::AnonymousVariableKind:
+      return true;
+    case Term::AtomKind: {
+      const Atom& atom = static_cast<const Atom&>(term);
+      if (atom.args == nullptr) return false;
+      for (const auto& arg : *atom.args) {
+        if (holds_anonymous_variable(*arg)) return true;
+      }
+      return false;
+    }
+    case Term::NegatedTermKind:
+      return holds_anonymous_variable(
+          *static_cast<const NegatedTerm&>(term).term);
+    case Term::TermOperationKind: {
+      const TermOperation& operation = static_cast<const TermOperation&>(term);
+      return holds_anonymous_variable(*operation.left) ||
+             holds_anonymous_variable(*operation.right);
+    }
+    case Term::NumberKind:
+    case Term::StringKind:
+    case Term::VariableKind:
+      return false;
+  }
+  return false;
+}
+
+// Whether any argument of `literal` holds a '_', e.g. true for 'r(X, _)'. Such
+// a literal stands for a set of atoms rather than one, so it has to be matched
+// against the store rather than looked up in it.
+bool args_hold_anonymous_variable(const ClassicalLiteral& literal) {
+  if (literal.args == nullptr) return false;
+  for (const auto& arg : *literal.args) {
+    if (holds_anonymous_variable(*arg)) return true;
+  }
+  return false;
+}
+
+// The argument positions of `literal` whose terms have a value to look up, e.g.
+// {0} for the 'edge(Y, Z)' of "reachable(X, Z) :- reachable(X, Y), edge(Y, Z)."
+// once matching the first literal has bound Y.
+std::vector<size_t> probeable_positions(const ClassicalLiteral& literal,
+                                        const Binding& binding) {
+  std::vector<size_t> positions;
+  if (literal.args == nullptr) return positions;
+  for (size_t k = 0; k < literal.args->size(); ++k) {
+    const Term& arg = *(*literal.args)[k];
+    if (is_bound(arg, binding) && !holds_anonymous_variable(arg)) {
+      positions.push_back(k);
+    }
+  }
+  return positions;
+}
+
+// Groups `range`'s atoms by the values they hold at `positions`, e.g. the
+// edge/2 atoms by their first argument, so a join step can find the atoms
+// matching an instance. An empty `positions` puts every atom in one bucket,
+// which is what a literal with nothing bound yet needs.
+absl::flat_hash_map<Tuple, std::vector<const GroundAtom*>> index_atoms(
+    const PredData& data, const AtomRange& range,
+    const std::vector<size_t>& positions) {
+  absl::flat_hash_map<Tuple, std::vector<const GroundAtom*>> index;
+  for (size_t k = range.begin; k < range.end; ++k) {
+    const GroundAtom& atom = data.atoms[k];
+    Tuple key;
+    key.reserve(positions.size());
+    for (size_t position : positions) key.push_back(atom.args[position]);
+    index[std::move(key)].push_back(&atom);
+  }
+  return index;
+}
+
+// The values one partial instance needs at `positions`, e.g. {b} for the
+// 'edge(Y, Z)' above under {Y: b}. Looking these up in the index_atoms() index
+// gives the atoms that can extend the instance.
+//
+// Returns nullopt when one of the terms is ill-formed, e.g. the 'edge(1 / 0,
+// Z)' that 'edge(X / 0, Z)' becomes under {X: 0}: no atom matches it.
+absl::StatusOr<std::optional<Tuple>> probe_key(
+    const ClassicalLiteral& literal, const std::vector<size_t>& positions,
+    const Binding& binding) {
+  Tuple key;
+  key.reserve(positions.size());
+  for (size_t position : positions) {
+    ASSIGN_OR_RETURN(std::optional<Value> value,
+                     eval_term(*(*literal.args)[position], binding));
+    if (!value.has_value()) return std::nullopt;
+    key.push_back(*std::move(value));
+  }
+  return key;
+}
+
 // find_instances() and bind_agg_outputs() call each other: grounding an
 // aggregate's elements needs find_instances() for the element conditions.
 // Aggregates cannot nest, so the recursion stops one level down.
@@ -571,22 +735,46 @@ absl::StatusOr<std::vector<Instance>> bind_agg_outputs(
 // `seed_binding` lets a caller start from variables already bound by an
 // enclosing scope, e.g. grounding an aggregate element's condition under the
 // enclosing rule instance's binding.
+//
+// `delta_position` makes the join semi-naive: see scan_range. Only
+// derive_atoms() passes one; every other caller wants every instance the store
+// supports.
 absl::StatusOr<std::vector<Instance>> find_instances(
-    const BodyParts& parts, const Store& store, Binding seed_binding = {}) {
+    const BodyParts& parts, const Store& store, Binding seed_binding = {},
+    std::optional<size_t> delta_position = std::nullopt) {
   std::vector<Instance> instances;
   instances.push_back(Instance{std::move(seed_binding), {}});
-  for (const ClassicalLiteral* literal : parts.positive) {
-    const PredData* data = store.find(pred_key(*literal));
+  for (size_t position = 0; position < parts.positive.size(); ++position) {
+    if (instances.empty()) return std::vector<Instance>();
+    const ClassicalLiteral& literal = *parts.positive[position];
+    const PredData* data = store.find(pred_key(literal));
     // A predicate with no atoms at all means the body cannot be satisfied.
     if (data == nullptr) return std::vector<Instance>();
+
+    // Every instance binds the same variables, since they all come from the
+    // same seed and the same earlier literals, so the first one decides which
+    // positions this step can look atoms up by.
+    const std::vector<size_t> positions =
+        probeable_positions(literal, instances.front().binding);
+    const absl::flat_hash_map<Tuple, std::vector<const GroundAtom*>> index =
+        index_atoms(*data, scan_range(*data, delta_position, position),
+                    positions);
+
     std::vector<Instance> extended;
     for (const Instance& partial : instances) {
-      for (const GroundAtom& atom : data->atoms) {
+      ASSIGN_OR_RETURN(std::optional<Tuple> key,
+                       probe_key(literal, positions, partial.binding));
+      if (!key.has_value()) continue;
+      auto it = index.find(*key);
+      if (it == index.end()) continue;
+      // The candidates already agree on the probed positions, so match_args is
+      // here to bind the variables in the positions still open.
+      for (const GroundAtom* atom : it->second) {
         ASSIGN_OR_RETURN(std::optional<Binding> bound,
-                         match_args(*literal, atom.args, partial.binding));
+                         match_args(literal, atom->args, partial.binding));
         if (!bound.has_value()) continue;
         Instance next{std::move(*bound), partial.matched};
-        next.matched.push_back(atom.id);
+        next.matched.push_back(atom->id);
         extended.push_back(std::move(next));
       }
     }
@@ -612,25 +800,51 @@ absl::StatusOr<std::vector<Instance>> find_instances(
   return passing;
 }
 
-// Evaluates each 'not p(...)' literal under `binding` and returns the
-// negated literal for each one that is still derivable in `store`. A literal
-// whose predicate was never derived at all can never be true, so it is
-// dropped as trivially satisfied instead of being negated.
+// The stored atoms `literal` stands for under `binding`: the one atom it names,
+// e.g. r(1, 2) for 'r(X, 2)' under {X: 1}, or, when it holds a '_', every
+// stored atom it matches, e.g. both r(1, 2) and r(3, 2) for 'r(_, 2)'. A
+// literal naming an atom the store does not hold comes back with none.
+absl::StatusOr<std::vector<aspif::Atom>> matching_atoms(
+    const ClassicalLiteral& literal, const Binding& binding,
+    const Store& store) {
+  std::vector<aspif::Atom> matched;
+  const PredData* data = store.find(pred_key(literal));
+  if (data == nullptr) return matched;
+  if (!args_hold_anonymous_variable(literal)) {
+    ASSIGN_OR_RETURN(std::optional<Tuple> tuple, eval_args(literal, binding));
+    if (!tuple.has_value()) return matched;
+    const GroundAtom* atom = data->find(*tuple);
+    if (atom != nullptr) matched.push_back(atom->id);
+    return matched;
+  }
+  for (const GroundAtom& atom : data->atoms) {
+    ASSIGN_OR_RETURN(std::optional<Binding> bound,
+                     match_args(literal, atom.args, binding));
+    if (bound.has_value()) matched.push_back(atom.id);
+  }
+  return matched;
+}
+
+// Negates each 'not p(...)' literal under `binding` into the literals the
+// emitted rule body needs. An atom the store never derived can never be true,
+// so it is dropped as trivially satisfied instead of being negated.
 //
-// Returns nullopt if one of the literals is ill-formed, e.g. 'not p(X / 0)':
+// A 'not' over a '_' rules out a set of atoms at once: 'not r(_, 2)' holds only
+// when no stored r with 2 in its second argument is true, so all of them are
+// negated.
+//
+// Returns nullopt if one of the literals cannot match, e.g. 'not p(X / 0)':
 // that makes the whole rule instance nonexistent, not just this literal.
 absl::StatusOr<std::optional<std::vector<aspif::Lit>>> negative_lits(
     const std::vector<const ClassicalLiteral*>& negative,
     const Binding& binding, const Store& store) {
   std::vector<aspif::Lit> lits;
   for (const ClassicalLiteral* literal : negative) {
-    ASSIGN_OR_RETURN(std::optional<Tuple> tuple, eval_args(*literal, binding));
-    if (!tuple.has_value()) return std::nullopt;
-    const PredData* data = store.find(pred_key(*literal));
-    if (data == nullptr) continue;
-    const GroundAtom* atom = data->find(*tuple);
-    if (atom == nullptr) continue;
-    lits.push_back(-atom->id);
+    ASSIGN_OR_RETURN(bool can_match, args_can_match(*literal, binding));
+    if (!can_match) return std::nullopt;
+    ASSIGN_OR_RETURN(std::vector<aspif::Atom> matched,
+                     matching_atoms(*literal, binding, store));
+    for (aspif::Atom atom : matched) lits.push_back(-atom);
   }
   return lits;
 }
@@ -820,8 +1034,8 @@ absl::StatusOr<std::vector<Instance>> bind_agg_outputs(
     std::vector<const Aggregate*> waiting;
     for (const Aggregate* agg : pending) {
       if (instances.empty()) break;
-      // Every instance binds the same variables -- they all come out of the
-      // same body -- so the first one decides which are still unbound.
+      // Every instance binds the same variables, since they all come out of
+      // the same body, so the first one decides which are still unbound.
       // Expanding an aggregate replaces the list, so this reads the current
       // one each time around.
       const Binding& sample = instances.front().binding;
@@ -847,9 +1061,9 @@ absl::StatusOr<std::vector<Instance>> bind_agg_outputs(
 
 // Grounds an aggregate's elements into the weighted literals its value sums
 // over. Each distinct tuple gets a fresh auxiliary atom, supported by one
-// plain rule per grounding that produced it -- multiple such rules give the
-// atom OR semantics for free, exactly modeling "this tuple is in the set if
-// any grounding satisfies it".
+// plain rule per grounding that produced it. Multiple such rules give the atom
+// OR semantics for free, exactly modeling "this tuple is in the set if any
+// grounding satisfies it".
 absl::StatusOr<std::vector<aspif::WeightedLit>> ground_agg_elements(
     const Aggregate& agg, const Binding& outer_binding, const Store& store,
     aspif::Program& result) {
@@ -1075,8 +1289,8 @@ absl::StatusOr<std::optional<std::vector<aspif::Lit>>> ground_aggregate(
 absl::StatusOr<bool> ignored_parts_are_well_formed(const BodyParts& parts,
                                                    const Binding& binding) {
   for (const ClassicalLiteral* literal : parts.negative) {
-    ASSIGN_OR_RETURN(std::optional<Tuple> tuple, eval_args(*literal, binding));
-    if (!tuple.has_value()) return false;
+    ASSIGN_OR_RETURN(bool can_match, args_can_match(*literal, binding));
+    if (!can_match) return false;
   }
   for (const Aggregate* aggregate : parts.aggregates) {
     if (aggregate->lb_term != nullptr) {
@@ -1093,9 +1307,33 @@ absl::StatusOr<bool> ignored_parts_are_well_formed(const BodyParts& parts,
   return true;
 }
 
+// Runs one rule against the store and adds the head atom of every instance it
+// finds, setting `changed` if any of them was new. `delta_position` picks the
+// positive literal to read the previous pass's atoms from (see
+// find_instances), or nullopt to read the whole store.
+absl::Status derive_from_rule(const RuleView& rule,
+                              std::optional<size_t> delta_position,
+                              Store& store, aspif::Program& aspif_prog,
+                              bool& changed) {
+  ASSIGN_OR_RETURN(std::vector<Instance> instances,
+                   find_instances(rule.parts, store, {}, delta_position));
+  for (const Instance& instance : instances) {
+    ASSIGN_OR_RETURN(bool well_formed, ignored_parts_are_well_formed(
+                                           rule.parts, instance.binding));
+    if (!well_formed) continue;
+    ASSIGN_OR_RETURN(std::optional<Tuple> tuple,
+                     eval_args(*rule.head, instance.binding));
+    if (!tuple.has_value()) continue;
+    if (store.insert(pred_key(*rule.head), *std::move(tuple), aspif_prog)) {
+      changed = true;
+    }
+  }
+  return absl::OkStatus();
+}
+
 // Fills `store` with every atom that could appear in an answer set, by
 // running each rule against the atoms collected so far and repeating until a
-// full pass adds nothing new. Each new atom gets its ASPIF number from
+// pass adds nothing new. Each new atom gets its ASPIF number from
 // `aspif_prog`.
 //
 // 'not' literals are ignored here. Given "p :- q, not r." with q and r both
@@ -1111,34 +1349,44 @@ absl::StatusOr<bool> ignored_parts_are_well_formed(const BodyParts& parts,
 // is already complete and the real weight-body encoding constrains the
 // solver correctly.
 //
-// Atoms a rule derives are inserted into `store` right away, so a rule later
-// in the same pass already sees them. A rule never sees atoms from its own
-// current run, though, only from previous ones. So a rule that feeds on its
-// own head, like 'reachable(X, Z) :- reachable(X, Y), edge(Y, Z).', extends
-// the reachable chain by one hop per pass. That's why repeating passes to a
-// fixpoint is necessary in the first place.
+// A rule only sees atoms from passes before the current one, so a rule that
+// feeds on its own head, like 'reachable(X, Z) :- reachable(X, Y), edge(Y,
+// Z).', extends the reachable chain by one hop per pass. That's why repeating
+// passes to a fixpoint is necessary in the first place.
+//
+// After the first pass the passes are semi-naive: a rule runs once per positive
+// literal, reading only the atoms the previous pass derived at that literal.
+// Every instance this skips is built entirely from atoms an earlier pass
+// already had, so an earlier pass already found it.
+//
+// A rule with no positive literals therefore fires only in the first pass,
+// which is enough because nothing it reads can still change: it reaches the
+// store only through an aggregate binding a variable to its value, and those
+// predicates sit in an earlier component, as noted above.
 absl::Status derive_atoms(const std::vector<RuleView>& rules, Store& store,
                           aspif::Program& aspif_prog) {
-  bool changed = true;
-  while (changed) {
+  // The first pass reads the whole store. It is the only one that fires the
+  // rules with no positive literals, and it derives the delta the passes below
+  // start from.
+  bool changed = false;
+  for (const RuleView& rule : rules) {
+    if (rule.head == nullptr) continue;
+    RETURN_IF_ERROR(
+        derive_from_rule(rule, std::nullopt, store, aspif_prog, changed));
+  }
+
+  do {
     changed = false;
+    store.begin_pass();
     for (const RuleView& rule : rules) {
       if (rule.head == nullptr) continue;
-      ASSIGN_OR_RETURN(std::vector<Instance> instances,
-                       find_instances(rule.parts, store));
-      for (const Instance& instance : instances) {
-        ASSIGN_OR_RETURN(bool well_formed, ignored_parts_are_well_formed(
-                                               rule.parts, instance.binding));
-        if (!well_formed) continue;
-        ASSIGN_OR_RETURN(std::optional<Tuple> tuple,
-                         eval_args(*rule.head, instance.binding));
-        if (!tuple.has_value()) continue;
-        if (store.insert(pred_key(*rule.head), *std::move(tuple), aspif_prog)) {
-          changed = true;
-        }
+      for (size_t position = 0; position < rule.parts.positive.size();
+           ++position) {
+        RETURN_IF_ERROR(
+            derive_from_rule(rule, position, store, aspif_prog, changed));
       }
     }
-  }
+  } while (changed);
   return absl::OkStatus();
 }
 
@@ -1188,10 +1436,10 @@ absl::Status emit_rules(const std::vector<RuleView>& rules, const Store& store,
         const PredData* data = store.find(pred_key(*rule.head));
         const GroundAtom* head = data == nullptr ? nullptr : data->find(*tuple);
         if (head == nullptr) {
-          return absl::InternalError(absl::StrCat(
-              "grounding derived no atom for the head '",
-              printed_atom(rule.head->id, *tuple),
-              "'; was the program checked by verify_safe()?"));
+          return absl::InternalError(
+              absl::StrCat("grounding derived no atom for the head '",
+                           printed_atom(rule.head->id, *tuple),
+                           "'; was the program checked by verify_safe()?"));
         }
         aspif_rule.head.push_back(head->id);
       }
@@ -1255,9 +1503,8 @@ void name_outputs(const Store& store, aspif::Program& result) {
       predicate = key.name;
     }
     for (const GroundAtom& atom : store.find(key)->atoms) {
-      result.outputs.push_back(
-          aspif::Output{.name = printed_atom(predicate, atom.args),
-                        .condition = {atom.id}});
+      result.outputs.push_back(aspif::Output{
+          .name = printed_atom(predicate, atom.args), .condition = {atom.id}});
     }
   }
 }
@@ -1265,10 +1512,10 @@ void name_outputs(const Store& store, aspif::Program& result) {
 // Turns the program's query into an ASPIF assumption: a literal every answer
 // set must satisfy.
 //
-// A query's variables are existential -- 'p(X, a)?' asks whether an answer set
-// holds p(x, a) for some x -- so the assumption has to mean "at least one of
-// the matching ground atoms is true". A fresh atom with one rule per matching
-// atom says exactly that: any one of them derives it.
+// A query's variables are existential, so that 'p(X, a)?' asks whether an
+// answer set holds p(x, a) for some x. The assumption therefore has to mean "at
+// least one of the matching ground atoms is true". A fresh atom with one rule
+// per matching atom says exactly that: any one of them derives it.
 //
 // A query that matches nothing gets that atom with no rule at all, so it can
 // never be true and the program has no answer set. That is the right answer:
