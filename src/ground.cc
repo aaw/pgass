@@ -30,9 +30,9 @@ struct Value {
   enum Kind { kNumber, kConstant, kString, kFunction };
 
   Kind kind;
-  int64_t number = 0;        // set only when kind == kNumber
-  std::string text;          // the constant's, string's, or function's name
-  std::vector<Value> args;   // set only when kind == kFunction, never empty
+  int64_t number = 0;       // set only when kind == kNumber
+  std::string text;         // the constant's, string's, or function's name
+  std::vector<Value> args;  // set only when kind == kFunction, never empty
 
   static Value make_number(int64_t n) { return {kNumber, n, "", {}}; }
   static Value make_constant(std::string name) {
@@ -363,9 +363,6 @@ struct RuleView {
 // Checks that the program is a normalized program the grounder can handle
 // and splits each statement into a RuleView.
 absl::StatusOr<std::vector<RuleView>> make_rule_views(const Program& prog) {
-  if (prog.query != nullptr) {
-    return absl::UnimplementedError("queries are not supported yet");
-  }
   std::vector<RuleView> rules;
   rules.reserve(prog.statements->size());
   for (const auto& statement : *prog.statements) {
@@ -1116,9 +1113,8 @@ absl::Status derive_atoms(const std::vector<RuleView>& rules, Store& store,
       ASSIGN_OR_RETURN(std::vector<Instance> instances,
                        find_instances(rule.parts, store));
       for (const Instance& instance : instances) {
-        ASSIGN_OR_RETURN(
-            bool well_formed,
-            ignored_parts_are_well_formed(rule.parts, instance.binding));
+        ASSIGN_OR_RETURN(bool well_formed, ignored_parts_are_well_formed(
+                                               rule.parts, instance.binding));
         if (!well_formed) continue;
         ASSIGN_OR_RETURN(std::optional<Tuple> tuple,
                          eval_args(*rule.head, instance.binding));
@@ -1244,6 +1240,45 @@ void name_outputs(const Store& store, aspif::Program& result) {
   }
 }
 
+// Turns the program's query into an ASPIF assumption: a literal every answer
+// set must satisfy.
+//
+// A query's variables are existential -- 'p(X, a)?' asks whether an answer set
+// holds p(x, a) for some x -- so the assumption has to mean "at least one of
+// the matching ground atoms is true". A fresh atom with one rule per matching
+// atom says exactly that: any one of them derives it.
+//
+// A query that matches nothing gets that atom with no rule at all, so it can
+// never be true and the program has no answer set. That is the right answer:
+// nothing satisfies the query.
+absl::Status emit_query(const ClassicalLiteral& query, const Store& store,
+                        aspif::Program& result) {
+  std::vector<aspif::Lit> matched;
+  const PredData* data = store.find(pred_key(query));
+  if (data != nullptr) {
+    for (const GroundAtom& atom : data->atoms) {
+      ASSIGN_OR_RETURN(std::optional<Binding> bound,
+                       match_args(query, atom.args, Binding{}));
+      if (bound.has_value()) matched.push_back(atom.id);
+    }
+  }
+  // One match needs no atom of its own: assuming that atom means the same
+  // thing, e.g. for a query with no variables in it at all.
+  if (matched.size() == 1) {
+    result.assumptions.push_back(matched[0]);
+    return absl::OkStatus();
+  }
+  aspif::Atom holds = result.new_atom();
+  for (aspif::Lit lit : matched) {
+    aspif::Rule rule;
+    rule.head = {holds};
+    rule.body = {lit};
+    result.rules.push_back(std::move(rule));
+  }
+  result.assumptions.push_back(holds);
+  return absl::OkStatus();
+}
+
 }  // namespace
 
 absl::StatusOr<aspif::Program> ground(const Program& prog) {
@@ -1276,5 +1311,8 @@ absl::StatusOr<aspif::Program> ground(const Program& prog) {
   RETURN_IF_ERROR(emit_rules(headless_rules, store, result));
   emit_minimize(store, result);
   name_outputs(store, result);
+  if (prog.query != nullptr && prog.query->lit != nullptr) {
+    RETURN_IF_ERROR(emit_query(*prog.query->lit, store, result));
+  }
   return result;
 }

@@ -16,10 +16,10 @@
 //   reachable(X, Y) :- edge(X, Y).
 //   reachable(X, Z) :- reachable(X, Y), edge(Y, Z).
 //
-// #count and #sum aggregates are also supported, rewritten as ASPIF weight
-// bodies, as are weak constraints, rewritten as ASPIF minimize statements.
-// Everything else (#min/#max aggregates, arithmetic, function terms like
-// f(X), queries) is rejected with an error for now.
+// Arithmetic and function terms like f(X) are supported too, as are #count
+// and #sum aggregates, rewritten as ASPIF weight bodies, and weak constraints,
+// rewritten as ASPIF minimize statements. A query becomes an ASPIF assumption.
+// #min and #max aggregates are rejected with an error for now.
 absl::StatusOr<aspif::Program> ground(const Program& prog);
 
 #endif  // GROUND_H_

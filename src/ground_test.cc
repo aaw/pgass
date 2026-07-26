@@ -1027,4 +1027,74 @@ TEST(GroundTest, TooManyAggregateValuesRejected) {
   EXPECT_THAT(out.status().message(), HasSubstr("more than 4096"));
 }
 
+TEST(GroundTest, GroundQueryAssumesItsAtom) {
+  auto out = ground_source("p(1). p(2). p(2)?");
+  ASSERT_TRUE(out.ok()) << out.status();
+  // p(1)=1, p(2)=2. Only p(2) matches, so it is assumed directly.
+  EXPECT_EQ(*out,
+            "asp 1 0 0\n"
+            "1 0 1 1 0 0\n"
+            "1 0 1 2 0 0\n"
+            "4 4 p(1) 1 1\n"
+            "4 4 p(2) 1 2\n"
+            "6 1 2\n"
+            "0\n");
+}
+
+TEST(GroundTest, QueryWithAVariableAssumesAnyMatch) {
+  auto out = ground_source("p(1). p(2). p(X)?");
+  ASSERT_TRUE(out.ok()) << out.status();
+  // p(1)=1, p(2)=2, and atom 3 holds when either of them does.
+  EXPECT_EQ(*out,
+            "asp 1 0 0\n"
+            "1 0 1 1 0 0\n"
+            "1 0 1 2 0 0\n"
+            "1 0 1 3 0 1 1\n"
+            "1 0 1 3 0 1 2\n"
+            "4 4 p(1) 1 1\n"
+            "4 4 p(2) 1 2\n"
+            "6 1 3\n"
+            "0\n");
+}
+
+TEST(GroundTest, QueryMatchesOnlyTheAtomsWithTheSameArguments) {
+  auto out = ground_source("p(1, a). p(2, b). p(X, a)?");
+  ASSERT_TRUE(out.ok()) << out.status();
+  // Only p(1,a)=1 matches, so it is assumed directly.
+  EXPECT_THAT(*out, HasSubstr("6 1 1\n"));
+}
+
+TEST(GroundTest, QueryOverADerivedPredicate) {
+  auto out = ground_source("p(1). q(X) :- p(X). q(1)?");
+  ASSERT_TRUE(out.ok()) << out.status();
+  // p(1)=1, q(1)=2.
+  EXPECT_THAT(*out, HasSubstr("6 1 2\n"));
+}
+
+TEST(GroundTest, QueryThatMatchesNothingCanNeverHold) {
+  auto out = ground_source("p(1). p(3)?");
+  ASSERT_TRUE(out.ok()) << out.status();
+  // Atom 2 has no rule deriving it, so assuming it leaves no answer set.
+  EXPECT_EQ(*out,
+            "asp 1 0 0\n"
+            "1 0 1 1 0 0\n"
+            "4 4 p(1) 1 1\n"
+            "6 1 2\n"
+            "0\n");
+}
+
+TEST(GroundTest, QueryOverAPredicateWithNoAtomsAtAll) {
+  auto out = ground_source("p(1). q(X)?");
+  ASSERT_TRUE(out.ok()) << out.status();
+  EXPECT_THAT(*out, HasSubstr("6 1 2\n"));
+}
+
+TEST(GroundTest, QueryOnAClassicallyNegatedLiteral) {
+  // normalize() rewrites '-p(1)' into '_neg_p(1)', in the query as well as in
+  // the rules, so the query still finds the atom.
+  auto out = ground_source("-p(1). -p(1)?");
+  ASSERT_TRUE(out.ok()) << out.status();
+  EXPECT_THAT(*out, HasSubstr("6 1 1\n"));
+}
+
 }  // namespace
