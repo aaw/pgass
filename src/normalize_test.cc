@@ -65,6 +65,24 @@ TEST_F(NormalizeTest, TestNoNormalization) {
   EXPECT_THAT(**prog, EquivalentToSource(program));
 }
 
+TEST_F(NormalizeTest, TestArithmeticKeepsOnlyTheParenthesesItNeeds) {
+  // Parentheses that precedence already implies are dropped when printing,
+  // and the ones that change the grouping are kept.
+  std::string program = R"(
+    p(1 + 2 * 3, 1 + (2 * 3), (1 + 2) * 3, 1 - (2 - 3), (1 - 2) - 3, -(1 + 2)).
+  )";
+  std::string expected = R"(
+    p(1 + 2 * 3, 1 + 2 * 3, (1 + 2) * 3, 1 - (2 - 3), 1 - 2 - 3, -(1 + 2)).
+  )";
+
+  Parser parser(program);
+  auto prog = parser.parse_program();
+  ASSERT_TRUE(prog.ok()) << prog.status();
+  ASSERT_TRUE(normalize(**prog).ok());
+
+  EXPECT_THAT(**prog, EquivalentToSource(expected));
+}
+
 TEST_F(NormalizeTest, TestNormalizeChoiceRuleSimple) {
   std::string program = R"(
     { p1; p2; p3 } :- q1.

@@ -35,6 +35,7 @@ class Parser {
   absl::StatusOr<std::unique_ptr<BuiltinAtom>> parse_builtin_atom();
   absl::StatusOr<std::unique_ptr<Query>> parse_query();
   absl::StatusOr<std::unique_ptr<Term>> parse_term();
+  absl::StatusOr<std::unique_ptr<Term>> parse_product_term();
   absl::StatusOr<std::unique_ptr<Term>> parse_single_term();
   absl::StatusOr<Terms> parse_terms();
   absl::StatusOr<std::unique_ptr<ClassicalLiteral>> parse_classical_literal();

@@ -6,6 +6,43 @@
 namespace {
 
 void format_terms(std::string* fmt, const Terms& terms);
+void format_term(std::string* fmt, const Term& term);
+
+// How tightly an operator binds: * and / bind more tightly than + and -.
+int precedence(OperationType op) {
+  switch (op) {
+    case OperationType::kPLUS:
+    case OperationType::kMINUS:
+      return 1;
+    case OperationType::kTIMES:
+    case OperationType::kDIV:
+      return 2;
+  }
+  return 0;
+}
+
+/* Prints an operand of `parent`, wrapping it in parentheses when printing it
+   bare would reparse into a different term. Since every operator is
+   left-associative, an operand needs parentheses when it binds less tightly
+   than its parent (the 1 + 2 in (1 + 2) * 3), and a right operand also needs
+   them at equal binding when the parent is - or / (the 2 - 3 in 1 - (2 - 3)).
+*/
+void format_operand(std::string* fmt, const Term& operand, OperationType parent,
+                    bool is_right_operand) {
+  bool parenthesize = false;
+  if (operand.kind == Term::TermOperationKind) {
+    const TermOperation& child = static_cast<const TermOperation&>(operand);
+    parenthesize = precedence(child.op) < precedence(parent) ||
+                   (is_right_operand &&
+                    precedence(child.op) == precedence(parent) &&
+                    (parent == OperationType::kMINUS ||
+                     parent == OperationType::kDIV));
+  }
+
+  if (parenthesize) absl::StrAppend(fmt, "(");
+  format_term(fmt, operand);
+  if (parenthesize) absl::StrAppend(fmt, ")");
+}
 
 void format_term(std::string* fmt, const Term& term) {
   switch (term.kind) {
@@ -41,12 +78,16 @@ void format_term(std::string* fmt, const Term& term) {
     case Term::NegatedTermKind: {
       const NegatedTerm& nterm = static_cast<const NegatedTerm&>(term);
       absl::StrAppend(fmt, "-");
+      // -(1 + 2) negates the whole sum, so the parentheses have to stay.
+      bool parenthesize = nterm.term->kind == Term::TermOperationKind;
+      if (parenthesize) absl::StrAppend(fmt, "(");
       format_term(fmt, *nterm.term);
+      if (parenthesize) absl::StrAppend(fmt, ")");
       break;
     }
     case Term::TermOperationKind: {
       const TermOperation& op = static_cast<const TermOperation&>(term);
-      format_term(fmt, *op.left);
+      format_operand(fmt, *op.left, op.op, /*is_right_operand=*/false);
       switch (op.op) {
         case OperationType::kPLUS: {
           absl::StrAppend(fmt, " + ");
@@ -65,7 +106,7 @@ void format_term(std::string* fmt, const Term& term) {
           break;
         }
       }
-      format_term(fmt, *op.right);
+      format_operand(fmt, *op.right, op.op, /*is_right_operand=*/true);
       break;
     }
   }

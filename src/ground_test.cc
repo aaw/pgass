@@ -603,6 +603,19 @@ TEST(GroundTest, ArithmeticInComparison) {
             "0\n");
 }
 
+TEST(GroundTest, MultiplicationEvaluatesBeforeAddition) {
+  auto out = ground_source("p(1). q(2 + X * 3) :- p(X).");
+  ASSERT_TRUE(out.ok()) << out.status();
+  // 2 + 1 * 3 is 5, not 9.
+  EXPECT_THAT(*out, HasSubstr("q(5)"));
+}
+
+TEST(GroundTest, ParenthesesEvaluateBeforeMultiplication) {
+  auto out = ground_source("p(1). q((2 + X) * 3) :- p(X).");
+  ASSERT_TRUE(out.ok()) << out.status();
+  EXPECT_THAT(*out, HasSubstr("q(9)"));
+}
+
 TEST(GroundTest, DivisionTruncates) {
   auto out = ground_source("p(7). q(X / 2) :- p(X).");
   ASSERT_TRUE(out.ok()) << out.status();

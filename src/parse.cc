@@ -637,17 +637,14 @@ absl::StatusOr<std::unique_ptr<Query>> Parser::parse_query() {
   return query;
 }
 
-/* <term> ::= ID [PAREN_OPEN [<terms>] PAREN_CLOSE]
-            | NUMBER
-            | STRING
-            | VARIABLE
-            | ANONYMOUS_VARIABLE
-            | PAREN_OPEN <term> PAREN_CLOSE
-            | MINUS <term>
-            | <term> <arithop> <term>
+/* <term> ::= <product_term> | <term> (PLUS | MINUS) <product_term>
+
+   Addition and subtraction bind less tightly than multiplication and division,
+   so 1 + 2 * 3 parses as 1 + (2 * 3). Both levels are left-associative:
+   1 - 2 - 3 parses as (1 - 2) - 3.
 */
 absl::StatusOr<std::unique_ptr<Term>> Parser::parse_term() {
-  ASSIGN_OR_RETURN(auto lhs, parse_single_term());
+  ASSIGN_OR_RETURN(auto lhs, parse_product_term());
 
   while (true) {
     LexerCheckpoint try_arith_op(lexer_);
@@ -657,7 +654,27 @@ absl::StatusOr<std::unique_ptr<Term>> Parser::parse_term() {
       op = OperationType::kPLUS;
     } else if (token.type == TokenType::kMINUS) {
       op = OperationType::kMINUS;
-    } else if (token.type == TokenType::kTIMES) {
+    } else {
+      return lhs;
+    }
+    try_arith_op.commit();
+
+    ASSIGN_OR_RETURN(auto rhs, parse_product_term());
+    lhs = std::make_unique<TermOperation>(op, std::move(lhs), std::move(rhs));
+  }
+}
+
+/* <product_term> ::= <single_term>
+                    | <product_term> (TIMES | DIV) <single_term>
+*/
+absl::StatusOr<std::unique_ptr<Term>> Parser::parse_product_term() {
+  ASSIGN_OR_RETURN(auto lhs, parse_single_term());
+
+  while (true) {
+    LexerCheckpoint try_arith_op(lexer_);
+    Token token = lexer_.next();
+    OperationType op;
+    if (token.type == TokenType::kTIMES) {
       op = OperationType::kTIMES;
     } else if (token.type == TokenType::kDIV) {
       op = OperationType::kDIV;

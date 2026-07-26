@@ -118,6 +118,68 @@ TEST_F(ParserTest, ParseTermArithmeticLeftAssociative) {
   EXPECT_EQ(dynamic_cast<Number*>(outer->right.get())->value, 3);
 }
 
+TEST_F(ParserTest, ParseTermMultiplicationBindsTighterThanAddition) {
+  // 1+2*3 must parse as 1+(2*3).
+  Parser parser("1+2*3");
+  auto term_status = parser.parse_term();
+  ASSERT_TRUE(term_status.ok()) << term_status.status();
+  auto* outer = dynamic_cast<TermOperation*>(term_status->get());
+  ASSERT_NE(outer, nullptr);
+  EXPECT_EQ(outer->op, OperationType::kPLUS);
+  EXPECT_EQ(dynamic_cast<Number*>(outer->left.get())->value, 1);
+
+  auto* product = dynamic_cast<TermOperation*>(outer->right.get());
+  ASSERT_NE(product, nullptr) << "expected 2*3 to group under the +";
+  EXPECT_EQ(product->op, OperationType::kTIMES);
+  EXPECT_EQ(dynamic_cast<Number*>(product->left.get())->value, 2);
+  EXPECT_EQ(dynamic_cast<Number*>(product->right.get())->value, 3);
+}
+
+TEST_F(ParserTest, ParseTermDivisionBindsTighterThanSubtraction) {
+  // 6/3-1 must parse as (6/3)-1.
+  Parser parser("6/3-1");
+  auto term_status = parser.parse_term();
+  ASSERT_TRUE(term_status.ok()) << term_status.status();
+  auto* outer = dynamic_cast<TermOperation*>(term_status->get());
+  ASSERT_NE(outer, nullptr);
+  EXPECT_EQ(outer->op, OperationType::kMINUS);
+  EXPECT_EQ(dynamic_cast<Number*>(outer->right.get())->value, 1);
+
+  auto* quotient = dynamic_cast<TermOperation*>(outer->left.get());
+  ASSERT_NE(quotient, nullptr) << "expected 6/3 to group under the -";
+  EXPECT_EQ(quotient->op, OperationType::kDIV);
+  EXPECT_EQ(dynamic_cast<Number*>(quotient->left.get())->value, 6);
+  EXPECT_EQ(dynamic_cast<Number*>(quotient->right.get())->value, 3);
+}
+
+TEST_F(ParserTest, ParseTermMultiplicationLeftAssociative) {
+  // 8/4*2 must parse as (8/4)*2, not 8/(4*2).
+  Parser parser("8/4*2");
+  auto term_status = parser.parse_term();
+  ASSERT_TRUE(term_status.ok()) << term_status.status();
+  auto* outer = dynamic_cast<TermOperation*>(term_status->get());
+  ASSERT_NE(outer, nullptr);
+  EXPECT_EQ(outer->op, OperationType::kTIMES);
+  auto* inner = dynamic_cast<TermOperation*>(outer->left.get());
+  ASSERT_NE(inner, nullptr) << "expected left-associative grouping (8/4)*2";
+  EXPECT_EQ(inner->op, OperationType::kDIV);
+  EXPECT_EQ(dynamic_cast<Number*>(outer->right.get())->value, 2);
+}
+
+TEST_F(ParserTest, ParseTermParenthesesOverridePrecedence) {
+  // (1+2)*3 must parse as (1+2)*3.
+  Parser parser("(1+2)*3");
+  auto term_status = parser.parse_term();
+  ASSERT_TRUE(term_status.ok()) << term_status.status();
+  auto* outer = dynamic_cast<TermOperation*>(term_status->get());
+  ASSERT_NE(outer, nullptr);
+  EXPECT_EQ(outer->op, OperationType::kTIMES);
+  auto* sum = dynamic_cast<TermOperation*>(outer->left.get());
+  ASSERT_NE(sum, nullptr);
+  EXPECT_EQ(sum->op, OperationType::kPLUS);
+  EXPECT_EQ(dynamic_cast<Number*>(outer->right.get())->value, 3);
+}
+
 TEST_F(ParserTest, ParseTermsWithArithmetic) {
   // parse_terms() must use parse_term() so arithmetic expressions are accepted.
   Parser parser("1+2, X*3");
