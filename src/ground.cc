@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <cstdint>
+#include <deque>
 #include <optional>
 #include <string>
 #include <string_view>
@@ -12,6 +13,8 @@
 #include "absl/container/btree_set.h"
 #include "absl/container/flat_hash_map.h"
 #include "absl/container/flat_hash_set.h"
+#include "absl/container/inlined_vector.h"
+#include "absl/functional/function_ref.h"
 #include "absl/status/status.h"
 #include "absl/status/statusor.h"
 #include "absl/strings/str_cat.h"
@@ -97,10 +100,87 @@ std::string printed_atom(std::string_view name, const Tuple& args) {
   return absl::StrCat(name, "(", absl::StrJoin(args, ",", print_arg), ")");
 }
 
-// Variable name -> value, for one candidate rule instance, e.g. {X: 1, Y:
-// abc} while matching the body of "p(X, Y) :- q(X), r(Y)." against q(1) and
-// r(abc).
-using Binding = absl::flat_hash_map<std::string, Value>;
+// A slot number for each variable occurrence in one rule, e.g. both X's of
+// "p(X) :- q(X)." get slot 0 and Y gets slot 1. Occurrences of the same name
+// share a slot, which is what makes matching q(1) bind the head's X too.
+//
+// Grounding looks a variable up by the address of its AST node, so a lookup
+// hashes a pointer rather than the variable's name, and what it returns is an
+// index into a plain vector of values.
+struct VarSlots {
+  absl::flat_hash_map<const Variable*, size_t> of_node;
+  size_t count = 0;
+
+  // Gives `var` the slot its name already has, or a fresh one if this is the
+  // first occurrence of the name.
+  void add(const Variable& var,
+           absl::flat_hash_map<std::string_view, size_t>& by_name) {
+    auto [it, inserted] = by_name.try_emplace(var.name, count);
+    if (inserted) ++count;
+    of_node[&var] = it->second;
+  }
+};
+
+// The values one candidate rule instance gives the rule's variables, e.g. {X:
+// 1, Y: abc} while matching the body of "p(X, Y) :- q(X), r(Y)." against q(1)
+// and r(abc). A variable with no value yet has an empty slot.
+class Binding {
+ public:
+  explicit Binding(const VarSlots& slots)
+      : slots_(&slots), values_(slots.count) {}
+
+  // The slot `var` reads and writes. Every variable of the rule the binding
+  // belongs to has one.
+  size_t slot_of(const Variable& var) const { return slots_->of_node.at(&var); }
+
+  // The value of `var`, or null if it has none yet. A variable from outside
+  // this binding's rule, which cannot happen for a well-formed rule, also
+  // reads as having none.
+  const Value* find(const Variable& var) const {
+    auto it = slots_->of_node.find(&var);
+    if (it == slots_->of_node.end()) return nullptr;
+    return at(it->second);
+  }
+  bool contains(const Variable& var) const { return find(var) != nullptr; }
+
+  const Value* at(size_t slot) const {
+    const std::optional<Value>& value = values_[slot];
+    return value.has_value() ? &*value : nullptr;
+  }
+  void set(size_t slot, Value value) { values_[slot] = std::move(value); }
+  void clear(size_t slot) { values_[slot].reset(); }
+
+  const VarSlots& slots() const { return *slots_; }
+
+ private:
+  const VarSlots* slots_;
+  std::vector<std::optional<Value>> values_;
+};
+
+// Undoes the slots filled while it is alive, so a join can try the next
+// candidate atom from the binding it started the last one with. Matching runs
+// far more often than it succeeds, and a failed match leaves behind whatever
+// its matching prefix bound, so every step of the search brackets itself with
+// one of these instead of working on a copy of the binding.
+class BindingTrail {
+ public:
+  explicit BindingTrail(Binding& binding) : binding_(binding) {}
+  BindingTrail(const BindingTrail&) = delete;
+  BindingTrail& operator=(const BindingTrail&) = delete;
+  ~BindingTrail() {
+    for (size_t slot : filled_) binding_.clear(slot);
+  }
+
+  void record(size_t slot) { filled_.push_back(slot); }
+
+  // Keeps the values filled so far instead of undoing them, for a caller that
+  // is building a binding to hold on to rather than searching.
+  void keep() { filled_.clear(); }
+
+ private:
+  Binding& binding_;
+  absl::InlinedVector<size_t, 8> filled_;
+};
 
 // One ground atom: its argument tuple plus the ASPIF atom number assigned to
 // it, e.g. {1, abc} and 7 for p(1, abc) numbered 7.
@@ -111,8 +191,13 @@ struct GroundAtom {
 
 // One predicate's ground atoms found so far, e.g. the two GroundAtoms for
 // edge(a, b) and edge(b, c) once both have been derived for edge/2.
+//
+// `atoms` is a deque because a join hands out pointers into it and then derives
+// new atoms while it is still reading: a deque keeps the atoms already in it
+// where they are when it grows, and a vector would move them out from under
+// those pointers.
 struct PredData {
-  std::vector<GroundAtom> atoms;             // in first-derived order
+  std::deque<GroundAtom> atoms;              // in first-derived order
   absl::flat_hash_map<Tuple, size_t> index;  // args -> position in `atoms`
 
   // How many atoms the predicate had when the current derivation pass started,
@@ -207,13 +292,13 @@ absl::StatusOr<std::optional<Value>> eval_term(const Term& term,
       return Value::make_function(atom.name, std::move(args));
     }
     case Term::VariableKind: {
-      const std::string& name = static_cast<const Variable&>(term).name;
-      auto it = binding.find(name);
-      if (it == binding.end()) {
+      const Variable& variable = static_cast<const Variable&>(term);
+      const Value* value = binding.find(variable);
+      if (value == nullptr) {
         return absl::InvalidArgumentError(absl::StrCat(
-            "variable '", name, "' is not bound by the rule body"));
+            "variable '", variable.name, "' is not bound by the rule body"));
       }
-      return it->second;
+      return *value;
     }
     case Term::AnonymousVariableKind:
       return absl::InvalidArgumentError(
@@ -274,19 +359,23 @@ absl::StatusOr<std::optional<Tuple>> eval_args(const ClassicalLiteral& literal,
 }
 
 // Tries to match one argument term against one stored value, extending
-// `binding` with whatever variables the match binds. Returns false on a
-// mismatch, in which case `binding` may already hold bindings from the part
-// that did match, so the caller must discard it.
+// `binding` with whatever variables the match binds and recording each of them
+// in `trail`. Returns false on a mismatch, in which case `binding` still holds
+// whatever the part that did match bound, so the caller must let the trail undo
+// it before trying anything else.
 //
 // A function term matches value by value against a stored function of the
 // same name and arity, e.g. 'f(X, b)' matches a stored f(1, b) and binds
 // X to 1.
 absl::StatusOr<bool> match_term(const Term& arg, const Value& value,
-                                Binding& binding) {
+                                Binding& binding, BindingTrail& trail) {
   if (arg.kind == Term::VariableKind) {
-    const std::string& name = static_cast<const Variable&>(arg).name;
-    auto [it, inserted] = binding.try_emplace(name, value);
-    return inserted || it->second == value;
+    size_t slot = binding.slot_of(static_cast<const Variable&>(arg));
+    const Value* bound = binding.at(slot);
+    if (bound != nullptr) return *bound == value;
+    binding.set(slot, value);
+    trail.record(slot);
+    return true;
   }
   if (arg.kind == Term::AnonymousVariableKind) return true;
   if (arg.kind == Term::AtomKind) {
@@ -297,8 +386,8 @@ absl::StatusOr<bool> match_term(const Term& arg, const Value& value,
         return false;
       }
       for (size_t k = 0; k < value.args.size(); ++k) {
-        ASSIGN_OR_RETURN(bool ok,
-                         match_term(*(*atom.args)[k], value.args[k], binding));
+        ASSIGN_OR_RETURN(bool ok, match_term(*(*atom.args)[k], value.args[k],
+                                             binding, trail));
         if (!ok) return false;
       }
       return true;
@@ -343,22 +432,20 @@ absl::StatusOr<bool> args_can_match(const ClassicalLiteral& literal,
   return true;
 }
 
-// Tries to match `literal`'s arguments against a stored tuple. On a match,
-// returns a copy of `binding` extended with any variables the match binds;
-// on a mismatch, returns nullopt. `tuple` has one value per argument: the
-// store groups atoms by name and arity, so every tuple stored under the
-// literal's predicate has the literal's arity.
-absl::StatusOr<std::optional<Binding>> match_args(
-    const ClassicalLiteral& literal, const Tuple& tuple,
-    const Binding& binding) {
-  Binding extended = binding;
+// Tries to match `literal`'s arguments against a stored tuple, extending
+// `binding` with any variables the match binds and recording them in `trail`.
+// `tuple` has one value per argument: the store groups atoms by name and arity,
+// so every tuple stored under the literal's predicate has the literal's arity.
+absl::StatusOr<bool> match_args(const ClassicalLiteral& literal,
+                                const Tuple& tuple, Binding& binding,
+                                BindingTrail& trail) {
   size_t n = literal.args ? literal.args->size() : 0;
   for (size_t k = 0; k < n; ++k) {
     ASSIGN_OR_RETURN(bool ok,
-                     match_term(*(*literal.args)[k], tuple[k], extended));
-    if (!ok) return std::nullopt;
+                     match_term(*(*literal.args)[k], tuple[k], binding, trail));
+    if (!ok) return false;
   }
-  return extended;
+  return true;
 }
 
 // One rule body, split into the kinds of items grounding treats differently.
@@ -421,7 +508,48 @@ BodyParts split_body(const Body* body) {
 struct RuleView {
   const ClassicalLiteral* head = nullptr;
   BodyParts parts;
+  // Numbers every variable the rule mentions, head and body alike, including
+  // the ones inside its aggregates. A rule's bindings all index by these.
+  VarSlots slots;
 };
+
+// Numbers every variable in the rule, so that grounding it can look variables
+// up by slot. An aggregate's variables are numbered here too, and by name like
+// all the others, so an element condition mentioning the enclosing rule's X
+// reads the value the rule bound.
+VarSlots make_var_slots(const RuleView& rule) {
+  VarSlots slots;
+  absl::flat_hash_map<std::string_view, size_t> by_name;
+  auto add_from = [&](const Literal& literal) {
+    collect::for_each_variable(
+        literal, [&](const Variable& var) { slots.add(var, by_name); });
+  };
+  auto add_from_term = [&](const Term& term) {
+    collect::for_each_variable(
+        term, [&](const Variable& var) { slots.add(var, by_name); });
+  };
+
+  if (rule.head != nullptr) add_from(*rule.head);
+  for (const ClassicalLiteral* literal : rule.parts.positive)
+    add_from(*literal);
+  for (const ClassicalLiteral* literal : rule.parts.negative)
+    add_from(*literal);
+  for (const NafLiteral* naf : rule.parts.comparisons) add_from(*naf->literal);
+  for (const Aggregate* agg : rule.parts.aggregates) {
+    if (agg->lb_term != nullptr) add_from_term(*agg->lb_term);
+    if (agg->ub_term != nullptr) add_from_term(*agg->ub_term);
+    if (agg->elements == nullptr) continue;
+    for (const auto& element : *agg->elements) {
+      if (element->terms != nullptr) {
+        for (const auto& term : *element->terms) add_from_term(*term);
+      }
+      if (element->literals != nullptr) {
+        for (const auto& naf : *element->literals) add_from(*naf->literal);
+      }
+    }
+  }
+  return slots;
+}
 
 // Checks that the program is a normalized program the grounder can handle
 // and splits each statement into a RuleView.
@@ -447,6 +575,7 @@ absl::StatusOr<std::vector<RuleView>> make_rule_views(const Program& prog) {
       rule.head = head.literals[0].get();
     }
     rule.parts = split_body(statement->body.get());
+    rule.slots = make_var_slots(rule);
     rules.push_back(std::move(rule));
   }
   return rules;
@@ -502,22 +631,22 @@ bool builtin_holds(BinopType op, const Value& left, const Value& right) {
 // A comparison read as an assignment: the variable it binds and the term
 // whose value the variable takes, e.g. Y and 'X + 1' for 'Y = X + 1'.
 struct Assignment {
-  std::string_view name;
+  const Variable* variable;
   const Term* value;
 };
 
 // The variable on one side of a comparison that still needs a value, e.g. the
 // Y of 'Y = X + 1'. A side that is not a plain variable, is not an equality,
-// or holds an already-bound variable gives nullopt.
-std::optional<std::string_view> unbound_var(const Term* term, BinopType op,
-                                            const Binding& binding) {
+// or holds an already-bound variable gives null.
+const Variable* unbound_var(const Term* term, BinopType op,
+                            const Binding& binding) {
   if (term == nullptr || op != BinopType::kEQUAL ||
       term->kind != Term::VariableKind) {
-    return std::nullopt;
+    return nullptr;
   }
-  std::string_view name = static_cast<const Variable&>(*term).name;
-  if (binding.contains(name)) return std::nullopt;
-  return name;
+  const Variable& variable = static_cast<const Variable&>(*term);
+  if (binding.contains(variable)) return nullptr;
+  return &variable;
 }
 
 // Reads `naf` as an assignment, e.g. 'Y = X + 1' assigns to Y. Only an
@@ -527,15 +656,13 @@ std::optional<Assignment> assignment_of(const NafLiteral& naf,
                                         const Binding& binding) {
   const auto& builtin = static_cast<const BuiltinAtom&>(*naf.literal);
   if (naf.naf) return std::nullopt;
-  std::optional<std::string_view> left =
-      unbound_var(builtin.left.get(), builtin.op, binding);
-  if (left.has_value()) {
-    return Assignment{.name = *left, .value = builtin.right.get()};
+  const Variable* left = unbound_var(builtin.left.get(), builtin.op, binding);
+  if (left != nullptr) {
+    return Assignment{.variable = left, .value = builtin.right.get()};
   }
-  std::optional<std::string_view> right =
-      unbound_var(builtin.right.get(), builtin.op, binding);
-  if (right.has_value()) {
-    return Assignment{.name = *right, .value = builtin.left.get()};
+  const Variable* right = unbound_var(builtin.right.get(), builtin.op, binding);
+  if (right != nullptr) {
+    return Assignment{.variable = right, .value = builtin.left.get()};
   }
   return std::nullopt;
 }
@@ -543,12 +670,11 @@ std::optional<Assignment> assignment_of(const NafLiteral& naf,
 // Whether every variable in `term` already has a value, i.e. whether the term
 // can be evaluated at all.
 bool is_bound(const Term& term, const Binding& binding) {
-  absl::flat_hash_set<std::string_view> vars;
-  collect::collect_variables(term, vars);
-  for (std::string_view var : vars) {
-    if (!binding.contains(var)) return false;
-  }
-  return true;
+  bool bound = true;
+  collect::for_each_variable(term, [&](const Variable& var) {
+    if (!binding.contains(var)) bound = false;
+  });
+  return bound;
 }
 
 // Extends `binding` with the variables the body's assignments bind, e.g. 'Y =
@@ -557,8 +683,8 @@ bool is_bound(const Term& term, const Binding& binding) {
 //
 // Returns false when an assignment's value is ill-formed, e.g. the 'Y = 1 / 0'
 // that 'Y = 1 / X' becomes under {X: 0}: the binding builds no rule instance.
-absl::StatusOr<bool> bind_assignments(const BodyParts& parts,
-                                      Binding& binding) {
+absl::StatusOr<bool> bind_assignments(const BodyParts& parts, Binding& binding,
+                                      BindingTrail& trail) {
   // One assignment can bind a variable another needs, e.g. 'Y = X + 1, Z = Y +
   // 1', so passes repeat until one binds nothing new. A pass skips the
   // assignments already made: their variables are bound.
@@ -572,7 +698,9 @@ absl::StatusOr<bool> bind_assignments(const BodyParts& parts,
       ASSIGN_OR_RETURN(std::optional<Value> value,
                        eval_term(*assignment->value, binding));
       if (!value.has_value()) return false;
-      binding.emplace(assignment->name, *std::move(value));
+      size_t slot = binding.slot_of(*assignment->variable);
+      binding.set(slot, *std::move(value));
+      trail.record(slot);
       changed = true;
     }
   }
@@ -620,6 +748,23 @@ AtomRange scan_range(const PredData& data, std::optional<size_t> delta_position,
     return {data.size_before_prev_pass, data.size_before_pass};
   }
   return {0, data.size_before_pass};
+}
+
+// The order a join visits a body's positive literals in. The delta literal goes
+// first: it reads only what the previous pass derived, which is usually a small
+// fraction of the store, so starting there keeps the partial instances the join
+// carries around few. Left to right, the join would instead start by building
+// one partial instance per atom of the first literal and only then discover
+// that the delta has nothing to join them with.
+std::vector<size_t> join_order(size_t count,
+                               std::optional<size_t> delta_position) {
+  std::vector<size_t> order;
+  order.reserve(count);
+  if (delta_position.has_value()) order.push_back(*delta_position);
+  for (size_t k = 0; k < count; ++k) {
+    if (k != delta_position) order.push_back(k);
+  }
+  return order;
 }
 
 // Whether `term` holds a '_' anywhere, e.g. the 'f(_)' of 'p(f(_))'. Such a
@@ -717,6 +862,44 @@ absl::StatusOr<std::optional<Tuple>> probe_key(
   return key;
 }
 
+// What a completed rule instance is handed to. Returning a non-ok status stops
+// the search.
+//
+// The instance is the search's own live state, so it stays valid only for the
+// duration of the call. Every caller uses it and moves on, which is what lets
+// the join get away with never copying a binding.
+using InstanceFn = absl::FunctionRef<absl::Status(const Instance&)>;
+
+// One step of a join: the positive literal it matches and the store's atoms for
+// that predicate, grouped by the argument positions whose values are known by
+// the time the step runs.
+//
+// A step is set up the first time the search reaches it rather than up front,
+// because which positions it can probe by depends on what the earlier steps
+// have bound. That answer is the same every time the search arrives here: the
+// steps run in a fixed order and each one binds exactly the variables its
+// literal mentions, whatever values it matched. So the index is built once and
+// reused for every partial instance that reaches this step.
+struct JoinStep {
+  const ClassicalLiteral* literal = nullptr;
+  std::vector<size_t> positions;
+  absl::flat_hash_map<Tuple, std::vector<const GroundAtom*>> index;
+  bool ready = false;
+  // Set when the predicate has no atoms at all, which means no instance can get
+  // past this step.
+  bool dead = false;
+};
+
+// One join in progress: the body it is satisfying, the store it reads, and the
+// steps it runs in order.
+struct Join {
+  const BodyParts& parts;
+  const Store& store;
+  std::vector<size_t> order;  // positive literal positions, delta first
+  std::optional<size_t> delta_position;
+  std::vector<JoinStep> steps;  // one per entry of `order`, in that order
+};
+
 // find_instances() and bind_agg_outputs() call each other: grounding an
 // aggregate's elements needs find_instances() for the element conditions.
 // Aggregates cannot nest, so the recursion stops one level down.
@@ -724,80 +907,114 @@ absl::StatusOr<std::vector<Instance>> bind_agg_outputs(
     const BodyParts& parts, const Store& store,
     std::vector<Instance> instances);
 
-// Finds every way to satisfy the body with the atoms currently in the store.
-// Works through the positive literals left to right, extending each partial
-// instance with every stored tuple that matches, then keeps the instances
-// whose assignments and comparisons work out. An aggregate that binds a
-// variable to its value, e.g. '#count{X : p(X)} = S', splits each instance
-// into one per value it can take. 'not' literals never filter here; the
-// caller decides what to do with them.
+absl::Status extend(Join& join, size_t depth, Instance& instance,
+                    const InstanceFn& emit);
+
+// Hands `emit` the instances that survive the parts of the body that are
+// decided once every positive literal has matched: the assignments, the
+// aggregates, and the comparisons.
+absl::Status finish(const Join& join, Instance& instance,
+                    const InstanceFn& emit) {
+  BindingTrail trail(instance.binding);
+  ASSIGN_OR_RETURN(bool ok,
+                   bind_assignments(join.parts, instance.binding, trail));
+  if (!ok) return absl::OkStatus();
+
+  if (join.parts.aggregates.empty()) {
+    // Every variable the body binds has a value by now, so all the comparisons
+    // are decidable.
+    ASSIGN_OR_RETURN(bool holds,
+                     comparisons_hold(join.parts, instance.binding));
+    if (!holds) return absl::OkStatus();
+    return emit(instance);
+  }
+
+  // An aggregate that binds a variable to its value, e.g. '#count{X : p(X)} =
+  // S', splits the instance into one per value the aggregate can take, so this
+  // is the one place the search works on copies.
+  ASSIGN_OR_RETURN(std::vector<Instance> expanded,
+                   bind_agg_outputs(join.parts, join.store,
+                                    std::vector<Instance>{instance}));
+  for (const Instance& next : expanded) {
+    ASSIGN_OR_RETURN(bool holds, comparisons_hold(join.parts, next.binding));
+    if (holds) RETURN_IF_ERROR(emit(next));
+  }
+  return absl::OkStatus();
+}
+
+// Sets up the step at `depth` against the variables `binding` has bound by the
+// time the search first reaches it.
+void prepare_step(Join& join, size_t depth, const Binding& binding) {
+  JoinStep& step = join.steps[depth];
+  step.ready = true;
+  size_t position = join.order[depth];
+  const ClassicalLiteral& literal = *join.parts.positive[position];
+  const PredData* data = join.store.find(pred_key(literal));
+  if (data == nullptr) {
+    step.dead = true;
+    return;
+  }
+  step.literal = &literal;
+  step.positions = probeable_positions(literal, binding);
+  step.index = index_atoms(
+      *data, scan_range(*data, join.delta_position, position), step.positions);
+}
+
+// Extends `instance` with every stored atom the step at `depth` can match, and
+// recurses into the step after it.
+absl::Status extend(Join& join, size_t depth, Instance& instance,
+                    const InstanceFn& emit) {
+  if (depth == join.order.size()) return finish(join, instance, emit);
+
+  if (!join.steps[depth].ready) prepare_step(join, depth, instance.binding);
+  const JoinStep& step = join.steps[depth];
+  if (step.dead) return absl::OkStatus();
+
+  ASSIGN_OR_RETURN(std::optional<Tuple> key,
+                   probe_key(*step.literal, step.positions, instance.binding));
+  if (!key.has_value()) return absl::OkStatus();
+  auto it = step.index.find(*key);
+  if (it == step.index.end()) return absl::OkStatus();
+
+  // The candidates already agree on the probed positions, so match_args is here
+  // to bind the variables in the positions still open.
+  for (const GroundAtom* atom : it->second) {
+    BindingTrail trail(instance.binding);
+    ASSIGN_OR_RETURN(bool ok, match_args(*step.literal, atom->args,
+                                         instance.binding, trail));
+    if (!ok) continue;
+    instance.matched.push_back(atom->id);
+    absl::Status status = extend(join, depth + 1, instance, emit);
+    instance.matched.pop_back();
+    RETURN_IF_ERROR(status);
+  }
+  return absl::OkStatus();
+}
+
+// Hands `emit` every way to satisfy the body with the atoms currently in the
+// store. Works through the positive literals one at a time, matching each
+// against the store and backtracking, then keeps the instances whose
+// assignments, aggregates, and comparisons work out. 'not' literals never
+// filter here; the caller decides what to do with them.
 //
-// `seed_binding` lets a caller start from variables already bound by an
-// enclosing scope, e.g. grounding an aggregate element's condition under the
-// enclosing rule instance's binding.
+// `seed` is the binding to start from: an empty one for a rule, or, for an
+// aggregate element's condition, the enclosing rule instance's binding, so that
+// the condition sees the variables the rule already bound.
 //
 // `delta_position` makes the join semi-naive: see scan_range. Only
 // derive_atoms() passes one; every other caller wants every instance the store
 // supports.
-absl::StatusOr<std::vector<Instance>> find_instances(
-    const BodyParts& parts, const Store& store, Binding seed_binding = {},
+absl::Status find_instances(
+    const BodyParts& parts, const Store& store, Binding seed,
+    const InstanceFn& emit,
     std::optional<size_t> delta_position = std::nullopt) {
-  std::vector<Instance> instances;
-  instances.push_back(Instance{std::move(seed_binding), {}});
-  for (size_t position = 0; position < parts.positive.size(); ++position) {
-    if (instances.empty()) return std::vector<Instance>();
-    const ClassicalLiteral& literal = *parts.positive[position];
-    const PredData* data = store.find(pred_key(literal));
-    // A predicate with no atoms at all means the body cannot be satisfied.
-    if (data == nullptr) return std::vector<Instance>();
-
-    // Every instance binds the same variables, since they all come from the
-    // same seed and the same earlier literals, so the first one decides which
-    // positions this step can look atoms up by.
-    const std::vector<size_t> positions =
-        probeable_positions(literal, instances.front().binding);
-    const absl::flat_hash_map<Tuple, std::vector<const GroundAtom*>> index =
-        index_atoms(*data, scan_range(*data, delta_position, position),
-                    positions);
-
-    std::vector<Instance> extended;
-    for (const Instance& partial : instances) {
-      ASSIGN_OR_RETURN(std::optional<Tuple> key,
-                       probe_key(literal, positions, partial.binding));
-      if (!key.has_value()) continue;
-      auto it = index.find(*key);
-      if (it == index.end()) continue;
-      // The candidates already agree on the probed positions, so match_args is
-      // here to bind the variables in the positions still open.
-      for (const GroundAtom* atom : it->second) {
-        ASSIGN_OR_RETURN(std::optional<Binding> bound,
-                         match_args(literal, atom->args, partial.binding));
-        if (!bound.has_value()) continue;
-        Instance next{std::move(*bound), partial.matched};
-        next.matched.push_back(atom->id);
-        extended.push_back(std::move(next));
-      }
-    }
-    instances = std::move(extended);
-  }
-
-  std::vector<Instance> bound;
-  for (Instance& instance : instances) {
-    ASSIGN_OR_RETURN(bool ok, bind_assignments(parts, instance.binding));
-    if (ok) bound.push_back(std::move(instance));
-  }
-  if (!parts.aggregates.empty()) {
-    ASSIGN_OR_RETURN(bound, bind_agg_outputs(parts, store, std::move(bound)));
-  }
-
-  // Every variable the body binds has a value by now, so all the comparisons
-  // are decidable, including any over an aggregate's value.
-  std::vector<Instance> passing;
-  for (Instance& instance : bound) {
-    ASSIGN_OR_RETURN(bool ok, comparisons_hold(parts, instance.binding));
-    if (ok) passing.push_back(std::move(instance));
-  }
-  return passing;
+  Join join{.parts = parts,
+            .store = store,
+            .order = join_order(parts.positive.size(), delta_position),
+            .delta_position = delta_position};
+  join.steps.resize(join.order.size());
+  Instance instance{std::move(seed), {}};
+  return extend(join, 0, instance, emit);
 }
 
 // The stored atoms `literal` stands for under `binding`: the one atom it names,
@@ -817,10 +1034,13 @@ absl::StatusOr<std::vector<aspif::Atom>> matching_atoms(
     if (atom != nullptr) matched.push_back(atom->id);
     return matched;
   }
+  // Matching binds the variables under the '_', e.g. the X of 'r(X, _)', which
+  // this literal's own scope has no use for, so it happens on a scratch copy.
+  Binding scratch = binding;
   for (const GroundAtom& atom : data->atoms) {
-    ASSIGN_OR_RETURN(std::optional<Binding> bound,
-                     match_args(literal, atom.args, binding));
-    if (bound.has_value()) matched.push_back(atom.id);
+    BindingTrail trail(scratch);
+    ASSIGN_OR_RETURN(bool ok, match_args(literal, atom.args, scratch, trail));
+    if (ok) matched.push_back(atom.id);
   }
   return matched;
 }
@@ -876,37 +1096,43 @@ absl::StatusOr<std::vector<AggTuple>> collect_agg_tuples(
   for (const auto& element_ptr : *agg.elements) {
     const AggregateElement& element = *element_ptr;
     BodyParts parts = split_naf_literals(element.literals);
-    ASSIGN_OR_RETURN(std::vector<Instance> instances,
-                     find_instances(parts, store, outer_binding));
-    for (const Instance& instance : instances) {
-      // An element whose terms are ill-formed under this local binding
-      // contributes no tuple to the set.
-      ASSIGN_OR_RETURN(std::optional<Tuple> maybe_tuple,
-                       eval_terms(element.terms, instance.binding));
-      if (!maybe_tuple.has_value()) continue;
-      Tuple tuple = *std::move(maybe_tuple);
-      int64_t weight = 1;
-      if (agg.function == AggregateFunctionType::kAGGREGATE_SUM) {
-        // #sum adds up the tuples whose first term is an integer and ignores
-        // the others, e.g. '#sum{ 1 : p; a : q }' is just 1. A tuple that
-        // adds nothing needs no literal in the weight body at all. (#count
-        // does count such a tuple, which is why this only applies to #sum.)
-        if (tuple.empty() || tuple[0].kind != Value::kNumber) continue;
-        weight = tuple[0].number;
-      }
+    RETURN_IF_ERROR(find_instances(
+        parts, store, outer_binding,
+        [&](const Instance& instance) -> absl::Status {
+          // An element whose terms are ill-formed under this local binding
+          // contributes no tuple to the set.
+          ASSIGN_OR_RETURN(std::optional<Tuple> maybe_tuple,
+                           eval_terms(element.terms, instance.binding));
+          if (!maybe_tuple.has_value()) return absl::OkStatus();
+          Tuple tuple = *std::move(maybe_tuple);
+          int64_t weight = 1;
+          if (agg.function == AggregateFunctionType::kAGGREGATE_SUM) {
+            // #sum adds up the tuples whose first term is an integer and
+            // ignores the others, e.g. '#sum{ 1 : p; a : q }' is just 1. A
+            // tuple that adds nothing needs no literal in the weight body at
+            // all. (#count does count such a tuple, which is why this only
+            // applies to #sum.)
+            if (tuple.empty() || tuple[0].kind != Value::kNumber) {
+              return absl::OkStatus();
+            }
+            weight = tuple[0].number;
+          }
 
-      auto [it, inserted] = seen.try_emplace(tuple, tuples.size());
-      if (inserted) {
-        tuples.push_back(AggTuple{.tuple = std::move(tuple), .weight = weight});
-      }
+          auto [it, inserted] = seen.try_emplace(tuple, tuples.size());
+          if (inserted) {
+            tuples.push_back(
+                AggTuple{.tuple = std::move(tuple), .weight = weight});
+          }
 
-      ASSIGN_OR_RETURN(std::optional<std::vector<aspif::Lit>> neg,
-                       negative_lits(parts.negative, instance.binding, store));
-      if (!neg.has_value()) continue;
-      std::vector<aspif::Lit> support = instance.matched;
-      support.insert(support.end(), neg->begin(), neg->end());
-      tuples[it->second].supports.push_back(std::move(support));
-    }
+          ASSIGN_OR_RETURN(
+              std::optional<std::vector<aspif::Lit>> neg,
+              negative_lits(parts.negative, instance.binding, store));
+          if (!neg.has_value()) return absl::OkStatus();
+          std::vector<aspif::Lit> support = instance.matched;
+          support.insert(support.end(), neg->begin(), neg->end());
+          tuples[it->second].supports.push_back(std::move(support));
+          return absl::OkStatus();
+        }));
   }
   return tuples;
 }
@@ -942,39 +1168,42 @@ absl::StatusOr<std::vector<int64_t>> possible_values(
 // The variables an aggregate binds to its own value, e.g. the S of
 // '#sum{...} = S'. Either side can hold one (see unbound_var). A 'not'
 // aggregate binds nothing: it only says the value differs from the bound.
-std::vector<std::string_view> agg_output_vars(const Aggregate& agg,
-                                              const Binding& binding) {
-  std::vector<std::string_view> names;
-  if (agg.naf) return names;
-  std::optional<std::string_view> lower =
-      unbound_var(agg.lb_term.get(), agg.lb_op, binding);
-  if (lower.has_value()) names.push_back(*lower);
-  std::optional<std::string_view> upper =
-      unbound_var(agg.ub_term.get(), agg.ub_op, binding);
-  if (upper.has_value()) names.push_back(*upper);
-  return names;
+std::vector<size_t> agg_output_slots(const Aggregate& agg,
+                                     const Binding& binding) {
+  std::vector<size_t> slots;
+  if (agg.naf) return slots;
+  const Variable* lower = unbound_var(agg.lb_term.get(), agg.lb_op, binding);
+  if (lower != nullptr) slots.push_back(binding.slot_of(*lower));
+  const Variable* upper = unbound_var(agg.ub_term.get(), agg.ub_op, binding);
+  if (upper != nullptr) slots.push_back(binding.slot_of(*upper));
+  return slots;
 }
 
-// Every variable occurring anywhere in an aggregate: in its bounds, in its
-// element terms, and in its element conditions.
-absl::flat_hash_set<std::string_view> agg_variables(const Aggregate& agg) {
-  absl::flat_hash_set<std::string_view> vars;
-  if (agg.lb_term != nullptr) collect::collect_variables(*agg.lb_term, vars);
-  if (agg.ub_term != nullptr) collect::collect_variables(*agg.ub_term, vars);
-  if (agg.elements == nullptr) return vars;
+// The slots of every variable occurring anywhere in an aggregate: in its
+// bounds, in its element terms, and in its element conditions.
+absl::flat_hash_set<size_t> agg_variable_slots(const Aggregate& agg,
+                                               const Binding& binding) {
+  absl::flat_hash_set<size_t> slots;
+  auto add = [&](const Term& term) {
+    collect::for_each_variable(
+        term, [&](const Variable& var) { slots.insert(binding.slot_of(var)); });
+  };
+  if (agg.lb_term != nullptr) add(*agg.lb_term);
+  if (agg.ub_term != nullptr) add(*agg.ub_term);
+  if (agg.elements == nullptr) return slots;
   for (const auto& element : *agg.elements) {
     if (element->terms != nullptr) {
-      for (const auto& term : *element->terms) {
-        collect::collect_variables(*term, vars);
-      }
+      for (const auto& term : *element->terms) add(*term);
     }
     if (element->literals != nullptr) {
       for (const auto& naf : *element->literals) {
-        collect::collect_variables(*naf->literal, vars);
+        collect::for_each_variable(*naf->literal, [&](const Variable& var) {
+          slots.insert(binding.slot_of(var));
+        });
       }
     }
   }
-  return vars;
+  return slots;
 }
 
 // Whether one of `pending` binds a variable `agg` mentions, e.g. the X of
@@ -983,11 +1212,11 @@ absl::flat_hash_set<std::string_view> agg_variables(const Aggregate& agg) {
 bool waits_for_another(const Aggregate& agg,
                        const std::vector<const Aggregate*>& pending,
                        const Binding& binding) {
-  absl::flat_hash_set<std::string_view> vars = agg_variables(agg);
+  absl::flat_hash_set<size_t> slots = agg_variable_slots(agg, binding);
   for (const Aggregate* other : pending) {
     if (other == &agg) continue;
-    for (std::string_view name : agg_output_vars(*other, binding)) {
-      if (vars.contains(name)) return true;
+    for (size_t slot : agg_output_slots(*other, binding)) {
+      if (slots.contains(slot)) return true;
     }
   }
   return false;
@@ -997,7 +1226,7 @@ bool waits_for_another(const Aggregate& agg,
 // to that value, e.g. 'q(S) :- #count{X : p(X)} = S.' with two derivable p
 // atoms turns one instance into three, binding S to 0, 1, and 2 in turn.
 absl::StatusOr<std::vector<Instance>> expand_over_values(
-    const Aggregate& agg, const std::vector<std::string_view>& outputs,
+    const Aggregate& agg, const std::vector<size_t>& outputs,
     const BodyParts& parts, const Store& store,
     const std::vector<Instance>& instances) {
   std::vector<Instance> expanded;
@@ -1007,13 +1236,15 @@ absl::StatusOr<std::vector<Instance>> expand_over_values(
     ASSIGN_OR_RETURN(std::vector<int64_t> values, possible_values(tuples));
     for (int64_t value : values) {
       Instance next = instance;
-      for (std::string_view name : outputs) {
-        next.binding.emplace(name, Value::make_number(value));
-      }
+      for (size_t slot : outputs)
+        next.binding.set(slot, Value::make_number(value));
       // The value can complete an assignment, e.g. the 'T = S + 1' of
       // 'q(T) :- #count{X : p(X)} = S, T = S + 1.'
-      ASSIGN_OR_RETURN(bool ok, bind_assignments(parts, next.binding));
-      if (ok) expanded.push_back(std::move(next));
+      BindingTrail trail(next.binding);
+      ASSIGN_OR_RETURN(bool ok, bind_assignments(parts, next.binding, trail));
+      if (!ok) continue;
+      trail.keep();
+      expanded.push_back(std::move(next));
     }
   }
   return expanded;
@@ -1039,7 +1270,7 @@ absl::StatusOr<std::vector<Instance>> bind_agg_outputs(
       // Expanding an aggregate replaces the list, so this reads the current
       // one each time around.
       const Binding& sample = instances.front().binding;
-      std::vector<std::string_view> outputs = agg_output_vars(*agg, sample);
+      std::vector<size_t> outputs = agg_output_slots(*agg, sample);
       // An aggregate that binds nothing is a plain check on its value, which
       // emit_rules handles.
       if (outputs.empty()) continue;
@@ -1315,20 +1546,21 @@ absl::Status derive_from_rule(const RuleView& rule,
                               std::optional<size_t> delta_position,
                               Store& store, aspif::Program& aspif_prog,
                               bool& changed) {
-  ASSIGN_OR_RETURN(std::vector<Instance> instances,
-                   find_instances(rule.parts, store, {}, delta_position));
-  for (const Instance& instance : instances) {
-    ASSIGN_OR_RETURN(bool well_formed, ignored_parts_are_well_formed(
-                                           rule.parts, instance.binding));
-    if (!well_formed) continue;
-    ASSIGN_OR_RETURN(std::optional<Tuple> tuple,
-                     eval_args(*rule.head, instance.binding));
-    if (!tuple.has_value()) continue;
-    if (store.insert(pred_key(*rule.head), *std::move(tuple), aspif_prog)) {
-      changed = true;
-    }
-  }
-  return absl::OkStatus();
+  return find_instances(
+      rule.parts, store, Binding(rule.slots),
+      [&](const Instance& instance) -> absl::Status {
+        ASSIGN_OR_RETURN(bool well_formed, ignored_parts_are_well_formed(
+                                               rule.parts, instance.binding));
+        if (!well_formed) return absl::OkStatus();
+        ASSIGN_OR_RETURN(std::optional<Tuple> tuple,
+                         eval_args(*rule.head, instance.binding));
+        if (!tuple.has_value()) return absl::OkStatus();
+        if (store.insert(pred_key(*rule.head), *std::move(tuple), aspif_prog)) {
+          changed = true;
+        }
+        return absl::OkStatus();
+      },
+      delta_position);
 }
 
 // Fills `store` with every atom that could appear in an answer set, by
@@ -1396,55 +1628,54 @@ absl::Status derive_atoms(const std::vector<RuleView>& rules, Store& store,
 absl::Status emit_rules(const std::vector<RuleView>& rules, const Store& store,
                         aspif::Program& result) {
   for (const RuleView& rule : rules) {
-    ASSIGN_OR_RETURN(std::vector<Instance> instances,
-                     find_instances(rule.parts, store));
-    for (const Instance& instance : instances) {
-      // The head is looked up last, once every reason to drop the instance
-      // has been ruled out: derive_atoms() dropped the same instances, so a
-      // head atom looked up for one of them would be missing from the store.
-      aspif::Rule aspif_rule;
-      aspif_rule.body = instance.matched;
-      ASSIGN_OR_RETURN(
-          std::optional<std::vector<aspif::Lit>> neg,
-          negative_lits(rule.parts.negative, instance.binding, store));
-      if (!neg.has_value()) continue;
-      aspif_rule.body.insert(aspif_rule.body.end(), neg->begin(), neg->end());
+    RETURN_IF_ERROR(find_instances(
+        rule.parts, store, Binding(rule.slots),
+        [&](const Instance& instance) -> absl::Status {
+          // The head is looked up last, once every reason to drop the instance
+          // has been ruled out: derive_atoms() dropped the same instances, so a
+          // head atom looked up for one of them would be missing from the
+          // store.
+          aspif::Rule aspif_rule;
+          aspif_rule.body = instance.matched;
+          ASSIGN_OR_RETURN(
+              std::optional<std::vector<aspif::Lit>> neg,
+              negative_lits(rule.parts.negative, instance.binding, store));
+          if (!neg.has_value()) return absl::OkStatus();
+          aspif_rule.body.insert(aspif_rule.body.end(), neg->begin(),
+                                 neg->end());
 
-      bool well_formed = true;
-      for (const Aggregate* aggregate : rule.parts.aggregates) {
-        ASSIGN_OR_RETURN(
-            std::optional<std::vector<aspif::Lit>> extra,
-            ground_aggregate(*aggregate, instance.binding, store, result));
-        if (!extra.has_value()) {
-          well_formed = false;
-          break;
-        }
-        aspif_rule.body.insert(aspif_rule.body.end(), extra->begin(),
-                               extra->end());
-      }
-      if (!well_formed) continue;
+          for (const Aggregate* aggregate : rule.parts.aggregates) {
+            ASSIGN_OR_RETURN(
+                std::optional<std::vector<aspif::Lit>> extra,
+                ground_aggregate(*aggregate, instance.binding, store, result));
+            if (!extra.has_value()) return absl::OkStatus();
+            aspif_rule.body.insert(aspif_rule.body.end(), extra->begin(),
+                                   extra->end());
+          }
 
-      if (rule.head != nullptr) {
-        ASSIGN_OR_RETURN(std::optional<Tuple> tuple,
-                         eval_args(*rule.head, instance.binding));
-        // An ill-formed head, e.g. the 'q(X / 0)' of "q(X / 0) :- p(X).",
-        // means this instance has no ground rule. derive_atoms() skipped it
-        // for the same reason, so nothing is missing from the store.
-        if (!tuple.has_value()) continue;
-        // derive_atoms() added every derivable head atom, so a miss means the
-        // program never passed verify_safe().
-        const PredData* data = store.find(pred_key(*rule.head));
-        const GroundAtom* head = data == nullptr ? nullptr : data->find(*tuple);
-        if (head == nullptr) {
-          return absl::InternalError(
-              absl::StrCat("grounding derived no atom for the head '",
-                           printed_atom(rule.head->id, *tuple),
-                           "'; was the program checked by verify_safe()?"));
-        }
-        aspif_rule.head.push_back(head->id);
-      }
-      result.rules.push_back(std::move(aspif_rule));
-    }
+          if (rule.head != nullptr) {
+            ASSIGN_OR_RETURN(std::optional<Tuple> tuple,
+                             eval_args(*rule.head, instance.binding));
+            // An ill-formed head, e.g. the 'q(X / 0)' of "q(X / 0) :- p(X).",
+            // means this instance has no ground rule. derive_atoms() skipped it
+            // for the same reason, so nothing is missing from the store.
+            if (!tuple.has_value()) return absl::OkStatus();
+            // derive_atoms() added every derivable head atom, so a miss means
+            // the program never passed verify_safe().
+            const PredData* data = store.find(pred_key(*rule.head));
+            const GroundAtom* head =
+                data == nullptr ? nullptr : data->find(*tuple);
+            if (head == nullptr) {
+              return absl::InternalError(
+                  absl::StrCat("grounding derived no atom for the head '",
+                               printed_atom(rule.head->id, *tuple),
+                               "'; was the program checked by verify_safe()?"));
+            }
+            aspif_rule.head.push_back(head->id);
+          }
+          result.rules.push_back(std::move(aspif_rule));
+          return absl::OkStatus();
+        }));
   }
   return absl::OkStatus();
 }
@@ -1525,10 +1756,17 @@ absl::Status emit_query(const ClassicalLiteral& query, const Store& store,
   std::vector<aspif::Lit> matched;
   const PredData* data = store.find(pred_key(query));
   if (data != nullptr) {
+    // A query is its own scope, so its variables are numbered on their own
+    // rather than sharing a rule's slots.
+    VarSlots slots;
+    absl::flat_hash_map<std::string_view, size_t> by_name;
+    collect::for_each_variable(
+        query, [&](const Variable& var) { slots.add(var, by_name); });
+    Binding binding(slots);
     for (const GroundAtom& atom : data->atoms) {
-      ASSIGN_OR_RETURN(std::optional<Binding> bound,
-                       match_args(query, atom.args, Binding{}));
-      if (bound.has_value()) matched.push_back(atom.id);
+      BindingTrail trail(binding);
+      ASSIGN_OR_RETURN(bool ok, match_args(query, atom.args, binding, trail));
+      if (ok) matched.push_back(atom.id);
     }
   }
   // One match needs no atom of its own: assuming that atom means the same

@@ -17,7 +17,11 @@ namespace collect {
 // Invokes `visit` once per variable occurrence within the node, in left-to-
 // right order. Repeated variables are visited repeatedly; callers that want
 // distinct names should dedupe (or use a collect_variables overload).
-using VariableVisitor = std::function<void(std::string_view)>;
+//
+// The visitor gets the Variable node rather than just its name, so a caller
+// that wants to attach something to each occurrence, e.g. the grounder
+// numbering a rule's variables, can key it on the node's address.
+using VariableVisitor = std::function<void(const Variable&)>;
 void for_each_variable(const Term& term, const VariableVisitor& visit);
 void for_each_variable(const Literal& literal, const VariableVisitor& visit);
 

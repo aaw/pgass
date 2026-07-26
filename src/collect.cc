@@ -7,7 +7,7 @@ namespace collect {
 void for_each_variable(const Term& term, const VariableVisitor& visit) {
   switch (term.kind) {
     case Term::VariableKind:
-      visit(static_cast<const Variable&>(term).name);
+      visit(static_cast<const Variable&>(term));
       break;
     case Term::AtomKind: {
       const auto& atom = static_cast<const Atom&>(term);
@@ -77,22 +77,23 @@ void for_each_classical_literal(std::vector<std::unique_ptr<NafLiteral>>& nafs,
 
 void collect_variables(const Term& term,
                        absl::flat_hash_set<std::string_view>& out) {
-  for_each_variable(term, [&](std::string_view name) { out.insert(name); });
+  for_each_variable(term, [&](const Variable& var) { out.insert(var.name); });
 }
 
 void collect_variables(const Literal& literal,
                        absl::flat_hash_set<std::string_view>& out) {
-  for_each_variable(literal, [&](std::string_view name) { out.insert(name); });
+  for_each_variable(literal,
+                    [&](const Variable& var) { out.insert(var.name); });
 }
 
 void collect_variables(const Term& term, std::vector<std::string>& out) {
   for_each_variable(term,
-                    [&](std::string_view name) { push_unique(name, out); });
+                    [&](const Variable& var) { push_unique(var.name, out); });
 }
 
 void collect_variables(const Literal& literal, std::vector<std::string>& out) {
   for_each_variable(literal,
-                    [&](std::string_view name) { push_unique(name, out); });
+                    [&](const Variable& var) { push_unique(var.name, out); });
 }
 
 void for_each_classical_literal(Head& head,

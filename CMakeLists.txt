@@ -5,6 +5,13 @@ project(ParseProject LANGUAGES CXX)
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
+# An unset build type means no optimization flags at all, which costs grounding
+# a factor of about 35, so `make` gets an optimized build with debug info by
+# default. `make asan` configures its own build directory as Debug.
+if(NOT CMAKE_BUILD_TYPE AND NOT CMAKE_CONFIGURATION_TYPES)
+  set(CMAKE_BUILD_TYPE RelWithDebInfo CACHE STRING "Build type" FORCE)
+endif()
+
 enable_testing()
 
 # The warning flags every target in this project builds with.
