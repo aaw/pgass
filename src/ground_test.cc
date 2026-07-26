@@ -36,6 +36,12 @@ TEST(GroundTest, Facts) {
             "0\n");
 }
 
+TEST(GroundTest, ProgramWithNoStatementsGroundsToAnEmptyAspifProgram) {
+  auto out = ground_source("% just a comment\n");
+  ASSERT_TRUE(out.ok()) << out.status();
+  EXPECT_EQ(*out, "asp 1 0 0\n0\n");
+}
+
 TEST(GroundTest, StringAtomPrintsWithOnePairOfQuotes) {
   auto out = ground_source("p(\"a b\").");
   ASSERT_TRUE(out.ok()) << out.status();

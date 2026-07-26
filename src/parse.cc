@@ -23,6 +23,8 @@ Parser::Parser(std::string_view source) : lexer_(source) {}
 // <program> ::= [<statements>] [<query>]
 absl::StatusOr<std::unique_ptr<Program>> Parser::parse_program() {
   auto program = std::make_unique<Program>();
+  program->statements =
+      std::make_unique<std::vector<std::unique_ptr<Statement>>>();
 
   {
     LexerCheckpoint try_statements(lexer_);

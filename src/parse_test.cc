@@ -362,6 +362,16 @@ TEST_F(ParserTest, ParseProgramReachability) {
   ASSERT_TRUE(prog.ok()) << prog.status();
 }
 
+TEST_F(ParserTest, ParseProgramWithNoStatementsGivesAnEmptyList) {
+  for (std::string_view source : {"", "   \n\t ", "% just a comment\n"}) {
+    Parser parser(source);
+    auto prog = parser.parse_program();
+    ASSERT_TRUE(prog.ok()) << prog.status();
+    ASSERT_NE((*prog)->statements, nullptr) << "source: " << source;
+    EXPECT_TRUE((*prog)->statements->empty());
+  }
+}
+
 // Error message format tests — each pins the exact string so they double as
 // examples of what users will see.
 
