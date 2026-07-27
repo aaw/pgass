@@ -100,6 +100,17 @@ target_link_libraries(aspif_lib
     absl::strings
 )
 
+add_library(symbols_lib STATIC src/symbols.cc)
+target_compile_options(symbols_lib PRIVATE ${PGASS_WARNINGS})
+target_include_directories(symbols_lib PUBLIC src)
+target_link_libraries(symbols_lib
+  PUBLIC
+    absl::node_hash_map
+    absl::span
+  PRIVATE
+    absl::strings
+)
+
 add_library(ground_lib STATIC src/ground.cc)
 target_compile_options(ground_lib PRIVATE ${PGASS_WARNINGS})
 target_link_libraries(ground_lib
@@ -111,9 +122,11 @@ target_link_libraries(ground_lib
     absl::btree
     absl::flat_hash_map
     absl::flat_hash_set
+    absl::inlined_vector
     absl::strings
     collect_lib
     graph_lib
+    symbols_lib
 )
 
 add_library(format_lib STATIC src/format.cc)

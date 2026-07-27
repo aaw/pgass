@@ -18,11 +18,11 @@
 #include "absl/status/status.h"
 #include "absl/status/statusor.h"
 #include "absl/strings/str_cat.h"
-#include "absl/strings/str_join.h"
 #include "collect.h"
 #include "graph.h"
 #include "macros.h"
 #include "normalize.h"
+#include "symbols.h"
 
 namespace {
 
@@ -31,82 +31,16 @@ namespace {
 //
 // The values a variable can take, the atoms built out of them, and the
 // bindings that map a rule's variables to values while it is being ground.
+//
+// A value is a Sym, the four-byte handle a Symbols table interns it to, so
+// everything below carries and compares handles and asks the table whenever it
+// needs to know what one stands for.
 // --------------------------------------------------------------------------
 
-// A ground value: a number, a constant like abc, a quoted string like "abc",
-// or a function term like f(1, abc) whose arguments are themselves values.
-// The kind order matches the ASP-Core-2 spec, which orders integers <
-// symbolic constants < string constants < functional terms.
-struct Value {
-  enum Kind { kNumber, kConstant, kString, kFunction };
-
-  Kind kind;
-  int64_t number = 0;       // set only when kind == kNumber
-  std::string text;         // the constant's, string's, or function's name
-  std::vector<Value> args;  // set only when kind == kFunction, never empty
-
-  static Value make_number(int64_t n) { return {kNumber, n, "", {}}; }
-  static Value make_constant(std::string name) {
-    return {kConstant, 0, std::move(name), {}};
-  }
-  static Value make_string(std::string contents) {
-    return {kString, 0, std::move(contents), {}};
-  }
-  static Value make_function(std::string name, std::vector<Value> args) {
-    return {kFunction, 0, std::move(name), std::move(args)};
-  }
-
-  // The value as it prints in an answer set: 42, abc, "abc", or f(1,abc).
-  std::string printed() const;
-
-  bool operator==(const Value&) const = default;
-
-  template <typename H>
-  friend H AbslHashValue(H h, const Value& v) {
-    return H::combine(std::move(h), v.kind, v.number, v.text, v.args);
-  }
-};
-
-// Orders ground values per the ASP-Core-2 spec (see the comment on Value
-// above): numbers numerically, constants and strings lexicographically, and
-// function terms by arity first, then name, then argument by argument.
-int compare_values(const Value& a, const Value& b) {
-  if (a.kind != b.kind) return a.kind < b.kind ? -1 : 1;
-  if (a.kind == Value::kNumber) {
-    return a.number < b.number ? -1 : a.number > b.number ? 1 : 0;
-  }
-  if (a.kind == Value::kFunction && a.args.size() != b.args.size()) {
-    return a.args.size() < b.args.size() ? -1 : 1;
-  }
-  if (a.text != b.text) return a.text < b.text ? -1 : 1;
-  for (size_t k = 0; k < a.args.size(); ++k) {
-    int c = compare_values(a.args[k], b.args[k]);
-    if (c != 0) return c;
-  }
-  return 0;
-}
-
-// The argument values of one ground atom, e.g. {1, abc} for p(1, abc).
-using Tuple = std::vector<Value>;
-
-// One ground atom as it prints, e.g. p(1,abc) for the predicate p/2 and the
-// tuple {1, abc}.
-std::string printed_atom(std::string_view name, const Tuple& args) {
-  if (args.empty()) return std::string(name);
-  auto print_arg = [](std::string* out, const Value& value) {
-    out->append(value.printed());
-  };
-  return absl::StrCat(name, "(", absl::StrJoin(args, ",", print_arg), ")");
-}
-
-// A function term prints exactly like an atom of the same name and arguments,
-// e.g. the f(1,abc) that is a value and the f(1,abc) that is an atom.
-std::string Value::printed() const {
-  if (kind == kNumber) return absl::StrCat(number);
-  if (kind == kString) return absl::StrCat("\"", text, "\"");
-  if (kind == kConstant) return text;
-  return printed_atom(text, args);
-}
+// The argument values of one ground atom, e.g. {1, abc} for p(1, abc). Most
+// predicates are small, so a tuple keeps up to four handles inside itself and
+// only reaches for the heap beyond that.
+using Tuple = absl::InlinedVector<Sym, 4>;
 
 // A slot number for each variable occurrence in one rule, e.g. both X's of
 // "p(X) :- q(X)." get slot 0 and Y gets slot 1. Occurrences of the same name
@@ -131,36 +65,33 @@ struct VarSlots {
 
 // The values one candidate rule instance gives the rule's variables, e.g. {X:
 // 1, Y: abc} while matching the body of "p(X, Y) :- q(X), r(Y)." against q(1)
-// and r(abc). A variable with no value yet has an empty slot.
+// and r(abc). A variable with no value yet reads as kNoSym.
 class Binding {
  public:
   explicit Binding(const VarSlots& slots)
-      : slots_(&slots), values_(slots.count) {}
+      : slots_(&slots), values_(slots.count, kNoSym) {}
 
   // The slot `var` reads and writes. Every variable of the rule the binding
   // belongs to has one.
   size_t slot_of(const Variable& var) const { return slots_->of_node.at(&var); }
 
-  // The value of `var`, or null if it has none yet. A variable from outside
+  // The value of `var`, or kNoSym if it has none yet. A variable from outside
   // this binding's rule, which cannot happen for a well-formed rule, also
   // reads as having none.
-  const Value* find(const Variable& var) const {
+  Sym find(const Variable& var) const {
     auto it = slots_->of_node.find(&var);
-    if (it == slots_->of_node.end()) return nullptr;
+    if (it == slots_->of_node.end()) return kNoSym;
     return at(it->second);
   }
-  bool contains(const Variable& var) const { return find(var) != nullptr; }
+  bool contains(const Variable& var) const { return find(var) != kNoSym; }
 
-  const Value* at(size_t slot) const {
-    const std::optional<Value>& value = values_[slot];
-    return value.has_value() ? &*value : nullptr;
-  }
-  void set(size_t slot, Value value) { values_[slot] = std::move(value); }
-  void clear(size_t slot) { values_[slot].reset(); }
+  Sym at(size_t slot) const { return values_[slot]; }
+  void set(size_t slot, Sym value) { values_[slot] = value; }
+  void clear(size_t slot) { values_[slot] = kNoSym; }
 
  private:
   const VarSlots* slots_;
-  std::vector<std::optional<Value>> values_;
+  std::vector<Sym> values_;
 };
 
 // Undoes the slots filled while it is alive, so a join can try the next
@@ -288,18 +219,20 @@ struct Store {
 // matching 'f(X, b)' against a stored f(1, b) binds X to 1.
 // --------------------------------------------------------------------------
 
-absl::StatusOr<std::optional<Value>> eval_term(const Term& term,
-                                               const Binding& binding);
+absl::StatusOr<std::optional<Sym>> eval_term(const Term& term,
+                                             const Binding& binding,
+                                             Symbols& syms);
 
 // Evaluates a term that has to come out as a number, e.g. either side of a
 // '+'. Returns nullopt if it doesn't, e.g. for the 'a + 1' that 'X + 1'
 // becomes under the binding {X: a}: arithmetic is only defined on integers,
 // so that binding is ill-formed and its rule instance does not exist.
 absl::StatusOr<std::optional<int64_t>> eval_number(const Term& term,
-                                                   const Binding& binding) {
-  ASSIGN_OR_RETURN(std::optional<Value> value, eval_term(term, binding));
-  if (!value.has_value() || value->kind != Value::kNumber) return std::nullopt;
-  return value->number;
+                                                   const Binding& binding,
+                                                   Symbols& syms) {
+  ASSIGN_OR_RETURN(std::optional<Sym> value, eval_term(term, binding, syms));
+  if (!value.has_value() || !syms.is_number(*value)) return std::nullopt;
+  return syms.number_of(*value);
 }
 
 // Evaluates a term to its ground value, e.g. 'X' evaluates to 1 under the
@@ -309,36 +242,38 @@ absl::StatusOr<std::optional<int64_t>> eval_number(const Term& term,
 // 'X / 0' or 'a + 1'. ASP-Core-2 calls such a binding ill-formed and builds
 // no ground instance from it, so callers drop the instance rather than
 // failing the whole grounding.
-absl::StatusOr<std::optional<Value>> eval_term(const Term& term,
-                                               const Binding& binding) {
+absl::StatusOr<std::optional<Sym>> eval_term(const Term& term,
+                                             const Binding& binding,
+                                             Symbols& syms) {
   switch (term.kind) {
     case Term::NumberKind:
       // TODO: wraps on this cast and on overflow below; TODO.md tracks moving
       // to unlimited precision integers.
-      return Value::make_number(
+      return syms.number(
           static_cast<int64_t>(static_cast<const Number&>(term).value));
     case Term::StringKind:
-      return Value::make_string(static_cast<const String&>(term).value);
+      return syms.string(static_cast<const String&>(term).value);
     case Term::AtomKind: {
       const Atom& atom = static_cast<const Atom&>(term);
-      if (atom.args == nullptr) return Value::make_constant(atom.name);
-      std::vector<Value> args;
+      if (atom.args == nullptr) return syms.constant(atom.name);
+      std::vector<Sym> args;
       args.reserve(atom.args->size());
       for (const auto& arg : *atom.args) {
-        ASSIGN_OR_RETURN(std::optional<Value> value, eval_term(*arg, binding));
+        ASSIGN_OR_RETURN(std::optional<Sym> value,
+                         eval_term(*arg, binding, syms));
         if (!value.has_value()) return std::nullopt;
-        args.push_back(std::move(*value));
+        args.push_back(*value);
       }
-      return Value::make_function(atom.name, std::move(args));
+      return syms.function(atom.name, std::move(args));
     }
     case Term::VariableKind: {
       const Variable& variable = static_cast<const Variable&>(term);
-      const Value* value = binding.find(variable);
-      if (value == nullptr) {
+      const Sym value = binding.find(variable);
+      if (value == kNoSym) {
         return absl::InvalidArgumentError(absl::StrCat(
             "variable '", variable.name, "' is not bound by the rule body"));
       }
-      return *value;
+      return value;
     }
     case Term::AnonymousVariableKind:
       return absl::InvalidArgumentError(
@@ -346,28 +281,28 @@ absl::StatusOr<std::optional<Value>> eval_term(const Term& term,
     case Term::NegatedTermKind: {
       const NegatedTerm& negated = static_cast<const NegatedTerm&>(term);
       ASSIGN_OR_RETURN(std::optional<int64_t> value,
-                       eval_number(*negated.term, binding));
+                       eval_number(*negated.term, binding, syms));
       if (!value.has_value()) return std::nullopt;
-      return Value::make_number(-*value);
+      return syms.number(-*value);
     }
     case Term::TermOperationKind: {
       const TermOperation& operation = static_cast<const TermOperation&>(term);
       ASSIGN_OR_RETURN(std::optional<int64_t> left,
-                       eval_number(*operation.left, binding));
+                       eval_number(*operation.left, binding, syms));
       ASSIGN_OR_RETURN(std::optional<int64_t> right,
-                       eval_number(*operation.right, binding));
+                       eval_number(*operation.right, binding, syms));
       if (!left.has_value() || !right.has_value()) return std::nullopt;
       switch (operation.op) {
         case OperationType::kPLUS:
-          return Value::make_number(*left + *right);
+          return syms.number(*left + *right);
         case OperationType::kMINUS:
-          return Value::make_number(*left - *right);
+          return syms.number(*left - *right);
         case OperationType::kTIMES:
-          return Value::make_number(*left * *right);
+          return syms.number(*left * *right);
         case OperationType::kDIV:
           // Division by zero has no value, so the binding is ill-formed.
           if (*right == 0) return std::nullopt;
-          return Value::make_number(*left / *right);
+          return syms.number(*left / *right);
       }
       return absl::InternalError("unknown arithmetic operator");
     }
@@ -379,14 +314,15 @@ absl::StatusOr<std::optional<Value>> eval_term(const Term& term,
 // evaluates to {1, 2} under the binding {X: 1}. Returns nullopt if any term
 // is ill-formed, e.g. the 'X / 0' of 'p(X / 0)'.
 absl::StatusOr<std::optional<Tuple>> eval_terms(const Terms& terms,
-                                                const Binding& binding) {
+                                                const Binding& binding,
+                                                Symbols& syms) {
   Tuple tuple;
   if (terms == nullptr) return tuple;
   tuple.reserve(terms->size());
   for (const auto& term : *terms) {
-    ASSIGN_OR_RETURN(std::optional<Value> value, eval_term(*term, binding));
+    ASSIGN_OR_RETURN(std::optional<Sym> value, eval_term(*term, binding, syms));
     if (!value.has_value()) return std::nullopt;
-    tuple.push_back(std::move(*value));
+    tuple.push_back(*value);
   }
   return tuple;
 }
@@ -400,12 +336,12 @@ absl::StatusOr<std::optional<Tuple>> eval_terms(const Terms& terms,
 // A function term matches value by value against a stored function of the
 // same name and arity, e.g. 'f(X, b)' matches a stored f(1, b) and binds
 // X to 1.
-absl::StatusOr<bool> match_term(const Term& arg, const Value& value,
-                                Binding& binding, BindingTrail& trail) {
+absl::StatusOr<bool> match_term(const Term& arg, Sym value, Binding& binding,
+                                BindingTrail& trail, Symbols& syms) {
   if (arg.kind == Term::VariableKind) {
     size_t slot = binding.slot_of(static_cast<const Variable&>(arg));
-    const Value* bound = binding.at(slot);
-    if (bound != nullptr) return *bound == value;
+    Sym bound = binding.at(slot);
+    if (bound != kNoSym) return bound == value;
     binding.set(slot, value);
     trail.record(slot);
     return true;
@@ -414,13 +350,14 @@ absl::StatusOr<bool> match_term(const Term& arg, const Value& value,
   if (arg.kind == Term::AtomKind) {
     const Atom& atom = static_cast<const Atom&>(arg);
     if (atom.args != nullptr) {
-      if (value.kind != Value::kFunction || value.text != atom.name ||
-          value.args.size() != atom.args->size()) {
+      if (syms.kind_of(value) != SymEntry::kFunction) return false;
+      const SymEntry& entry = syms.entry(value);
+      if (entry.text != atom.name || entry.args.size() != atom.args->size()) {
         return false;
       }
-      for (size_t k = 0; k < value.args.size(); ++k) {
-        ASSIGN_OR_RETURN(bool ok, match_term(*(*atom.args)[k], value.args[k],
-                                             binding, trail));
+      for (size_t k = 0; k < entry.args.size(); ++k) {
+        ASSIGN_OR_RETURN(bool ok, match_term(*(*atom.args)[k], entry.args[k],
+                                             binding, trail, syms));
         if (!ok) return false;
       }
       return true;
@@ -428,7 +365,7 @@ absl::StatusOr<bool> match_term(const Term& arg, const Value& value,
   }
   // An ill-formed term, e.g. 'X / 0', has no value at all, so it matches
   // nothing.
-  ASSIGN_OR_RETURN(std::optional<Value> evaluated, eval_term(arg, binding));
+  ASSIGN_OR_RETURN(std::optional<Sym> evaluated, eval_term(arg, binding, syms));
   return evaluated.has_value() && *evaluated == value;
 }
 
@@ -436,19 +373,20 @@ absl::StatusOr<bool> match_term(const Term& arg, const Value& value,
 // match_term answers, asked without a value to compare against. A '_' matches
 // whatever sits opposite it, so it always can, but 'X / 0' has no value at all,
 // so it never can.
-absl::StatusOr<bool> can_match(const Term& term, const Binding& binding) {
+absl::StatusOr<bool> can_match(const Term& term, const Binding& binding,
+                               Symbols& syms) {
   if (term.kind == Term::AnonymousVariableKind) return true;
   if (term.kind == Term::AtomKind) {
     const Atom& atom = static_cast<const Atom&>(term);
     if (atom.args != nullptr) {
       for (const auto& arg : *atom.args) {
-        ASSIGN_OR_RETURN(bool ok, can_match(*arg, binding));
+        ASSIGN_OR_RETURN(bool ok, can_match(*arg, binding, syms));
         if (!ok) return false;
       }
       return true;
     }
   }
-  ASSIGN_OR_RETURN(std::optional<Value> value, eval_term(term, binding));
+  ASSIGN_OR_RETURN(std::optional<Sym> value, eval_term(term, binding, syms));
   return value.has_value();
 }
 
@@ -456,10 +394,10 @@ absl::StatusOr<bool> can_match(const Term& term, const Binding& binding) {
 // that 'r(4 / X)' becomes under {X: 0}. Such a literal has no ground instance
 // at all, which is different from having one that no stored atom matches.
 absl::StatusOr<bool> args_can_match(const ClassicalLiteral& literal,
-                                    const Binding& binding) {
+                                    const Binding& binding, Symbols& syms) {
   if (literal.args == nullptr) return true;
   for (const auto& arg : *literal.args) {
-    ASSIGN_OR_RETURN(bool ok, can_match(*arg, binding));
+    ASSIGN_OR_RETURN(bool ok, can_match(*arg, binding, syms));
     if (!ok) return false;
   }
   return true;
@@ -471,11 +409,11 @@ absl::StatusOr<bool> args_can_match(const ClassicalLiteral& literal,
 // so every tuple stored under the literal's predicate has the literal's arity.
 absl::StatusOr<bool> match_args(const ClassicalLiteral& literal,
                                 const Tuple& tuple, Binding& binding,
-                                BindingTrail& trail) {
+                                BindingTrail& trail, Symbols& syms) {
   size_t n = literal.args ? literal.args->size() : 0;
   for (size_t k = 0; k < n; ++k) {
-    ASSIGN_OR_RETURN(bool ok,
-                     match_term(*(*literal.args)[k], tuple[k], binding, trail));
+    ASSIGN_OR_RETURN(bool ok, match_term(*(*literal.args)[k], tuple[k], binding,
+                                         trail, syms));
     if (!ok) return false;
   }
   return true;
@@ -650,8 +588,8 @@ struct Instance {
   std::vector<aspif::Lit> matched;
 };
 
-bool builtin_holds(BinopType op, const Value& left, const Value& right) {
-  int c = compare_values(left, right);
+bool builtin_holds(BinopType op, Sym left, Sym right, const Symbols& syms) {
+  int c = syms.compare(left, right);
   switch (op) {
     case BinopType::kEQUAL:
       return c == 0;
@@ -725,7 +663,7 @@ bool is_bound(const Term& term, const Binding& binding) {
 // Returns false when an assignment's value is ill-formed, e.g. the 'Y = 1 / 0'
 // that 'Y = 1 / X' becomes under {X: 0}: the binding builds no rule instance.
 absl::StatusOr<bool> bind_assignments(const BodyParts& parts, Binding& binding,
-                                      BindingTrail& trail) {
+                                      BindingTrail& trail, Symbols& syms) {
   // One assignment can bind a variable another needs, e.g. 'Y = X + 1, Z = Y +
   // 1', so passes repeat until one binds nothing new. A pass skips the
   // assignments already made: their variables are bound.
@@ -736,11 +674,11 @@ absl::StatusOr<bool> bind_assignments(const BodyParts& parts, Binding& binding,
       std::optional<Assignment> assignment = assignment_of(*item, binding);
       if (!assignment.has_value()) continue;
       if (!is_bound(*assignment->value, binding)) continue;
-      ASSIGN_OR_RETURN(std::optional<Value> value,
-                       eval_term(*assignment->value, binding));
+      ASSIGN_OR_RETURN(std::optional<Sym> value,
+                       eval_term(*assignment->value, binding, syms));
       if (!value.has_value()) return false;
       size_t slot = binding.slot_of(*assignment->variable);
-      binding.set(slot, *std::move(value));
+      binding.set(slot, *value);
       trail.record(slot);
       changed = true;
     }
@@ -756,15 +694,15 @@ absl::StatusOr<bool> bind_assignments(const BodyParts& parts, Binding& binding,
 // An assignment holds by construction: its variable holds exactly what the
 // other side evaluates to.
 absl::StatusOr<bool> comparisons_hold(const BodyParts& parts,
-                                      const Binding& binding) {
+                                      const Binding& binding, Symbols& syms) {
   for (const NafLiteral* item : parts.comparisons) {
     const auto& builtin = static_cast<const BuiltinAtom&>(*item->literal);
-    ASSIGN_OR_RETURN(std::optional<Value> left,
-                     eval_term(*builtin.left, binding));
-    ASSIGN_OR_RETURN(std::optional<Value> right,
-                     eval_term(*builtin.right, binding));
+    ASSIGN_OR_RETURN(std::optional<Sym> left,
+                     eval_term(*builtin.left, binding, syms));
+    ASSIGN_OR_RETURN(std::optional<Sym> right,
+                     eval_term(*builtin.right, binding, syms));
     if (!left.has_value() || !right.has_value()) return false;
-    bool holds = builtin_holds(builtin.op, *left, *right);
+    bool holds = builtin_holds(builtin.op, *left, *right, syms);
     if (item->naf) holds = !holds;
     if (!holds) return false;
   }
@@ -896,14 +834,14 @@ absl::flat_hash_map<Tuple, std::vector<const GroundAtom*>> index_atoms(
 // Z)' that 'edge(X / 0, Z)' becomes under {X: 0}: no atom matches it.
 absl::StatusOr<std::optional<Tuple>> probe_key(
     const ClassicalLiteral& literal, const std::vector<size_t>& positions,
-    const Binding& binding) {
+    const Binding& binding, Symbols& syms) {
   Tuple key;
   key.reserve(positions.size());
   for (size_t position : positions) {
-    ASSIGN_OR_RETURN(std::optional<Value> value,
-                     eval_term(*(*literal.args)[position], binding));
+    ASSIGN_OR_RETURN(std::optional<Sym> value,
+                     eval_term(*(*literal.args)[position], binding, syms));
     if (!value.has_value()) return std::nullopt;
-    key.push_back(*std::move(value));
+    key.push_back(*value);
   }
   return key;
 }
@@ -941,6 +879,7 @@ struct JoinStep {
 struct Join {
   const BodyParts& parts;
   const Store& store;
+  Symbols& syms;
   std::vector<size_t> order;  // positive literal positions, delta first
   std::optional<size_t> delta_position;
   std::vector<JoinStep> steps;  // one per entry of `order`, in that order
@@ -950,7 +889,7 @@ struct Join {
 // aggregate's elements needs find_instances() for the element conditions.
 // Aggregates cannot nest, so the recursion stops one level down.
 absl::StatusOr<std::vector<Instance>> bind_agg_outputs(
-    const BodyParts& parts, const Store& store,
+    const BodyParts& parts, const Store& store, Symbols& syms,
     std::vector<Instance> instances);
 
 absl::Status extend(Join& join, size_t depth, Instance& instance,
@@ -962,15 +901,15 @@ absl::Status extend(Join& join, size_t depth, Instance& instance,
 absl::Status finish(const Join& join, Instance& instance,
                     const InstanceFn& emit) {
   BindingTrail trail(instance.binding);
-  ASSIGN_OR_RETURN(bool ok,
-                   bind_assignments(join.parts, instance.binding, trail));
+  ASSIGN_OR_RETURN(
+      bool ok, bind_assignments(join.parts, instance.binding, trail, join.syms));
   if (!ok) return absl::OkStatus();
 
   if (join.parts.aggregates.empty()) {
     // Every variable the body binds has a value by now, so all the comparisons
     // are decidable.
     ASSIGN_OR_RETURN(bool holds,
-                     comparisons_hold(join.parts, instance.binding));
+                     comparisons_hold(join.parts, instance.binding, join.syms));
     if (!holds) return absl::OkStatus();
     return emit(instance);
   }
@@ -979,10 +918,11 @@ absl::Status finish(const Join& join, Instance& instance,
   // S', splits the instance into one per value the aggregate can take, so this
   // is the one place the search works on copies.
   ASSIGN_OR_RETURN(std::vector<Instance> expanded,
-                   bind_agg_outputs(join.parts, join.store,
+                   bind_agg_outputs(join.parts, join.store, join.syms,
                                     std::vector<Instance>{instance}));
   for (const Instance& next : expanded) {
-    ASSIGN_OR_RETURN(bool holds, comparisons_hold(join.parts, next.binding));
+    ASSIGN_OR_RETURN(bool holds,
+                     comparisons_hold(join.parts, next.binding, join.syms));
     if (holds) RETURN_IF_ERROR(emit(next));
   }
   return absl::OkStatus();
@@ -1016,8 +956,9 @@ absl::Status extend(Join& join, size_t depth, Instance& instance,
   const JoinStep& step = join.steps[depth];
   if (step.dead) return absl::OkStatus();
 
-  ASSIGN_OR_RETURN(std::optional<Tuple> key,
-                   probe_key(*step.literal, step.positions, instance.binding));
+  ASSIGN_OR_RETURN(
+      std::optional<Tuple> key,
+      probe_key(*step.literal, step.positions, instance.binding, join.syms));
   if (!key.has_value()) return absl::OkStatus();
   auto it = step.index.find(*key);
   if (it == step.index.end()) return absl::OkStatus();
@@ -1027,7 +968,7 @@ absl::Status extend(Join& join, size_t depth, Instance& instance,
   for (const GroundAtom* atom : it->second) {
     BindingTrail trail(instance.binding);
     ASSIGN_OR_RETURN(bool ok, match_args(*step.literal, atom->args,
-                                         instance.binding, trail));
+                                         instance.binding, trail, join.syms));
     if (!ok) continue;
     instance.matched.push_back(atom->id);
     absl::Status status = extend(join, depth + 1, instance, emit);
@@ -1051,11 +992,12 @@ absl::Status extend(Join& join, size_t depth, Instance& instance,
 // derive_atoms() passes one; every other caller wants every instance the store
 // supports.
 absl::Status find_instances(
-    const BodyParts& parts, const Store& store, Binding seed,
+    const BodyParts& parts, const Store& store, Symbols& syms, Binding seed,
     const InstanceFn& emit,
     std::optional<size_t> delta_position = std::nullopt) {
   Join join{.parts = parts,
             .store = store,
+            .syms = syms,
             .order = join_order(parts.positive.size(), delta_position),
             .delta_position = delta_position};
   join.steps.resize(join.order.size());
@@ -1069,14 +1011,14 @@ absl::Status find_instances(
 // 'r(_, 2)'. A literal naming an atom the store does not hold comes back with
 // none.
 absl::StatusOr<std::vector<aspif::Atom>> matching_atoms(
-    const ClassicalLiteral& literal, const Binding& binding,
-    const Store& store) {
+    const ClassicalLiteral& literal, const Binding& binding, const Store& store,
+    Symbols& syms) {
   std::vector<aspif::Atom> matched;
   const PredData* data = store.find(pred_key(literal));
   if (data == nullptr) return matched;
   if (args_are_ground(literal, binding)) {
     ASSIGN_OR_RETURN(std::optional<Tuple> tuple,
-                     eval_terms(literal.args, binding));
+                     eval_terms(literal.args, binding, syms));
     if (!tuple.has_value()) return matched;
     const GroundAtom* atom = data->find(*tuple);
     if (atom != nullptr) matched.push_back(atom->id);
@@ -1088,7 +1030,8 @@ absl::StatusOr<std::vector<aspif::Atom>> matching_atoms(
   Binding scratch = binding;
   for (const GroundAtom& atom : data->atoms) {
     BindingTrail trail(scratch);
-    ASSIGN_OR_RETURN(bool ok, match_args(literal, atom.args, scratch, trail));
+    ASSIGN_OR_RETURN(bool ok,
+                     match_args(literal, atom.args, scratch, trail, syms));
     if (ok) matched.push_back(atom.id);
   }
   return matched;
@@ -1132,13 +1075,13 @@ std::vector<aspif::Lit> without_facts(const std::vector<aspif::Lit>& matched,
 //   - a 'not' over a fact, which no answer set can satisfy.
 absl::StatusOr<std::optional<std::vector<aspif::Lit>>> negative_lits(
     const std::vector<const ClassicalLiteral*>& negative,
-    const Binding& binding, const Store& store) {
+    const Binding& binding, const Store& store, Symbols& syms) {
   std::vector<aspif::Lit> lits;
   for (const ClassicalLiteral* literal : negative) {
-    ASSIGN_OR_RETURN(bool can_match, args_can_match(*literal, binding));
+    ASSIGN_OR_RETURN(bool can_match, args_can_match(*literal, binding, syms));
     if (!can_match) return std::nullopt;
     ASSIGN_OR_RETURN(std::vector<aspif::Atom> matched,
-                     matching_atoms(*literal, binding, store));
+                     matching_atoms(*literal, binding, store, syms));
     for (aspif::Atom atom : matched) {
       if (store.is_fact(atom)) return std::nullopt;
       lits.push_back(-atom);
@@ -1176,7 +1119,8 @@ struct AggTuple {
 // Emits nothing, so a caller that only needs the values the aggregate can
 // take (see possible_values) adds no atoms or rules to the program.
 absl::StatusOr<std::vector<AggTuple>> collect_agg_tuples(
-    const Aggregate& agg, const Binding& outer_binding, const Store& store) {
+    const Aggregate& agg, const Binding& outer_binding, const Store& store,
+    Symbols& syms) {
   std::vector<AggTuple> tuples;
   if (agg.elements == nullptr) return tuples;
 
@@ -1185,12 +1129,12 @@ absl::StatusOr<std::vector<AggTuple>> collect_agg_tuples(
     const AggregateElement& element = *element_ptr;
     BodyParts parts = split_naf_literals(element.literals);
     RETURN_IF_ERROR(find_instances(
-        parts, store, outer_binding,
+        parts, store, syms, outer_binding,
         [&](const Instance& instance) -> absl::Status {
           // An element whose terms are ill-formed under this local binding
           // contributes no tuple to the set.
           ASSIGN_OR_RETURN(std::optional<Tuple> maybe_tuple,
-                           eval_terms(element.terms, instance.binding));
+                           eval_terms(element.terms, instance.binding, syms));
           if (!maybe_tuple.has_value()) return absl::OkStatus();
           Tuple tuple = *std::move(maybe_tuple);
           int64_t weight = 1;
@@ -1200,10 +1144,10 @@ absl::StatusOr<std::vector<AggTuple>> collect_agg_tuples(
             // tuple that adds nothing needs no literal in the weight body at
             // all. (#count does count such a tuple, which is why this only
             // applies to #sum.)
-            if (tuple.empty() || tuple[0].kind != Value::kNumber) {
+            if (tuple.empty() || !syms.is_number(tuple[0])) {
               return absl::OkStatus();
             }
-            weight = tuple[0].number;
+            weight = syms.number_of(tuple[0]);
           }
 
           auto [it, inserted] = seen.try_emplace(tuple, tuples.size());
@@ -1214,7 +1158,7 @@ absl::StatusOr<std::vector<AggTuple>> collect_agg_tuples(
 
           ASSIGN_OR_RETURN(
               std::optional<std::vector<aspif::Lit>> neg,
-              negative_lits(parts.negative, instance.binding, store));
+              negative_lits(parts.negative, instance.binding, store, syms));
           if (!neg.has_value()) return absl::OkStatus();
           std::vector<aspif::Lit> support =
               without_facts(instance.matched, store);
@@ -1363,21 +1307,22 @@ bool waits_for_another(const Aggregate& agg,
 // atoms turns one instance into three, binding S to 0, 1, and 2 in turn.
 absl::StatusOr<std::vector<Instance>> expand_over_values(
     const Aggregate& agg, const std::vector<size_t>& outputs,
-    const BodyParts& parts, const Store& store,
+    const BodyParts& parts, const Store& store, Symbols& syms,
     const std::vector<Instance>& instances) {
   std::vector<Instance> expanded;
   for (const Instance& instance : instances) {
     ASSIGN_OR_RETURN(std::vector<AggTuple> tuples,
-                     collect_agg_tuples(agg, instance.binding, store));
+                     collect_agg_tuples(agg, instance.binding, store, syms));
     ASSIGN_OR_RETURN(std::vector<int64_t> values, possible_values(agg, tuples));
     for (int64_t value : values) {
       Instance next = instance;
-      for (size_t slot : outputs)
-        next.binding.set(slot, Value::make_number(value));
+      const Sym sym = syms.number(value);
+      for (size_t slot : outputs) next.binding.set(slot, sym);
       // The value can complete an assignment, e.g. the 'T = S + 1' of
       // 'q(T) :- #count{X : p(X)} = S, T = S + 1.'
       BindingTrail trail(next.binding);
-      ASSIGN_OR_RETURN(bool ok, bind_assignments(parts, next.binding, trail));
+      ASSIGN_OR_RETURN(bool ok,
+                       bind_assignments(parts, next.binding, trail, syms));
       if (!ok) continue;
       trail.keep();
       expanded.push_back(std::move(next));
@@ -1394,7 +1339,7 @@ absl::StatusOr<std::vector<Instance>> expand_over_values(
 // when the aggregate takes that value, so an answer set satisfies exactly one
 // of the instances an aggregate expands into.
 absl::StatusOr<std::vector<Instance>> bind_agg_outputs(
-    const BodyParts& parts, const Store& store,
+    const BodyParts& parts, const Store& store, Symbols& syms,
     std::vector<Instance> instances) {
   std::vector<const Aggregate*> pending = parts.aggregates;
   while (!pending.empty() && !instances.empty()) {
@@ -1415,7 +1360,7 @@ absl::StatusOr<std::vector<Instance>> bind_agg_outputs(
         continue;
       }
       ASSIGN_OR_RETURN(instances, expand_over_values(*agg, outputs, parts,
-                                                     store, instances));
+                                                     store, syms, instances));
     }
     // Aggregates left waiting on each other bind their variables in a cycle
     // and can never be ground. verify_safe() rejects such a rule; stopping
@@ -1601,33 +1546,35 @@ aspif::Atom at_least(int64_t bound,
 // Evaluates one side of an aggregate's bound, e.g. the '3' in
 // '3 <= #count{...}'.
 absl::StatusOr<std::optional<int64_t>> eval_bound(const Term& term,
-                                                  const Binding& binding) {
+                                                  const Binding& binding,
+                                                  Symbols& syms) {
   // In a '#count{...} = S', S holds the value this rule instance checks for:
   // find_instances() split the instance over the values the aggregate can
   // take.
-  ASSIGN_OR_RETURN(std::optional<Value> value, eval_term(term, binding));
+  ASSIGN_OR_RETURN(std::optional<Sym> value, eval_term(term, binding, syms));
   if (!value.has_value()) return std::nullopt;
-  if (value->kind != Value::kNumber) {
+  if (!syms.is_number(*value)) {
     return absl::InvalidArgumentError("an aggregate bound must be a number");
   }
-  return value->number;
+  return syms.number_of(*value);
 }
 
 // Reads the (up to two) bound sides of an aggregate under `binding`. Nullopt
 // means a bound is ill-formed, e.g. the '4 / 0' of '#count{...} >= 4 / X'
 // under X = 0, which makes the enclosing rule instance nonexistent.
-absl::StatusOr<std::optional<AggBounds>> eval_agg_bounds(
-    const Aggregate& agg, const Binding& binding) {
+absl::StatusOr<std::optional<AggBounds>> eval_agg_bounds(const Aggregate& agg,
+                                                         const Binding& binding,
+                                                         Symbols& syms) {
   AggBounds bounds;
   if (agg.lb_term != nullptr) {
     ASSIGN_OR_RETURN(std::optional<int64_t> k,
-                     eval_bound(*agg.lb_term, binding));
+                     eval_bound(*agg.lb_term, binding, syms));
     if (!k.has_value()) return std::nullopt;
     apply_lower_bound(*k, agg.lb_op, bounds);
   }
   if (agg.ub_term != nullptr) {
     ASSIGN_OR_RETURN(std::optional<int64_t> k,
-                     eval_bound(*agg.ub_term, binding));
+                     eval_bound(*agg.ub_term, binding, syms));
     if (!k.has_value()) return std::nullopt;
     apply_upper_bound(*k, agg.ub_op, bounds);
   }
@@ -1651,7 +1598,8 @@ std::optional<bool> settled_agg_holds(const Aggregate& agg,
 // which is also the answer for an aggregate this phase is too early to judge.
 absl::StatusOr<std::optional<bool>> settle_aggregate(const Aggregate& agg,
                                                      const Binding& binding,
-                                                     const Store& store) {
+                                                     const Store& store,
+                                                     Symbols& syms) {
   // An aggregate under 'not' is the too-early case. Its element predicates
   // reach the rule's head through negative dependency edges only, and those
   // don't order components, so 'q :- not #count{ X : p(X) } >= 1.' can have q's
@@ -1663,10 +1611,10 @@ absl::StatusOr<std::optional<bool>> settle_aggregate(const Aggregate& agg,
   // settled_agg_value().
   if (elements_use_negation(agg)) return std::nullopt;
   ASSIGN_OR_RETURN(std::optional<AggBounds> bounds,
-                   eval_agg_bounds(agg, binding));
+                   eval_agg_bounds(agg, binding, syms));
   if (!bounds.has_value()) return std::nullopt;
   ASSIGN_OR_RETURN(std::vector<AggTuple> tuples,
-                   collect_agg_tuples(agg, binding, store));
+                   collect_agg_tuples(agg, binding, store, syms));
   return settled_agg_holds(agg, *bounds, tuples);
 }
 
@@ -1686,7 +1634,7 @@ absl::StatusOr<std::optional<bool>> settle_aggregate(const Aggregate& agg,
 // Both make the whole enclosing rule instance nonexistent.
 absl::StatusOr<std::optional<std::vector<aspif::Lit>>> ground_aggregate(
     const Aggregate& agg, const Binding& outer_binding, const Store& store,
-    aspif::Program& result) {
+    Symbols& syms, aspif::Program& result) {
   if (agg.function == AggregateFunctionType::kAGGREGATE_MAX ||
       agg.function == AggregateFunctionType::kAGGREGATE_MIN) {
     return absl::UnimplementedError(
@@ -1694,12 +1642,12 @@ absl::StatusOr<std::optional<std::vector<aspif::Lit>>> ground_aggregate(
   }
 
   ASSIGN_OR_RETURN(std::optional<AggBounds> maybe_bounds,
-                   eval_agg_bounds(agg, outer_binding));
+                   eval_agg_bounds(agg, outer_binding, syms));
   if (!maybe_bounds.has_value()) return std::nullopt;
   const AggBounds& bounds = *maybe_bounds;
 
   ASSIGN_OR_RETURN(std::vector<AggTuple> tuples,
-                   collect_agg_tuples(agg, outer_binding, store));
+                   collect_agg_tuples(agg, outer_binding, store, syms));
   if (std::optional<bool> holds = settled_agg_holds(agg, bounds, tuples)) {
     if (!*holds) return std::nullopt;
     return std::vector<aspif::Lit>{};
@@ -1748,13 +1696,13 @@ class AggCache {
   // ground_aggregate() gives them, and nullopt in the same cases.
   absl::StatusOr<std::optional<std::vector<aspif::Lit>>> ground(
       const Aggregate& agg, const Binding& binding, const Store& store,
-      aspif::Program& result) {
+      Symbols& syms, aspif::Program& result) {
     Key key = key_for(agg, binding);
     auto it = ground_.find(key);
     if (it != ground_.end()) return it->second;
 
     ASSIGN_OR_RETURN(std::optional<std::vector<aspif::Lit>> lits,
-                     ground_aggregate(agg, binding, store, result));
+                     ground_aggregate(agg, binding, store, syms, result));
     ground_.emplace(std::move(key), lits);
     return lits;
   }
@@ -1767,24 +1715,25 @@ class AggCache {
   // reading them is ground, so what its elements produce cannot change.
   absl::StatusOr<std::optional<bool>> settle(const Aggregate& agg,
                                              const Binding& binding,
-                                             const Store& store) {
+                                             const Store& store,
+                                             Symbols& syms) {
     Key key = key_for(agg, binding);
     auto it = settled_.find(key);
     if (it != settled_.end()) return it->second;
 
     ASSIGN_OR_RETURN(std::optional<bool> holds,
-                     settle_aggregate(agg, binding, store));
+                     settle_aggregate(agg, binding, store, syms));
     settled_.emplace(std::move(key), holds);
     return holds;
   }
 
  private:
-  // One aggregate together with what its variables are bound to. A slot with
-  // no value is a variable local to the aggregate, which every instance leaves
+  // One aggregate together with what its variables are bound to. A slot reading
+  // kNoSym is a variable local to the aggregate, which every instance leaves
   // for the aggregate's own grounding to bind.
   struct Key {
     const Aggregate* agg;
-    std::vector<std::optional<Value>> values;
+    std::vector<Sym> values;
 
     bool operator==(const Key&) const = default;
 
@@ -1797,9 +1746,7 @@ class AggCache {
   Key key_for(const Aggregate& agg, const Binding& binding) {
     Key key{.agg = &agg};
     for (size_t slot : agg_variable_slots(agg, binding)) {
-      const Value* value = binding.at(slot);
-      key.values.push_back(value == nullptr ? std::nullopt
-                                            : std::optional<Value>(*value));
+      key.values.push_back(binding.at(slot));
     }
     return key;
   }
@@ -1825,20 +1772,21 @@ class AggCache {
 // binding, so its head atom must not be derived either, e.g. "q(X) :- p(X),
 // not r(4 / X)." derives no q(0), because 'not r(4 / 0)' cannot be ground.
 absl::StatusOr<bool> ignored_parts_are_well_formed(const BodyParts& parts,
-                                                   const Binding& binding) {
+                                                   const Binding& binding,
+                                                   Symbols& syms) {
   for (const ClassicalLiteral* literal : parts.negative) {
-    ASSIGN_OR_RETURN(bool can_match, args_can_match(*literal, binding));
+    ASSIGN_OR_RETURN(bool can_match, args_can_match(*literal, binding, syms));
     if (!can_match) return false;
   }
   for (const Aggregate* aggregate : parts.aggregates) {
     if (aggregate->lb_term != nullptr) {
       ASSIGN_OR_RETURN(std::optional<int64_t> k,
-                       eval_bound(*aggregate->lb_term, binding));
+                       eval_bound(*aggregate->lb_term, binding, syms));
       if (!k.has_value()) return false;
     }
     if (aggregate->ub_term != nullptr) {
       ASSIGN_OR_RETURN(std::optional<int64_t> k,
-                       eval_bound(*aggregate->ub_term, binding));
+                       eval_bound(*aggregate->ub_term, binding, syms));
       if (!k.has_value()) return false;
     }
   }
@@ -1860,10 +1808,10 @@ struct Changes {
 // satisfied, which is what lets an instance carrying aggregates derive a fact.
 absl::StatusOr<bool> aggregates_settle_true(
     const std::vector<const Aggregate*>& aggregates, const Binding& binding,
-    const Store& store, AggCache& cache) {
+    const Store& store, Symbols& syms, AggCache& cache) {
   for (const Aggregate* aggregate : aggregates) {
     ASSIGN_OR_RETURN(std::optional<bool> holds,
-                     cache.settle(*aggregate, binding, store));
+                     cache.settle(*aggregate, binding, store, syms));
     if (!holds.has_value() || !*holds) return false;
   }
   return true;
@@ -1887,17 +1835,18 @@ absl::StatusOr<bool> aggregates_settle_true(
 // factness on.
 absl::Status derive_from_rule(const RuleView& rule,
                               std::optional<size_t> delta_position,
-                              Store& store, AggCache& cache,
+                              Store& store, Symbols& syms, AggCache& cache,
                               aspif::Program& aspif_prog, Changes& changed) {
   const bool derives_facts = rule.parts.negative.empty();
   return find_instances(
-      rule.parts, store, Binding(rule.slots),
+      rule.parts, store, syms, Binding(rule.slots),
       [&](const Instance& instance) -> absl::Status {
-        ASSIGN_OR_RETURN(bool well_formed, ignored_parts_are_well_formed(
-                                               rule.parts, instance.binding));
+        ASSIGN_OR_RETURN(
+            bool well_formed,
+            ignored_parts_are_well_formed(rule.parts, instance.binding, syms));
         if (!well_formed) return absl::OkStatus();
         ASSIGN_OR_RETURN(std::optional<Tuple> tuple,
-                         eval_terms(rule.head->args, instance.binding));
+                         eval_terms(rule.head->args, instance.binding, syms));
         if (!tuple.has_value()) return absl::OkStatus();
         const Inserted head =
             store.insert(pred_key(*rule.head), *std::move(tuple), aspif_prog);
@@ -1906,7 +1855,7 @@ absl::Status derive_from_rule(const RuleView& rule,
           ASSIGN_OR_RETURN(
               bool aggregates_hold,
               aggregates_settle_true(rule.parts.aggregates, instance.binding,
-                                     store, cache));
+                                     store, syms, cache));
           if (!aggregates_hold) return absl::OkStatus();
           const bool newly_fact = store.mark_fact(head.atom);
           // Marking an atom the store already held is the one change a delta
@@ -1958,7 +1907,7 @@ absl::Status derive_from_rule(const RuleView& rule,
 // rule reading that atom sees no new atom to re-run on, so the pass after it
 // reads the whole store instead.
 absl::Status derive_atoms(const std::vector<const RuleView*>& rules,
-                          Store& store, AggCache& cache,
+                          Store& store, Symbols& syms, AggCache& cache,
                           aspif::Program& aspif_prog) {
   // The first pass reads the whole store. It is the only one that fires the
   // rules with no positive literals, and it derives the delta the passes below
@@ -1966,7 +1915,7 @@ absl::Status derive_atoms(const std::vector<const RuleView*>& rules,
   Changes changed;
   for (const RuleView* rule : rules) {
     if (rule->head == nullptr) continue;
-    RETURN_IF_ERROR(derive_from_rule(*rule, std::nullopt, store, cache,
+    RETURN_IF_ERROR(derive_from_rule(*rule, std::nullopt, store, syms, cache,
                                      aspif_prog, changed));
   }
 
@@ -1977,13 +1926,13 @@ absl::Status derive_atoms(const std::vector<const RuleView*>& rules,
     for (const RuleView* rule : rules) {
       if (rule->head == nullptr) continue;
       if (full_scan) {
-        RETURN_IF_ERROR(derive_from_rule(*rule, std::nullopt, store, cache,
-                                         aspif_prog, changed));
+        RETURN_IF_ERROR(derive_from_rule(*rule, std::nullopt, store, syms,
+                                         cache, aspif_prog, changed));
         continue;
       }
       for (size_t position = 0; position < rule->parts.positive.size();
            ++position) {
-        RETURN_IF_ERROR(derive_from_rule(*rule, position, store, cache,
+        RETURN_IF_ERROR(derive_from_rule(*rule, position, store, syms, cache,
                                          aspif_prog, changed));
       }
     }
@@ -2006,13 +1955,13 @@ absl::Status derive_atoms(const std::vector<const RuleView*>& rules,
 // A body literal for a fact goes the same way, dropped from the rules that do
 // get emitted, since a body holds exactly when it holds without it.
 absl::Status emit_rules(const std::vector<const RuleView*>& rules,
-                        const Store& store,
+                        const Store& store, Symbols& syms,
                         absl::flat_hash_set<aspif::Atom>& emitted_facts,
                         AggCache& aggregates, aspif::Program& result) {
   for (const RuleView* rule_ptr : rules) {
     const RuleView& rule = *rule_ptr;
     RETURN_IF_ERROR(find_instances(
-        rule.parts, store, Binding(rule.slots),
+        rule.parts, store, syms, Binding(rule.slots),
         [&](const Instance& instance) -> absl::Status {
           // The head atom is looked up here, but an instance that has none is
           // only an error further down, once every reason to drop the instance
@@ -2022,8 +1971,9 @@ absl::Status emit_rules(const std::vector<const RuleView*>& rules,
           std::optional<Tuple> head_tuple;
           const GroundAtom* head = nullptr;
           if (rule.head != nullptr) {
-            ASSIGN_OR_RETURN(head_tuple,
-                             eval_terms(rule.head->args, instance.binding));
+            ASSIGN_OR_RETURN(
+                head_tuple,
+                eval_terms(rule.head->args, instance.binding, syms));
             // An ill-formed head, e.g. the 'q(X / 0)' of "q(X / 0) :- p(X).",
             // means this instance has no ground rule. derive_atoms() skipped it
             // for the same reason, so nothing is missing from the store.
@@ -2042,15 +1992,15 @@ absl::Status emit_rules(const std::vector<const RuleView*>& rules,
           aspif_rule.body = without_facts(instance.matched, store);
           ASSIGN_OR_RETURN(
               std::optional<std::vector<aspif::Lit>> neg,
-              negative_lits(rule.parts.negative, instance.binding, store));
+              negative_lits(rule.parts.negative, instance.binding, store, syms));
           if (!neg.has_value()) return absl::OkStatus();
           aspif_rule.body.insert(aspif_rule.body.end(), neg->begin(),
                                  neg->end());
 
           for (const Aggregate* aggregate : rule.parts.aggregates) {
-            ASSIGN_OR_RETURN(
-                std::optional<std::vector<aspif::Lit>> extra,
-                aggregates.ground(*aggregate, instance.binding, store, result));
+            ASSIGN_OR_RETURN(std::optional<std::vector<aspif::Lit>> extra,
+                             aggregates.ground(*aggregate, instance.binding,
+                                               store, syms, result));
             if (!extra.has_value()) return absl::OkStatus();
             aspif_rule.body.insert(aspif_rule.body.end(), extra->begin(),
                                    extra->end());
@@ -2062,7 +2012,7 @@ absl::Status emit_rules(const std::vector<const RuleView*>& rules,
             if (head == nullptr) {
               return absl::InternalError(
                   absl::StrCat("grounding derived no atom for the head '",
-                               printed_atom(rule.head->id, *head_tuple),
+                               syms.printed_call(rule.head->id, *head_tuple),
                                "'; was the program checked by verify_safe()?"));
             }
             aspif_rule.head.push_back(head->id);
@@ -2092,19 +2042,18 @@ absl::Status emit_rules(const std::vector<const RuleView*>& rules,
 //
 // A violation whose weight or level is not an integer, e.g. ':~ p(X). [X@0]'
 // where X binds to a constant, costs nothing at any level, so it is left out.
-void emit_minimize(const Store& store, aspif::Program& result) {
+void emit_minimize(const Store& store, const Symbols& syms,
+                   aspif::Program& result) {
   absl::btree_map<int64_t, std::vector<aspif::WeightedLit>> by_level;
   for (const PredKey& key : store.order) {
     if (key.name != "_viol") continue;
     for (const GroundAtom& atom : store.find(key)->atoms) {
       // normalize() always puts the level and weight first, in that order.
-      const Value& level = atom.args[0];
-      const Value& weight = atom.args[1];
-      if (level.kind != Value::kNumber || weight.kind != Value::kNumber) {
-        continue;
-      }
-      by_level[level.number].push_back(
-          {.lit = atom.id, .weight = weight.number});
+      const Sym level = atom.args[0];
+      const Sym weight = atom.args[1];
+      if (!syms.is_number(level) || !syms.is_number(weight)) continue;
+      by_level[syms.number_of(level)].push_back(
+          {.lit = atom.id, .weight = syms.number_of(weight)});
     }
   }
   for (auto& [level, lits] : by_level) {
@@ -2116,7 +2065,8 @@ void emit_minimize(const Store& store, aspif::Program& result) {
 // Names every atom of a user-visible predicate so answer sets print
 // symbolically. '_' predicates are internal and stay hidden, apart from a
 // '_neg_p' standing for a classically negated '-p', which prints as '-p'.
-void name_outputs(const Store& store, aspif::Program& result) {
+void name_outputs(const Store& store, const Symbols& syms,
+                  aspif::Program& result) {
   for (const PredKey& key : store.order) {
     std::string predicate;
     if (key.name.starts_with(kClassicalNegationPrefix)) {
@@ -2128,8 +2078,9 @@ void name_outputs(const Store& store, aspif::Program& result) {
       predicate = key.name;
     }
     for (const GroundAtom& atom : store.find(key)->atoms) {
-      result.outputs.push_back(aspif::Output{
-          .name = printed_atom(predicate, atom.args), .condition = {atom.id}});
+      result.outputs.push_back(
+          aspif::Output{.name = syms.printed_call(predicate, atom.args),
+                        .condition = {atom.id}});
     }
   }
 }
@@ -2146,7 +2097,7 @@ void name_outputs(const Store& store, aspif::Program& result) {
 // never be true and the program has no answer set. That is the right answer:
 // nothing satisfies the query.
 absl::Status emit_query(const ClassicalLiteral& query, const Store& store,
-                        aspif::Program& result) {
+                        Symbols& syms, aspif::Program& result) {
   // A query is its own scope, so its variables are numbered on their own rather
   // than sharing a rule's slots, and they start out unbound: the query's atoms
   // are whichever ones the store matches.
@@ -2155,7 +2106,7 @@ absl::Status emit_query(const ClassicalLiteral& query, const Store& store,
   collect::for_each_variable(
       query, [&](const Variable& var) { slots.add(var, by_name); });
   ASSIGN_OR_RETURN(std::vector<aspif::Atom> matched,
-                   matching_atoms(query, Binding(slots), store));
+                   matching_atoms(query, Binding(slots), store, syms));
   // One match needs no atom of its own: assuming that atom means the same
   // thing, e.g. for a query with no variables in it at all.
   if (matched.size() == 1) {
@@ -2194,22 +2145,26 @@ absl::StatusOr<aspif::Program> ground(const Program& prog) {
   // The last bucket holds the constraints, which derive nothing and so are
   // emitted after every atom exists.
   aspif::Program result;
+  // One symbol table for the whole run: every tuple in the store holds handles
+  // into it, so it has to outlive them.
+  Symbols syms;
   Store store;
   // One cache across both phases: they ask different questions about the same
   // aggregates, and what either answer rests on is complete before it is asked.
   AggCache aggregates;
   absl::flat_hash_set<aspif::Atom> emitted_facts;
   for (const auto& component_rules : rules_by_component) {
-    RETURN_IF_ERROR(derive_atoms(component_rules, store, aggregates, result));
+    RETURN_IF_ERROR(
+        derive_atoms(component_rules, store, syms, aggregates, result));
   }
   for (const auto& component_rules : rules_by_component) {
-    RETURN_IF_ERROR(
-        emit_rules(component_rules, store, emitted_facts, aggregates, result));
+    RETURN_IF_ERROR(emit_rules(component_rules, store, syms, emitted_facts,
+                               aggregates, result));
   }
-  emit_minimize(store, result);
-  name_outputs(store, result);
+  emit_minimize(store, syms, result);
+  name_outputs(store, syms, result);
   if (prog.query != nullptr && prog.query->lit != nullptr) {
-    RETURN_IF_ERROR(emit_query(*prog.query->lit, store, result));
+    RETURN_IF_ERROR(emit_query(*prog.query->lit, store, syms, result));
   }
   return result;
 }
