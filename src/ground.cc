@@ -317,12 +317,14 @@ absl::StatusOr<std::optional<Tuple>> eval_terms(const Terms& terms,
                                                 const Binding& binding,
                                                 Symbols& syms) {
   Tuple tuple;
-  if (terms == nullptr) return tuple;
-  tuple.reserve(terms->size());
-  for (const auto& term : *terms) {
-    ASSIGN_OR_RETURN(std::optional<Sym> value, eval_term(*term, binding, syms));
-    if (!value.has_value()) return std::nullopt;
-    tuple.push_back(*value);
+  if (terms != nullptr) {
+    tuple.reserve(terms->size());
+    for (const auto& term : *terms) {
+      ASSIGN_OR_RETURN(std::optional<Sym> value,
+                       eval_term(*term, binding, syms));
+      if (!value.has_value()) return std::nullopt;
+      tuple.push_back(*value);
+    }
   }
   return tuple;
 }
