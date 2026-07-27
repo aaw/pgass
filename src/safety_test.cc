@@ -281,6 +281,25 @@ TEST_F(SafetyTest, TestWeakConstraintUnsafeWeightAndLevel) {
   EXPECT_THAT(verify_safe(**prog), Not(IsOk()));
 }
 
+// An element with no condition, like the '1' of '#count{ 1 }', puts its tuple
+// in the set unconditionally. There is nothing there to bind a variable and
+// nothing needing one, so the aggregate is safe.
+TEST_F(SafetyTest, TestAggregateElementWithNoCondition) {
+  std::string_view src = "q :- #count{ 1 } >= 1.";
+  Parser parser(src);
+  auto prog = parser.parse_program();
+  ASSERT_TRUE(prog.ok()) << prog.status();
+  EXPECT_THAT(verify_safe(**prog), IsOk());
+}
+
+TEST_F(SafetyTest, TestAggregateWithNoElements) {
+  std::string_view src = "q :- #count{ } >= 0.";
+  Parser parser(src);
+  auto prog = parser.parse_program();
+  ASSERT_TRUE(prog.ok()) << prog.status();
+  EXPECT_THAT(verify_safe(**prog), IsOk());
+}
+
 TEST_F(SafetyTest, ErrorMessageUnsafeWeakConstraint) {
   std::string_view src = ":~ p(X). [1@0, Y]";
   Parser parser(src);

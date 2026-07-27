@@ -79,15 +79,17 @@ TEST(GroundTest, NotOverAnonymousVariableHoldsWhenNothingMatches) {
 }
 
 // Each rule instance rules out the atoms matching its own binding, so the
-// q(2) instance carries no 'not' literal at all.
+// q(2) instance carries no 'not' literal at all. r is left to a choice, which
+// makes r(1, a) possible without being a fact, so the negation over it is
+// something the emitted rule still has to carry.
 TEST(GroundTest, NotOverAnonymousVariableIsPerBinding) {
   auto out = ground_source(
-      "p(1). p(2). r(1, a).\n"
+      "{ r(1, a) }. p(1). p(2).\n"
       "q(X) :- p(X), not r(X, _).\n");
   ASSERT_TRUE(out.ok()) << out.status();
-  EXPECT_THAT(*out, HasSubstr("4 6 r(1,a) 1 1\n"));
-  EXPECT_THAT(*out, HasSubstr("1 0 1 4 0 2 2 -1\n"));  // q(1) :- p(1), not 1
-  EXPECT_THAT(*out, HasSubstr("1 0 1 5 0 1 3\n"));     // q(2) :- p(2)
+  EXPECT_THAT(*out, HasSubstr("4 6 r(1,a) 1 6\n"));
+  EXPECT_THAT(*out, HasSubstr("1 0 1 3 0 1 -6\n"));  // q(1) :- not r(1,a)
+  EXPECT_THAT(*out, HasSubstr("1 0 1 4 0 0\n"));     // q(2), a fact itself
 }
 
 TEST(GroundTest, NotOverAnonymousVariableNestedInAFunctionTerm) {
@@ -97,8 +99,11 @@ TEST(GroundTest, NotOverAnonymousVariableNestedInAFunctionTerm) {
       "b :- not p(h(_)).\n");
   ASSERT_TRUE(out.ok()) << out.status();
   EXPECT_THAT(*out, HasSubstr("4 7 p(f(1)) 1 3\n"));
-  EXPECT_THAT(*out, HasSubstr("1 0 1 2 0 1 -3\n"));  // a :- not p(f(1))
-  EXPECT_THAT(*out, HasSubstr("1 0 1 1 0 0\n"));     // nothing matches h(_)
+  // p(f(1)) is a fact, so 'not p(f(1))' can never hold. a keeps its name but
+  // is left with no rule at all, which is how aspif says it is never true.
+  EXPECT_THAT(*out, HasSubstr("4 1 a 1 2\n"));
+  EXPECT_THAT(*out, Not(HasSubstr("1 0 1 2 ")));
+  EXPECT_THAT(*out, HasSubstr("1 0 1 1 0 0\n"));  // nothing matches h(_)
   EXPECT_THAT(*out, HasSubstr("4 1 b 1 1\n"));
 }
 
@@ -132,17 +137,187 @@ TEST(GroundTest, StringAtomPrintsWithOnePairOfQuotes) {
 TEST(GroundTest, VariableRuleGroundsOncePerMatch) {
   auto out = ground_source("p(1). p(2). q(X) :- p(X).");
   ASSERT_TRUE(out.ok()) << out.status();
+  // Each q rests on a fact alone, so each q is a fact and needs no rule body.
   EXPECT_EQ(*out,
             "asp 1 0 0\n"
             "1 0 1 1 0 0\n"
             "1 0 1 2 0 0\n"
-            "1 0 1 3 0 1 1\n"
-            "1 0 1 4 0 1 2\n"
+            "1 0 1 3 0 0\n"
+            "1 0 1 4 0 0\n"
             "4 4 p(1) 1 1\n"
             "4 4 p(2) 1 2\n"
             "4 4 q(1) 1 3\n"
             "4 4 q(2) 1 4\n"
             "0\n");
+}
+
+// A rule that keeps its own place still loses the fact literals in its body:
+// they hold in every answer set, so requiring them says nothing.
+TEST(GroundTest, FactBodyLiteralsDropOutOfARuleThatStays) {
+  auto out = ground_source("{ a }. r. p :- a. s :- r, p.");
+  ASSERT_TRUE(out.ok()) << out.status();
+  // r=1, then the choice's pair _cr0=2 and a=3, then p=4 and s=5. a is only
+  // possible, not a fact, so p and s are not facts either, but 's :- r, p.'
+  // comes out as 's :- p.' with the fact r gone.
+  EXPECT_EQ(*out,
+            "asp 1 0 0\n"
+            "1 0 1 1 0 0\n"
+            "1 0 1 2 0 1 -3\n"
+            "1 0 1 3 0 1 -2\n"
+            "1 0 1 4 0 1 3\n"
+            "1 0 1 5 0 1 4\n"
+            "4 1 r 1 1\n"
+            "4 1 a 1 3\n"
+            "4 1 p 1 4\n"
+            "4 1 s 1 5\n"
+            "0\n");
+}
+
+// An atom can be derived by a rule that makes no fact of it and only later be
+// derived again by one that does. Whatever reads it has to be reconsidered
+// then, even though that pass added no atom for the usual delta to carry.
+TEST(GroundTest, AnAtomThatBecomesAFactLateStillSpreadsItsFactness) {
+  auto out = ground_source(
+      "b. c :- b. z :- not zz. zz :- not z.\n"
+      "p :- b, not z.\n"
+      "p :- c.\n"
+      "d :- p.");
+  ASSERT_TRUE(out.ok()) << out.status();
+  // p's component runs both p rules in one pass: 'p :- b, not z.' derives p
+  // first and makes no fact of it, then 'p :- c.' finds p already there and
+  // marks it. d is emitted as a fact only if that marking is noticed.
+  EXPECT_THAT(*out, HasSubstr("4 1 p 1 5\n"));
+  EXPECT_THAT(*out, HasSubstr("4 1 d 1 6\n"));
+  EXPECT_THAT(*out, HasSubstr("1 0 1 5 0 0\n"));  // p, a fact
+  EXPECT_THAT(*out, HasSubstr("1 0 1 6 0 0\n"));  // d, a fact
+}
+
+// An aggregate over facts alone has a value grounding can work out, so the
+// rule needs no weight body, no auxiliary atoms, and no rule of its own: the
+// head is a fact.
+TEST(GroundTest, AnAggregateOverFactsDerivesAFact) {
+  auto out = ground_source("p(1). p(2). q :- #count{ X : p(X) } >= 1.");
+  ASSERT_TRUE(out.ok()) << out.status();
+  EXPECT_EQ(*out,
+            "asp 1 0 0\n"
+            "1 0 1 1 0 0\n"
+            "1 0 1 2 0 0\n"
+            "1 0 1 3 0 0\n"
+            "4 4 p(1) 1 1\n"
+            "4 4 p(2) 1 2\n"
+            "4 1 q 1 3\n"
+            "0\n");
+}
+
+// The same value settles the other way when it misses the bound: the rule can
+// hold in no answer set, so it is not emitted at all.
+TEST(GroundTest, AnAggregateOverFactsThatMissesItsBoundDropsTheRule) {
+  auto out = ground_source("p(1). p(2). q :- #count{ X : p(X) } >= 5. s.");
+  ASSERT_TRUE(out.ok()) << out.status();
+  EXPECT_THAT(*out, HasSubstr("4 1 q 1 4\n"));
+  EXPECT_THAT(*out, Not(HasSubstr("1 0 1 4 ")));
+}
+
+// An aggregate that mentions none of the rule's variables reads the same way
+// for every instance, so one encoding serves them all.
+TEST(GroundTest, AnAggregateIsGroundOncePerWayOfReadingIt) {
+  auto out = ground_source(
+      "dom(1). dom(2). { r(9) }. p(X) :- dom(X), #count{ Y : r(Y) } >= 1.");
+  ASSERT_TRUE(out.ok()) << out.status();
+  // One '>= 1' atom (7) over r(9), which both p rules rest on. The dom facts
+  // drop out of their bodies, leaving the aggregate as the whole of each.
+  EXPECT_EQ(*out,
+            "asp 1 0 0\n"
+            "1 0 1 1 0 1 -2\n"
+            "1 0 1 2 0 1 -1\n"
+            "1 0 1 3 0 0\n"
+            "1 0 1 4 0 0\n"
+            "1 0 1 7 1 1 1 2 1\n"
+            "1 0 1 5 0 1 7\n"
+            "1 0 1 6 0 1 7\n"
+            "4 4 r(9) 1 2\n"
+            "4 6 dom(1) 1 3\n"
+            "4 6 dom(2) 1 4\n"
+            "4 4 p(1) 1 5\n"
+            "4 4 p(2) 1 6\n"
+            "0\n");
+}
+
+// An aggregate that does mention a rule variable reads differently for each
+// value of it, so each gets its own encoding: atom 9 counts r(1) for p(1) and
+// atom 10 counts r(2) for p(2).
+TEST(GroundTest, AnAggregateOverARuleVariableIsGroundPerValue) {
+  auto out = ground_source(
+      "dom(1). dom(2). { r(1) }. { r(2) }.\n"
+      "p(X) :- dom(X), #count{ Y : r(Y), Y = X } >= 1.");
+  ASSERT_TRUE(out.ok()) << out.status();
+  EXPECT_THAT(*out, HasSubstr("1 0 1 9 1 1 1 3 1\n"));
+  EXPECT_THAT(*out, HasSubstr("1 0 1 7 0 1 9\n"));
+  EXPECT_THAT(*out, HasSubstr("1 0 1 10 1 1 1 4 1\n"));
+  EXPECT_THAT(*out, HasSubstr("1 0 1 8 0 1 10\n"));
+}
+
+// An element with no condition puts its tuple in the set whatever else holds,
+// so the count is 1 and nothing about it is left to the solver.
+TEST(GroundTest, AggregateElementWithNoConditionCountsUnconditionally) {
+  auto out = ground_source("r :- #count{ 1 } >= 1. s :- #count{ 1 } >= 2.");
+  ASSERT_TRUE(out.ok()) << out.status();
+  EXPECT_EQ(*out,
+            "asp 1 0 0\n"
+            "1 0 1 2 0 0\n"
+            "4 1 s 1 1\n"
+            "4 1 r 1 2\n"
+            "0\n");
+}
+
+// An aggregate with no elements at all counts nothing, so '>= 1' fails where
+// '>= 0' holds.
+TEST(GroundTest, AggregateWithNoElementsCountsZero) {
+  auto out = ground_source("q :- #count{ } >= 0. z :- #count{ } >= 1.");
+  ASSERT_TRUE(out.ok()) << out.status();
+  EXPECT_EQ(*out,
+            "asp 1 0 0\n"
+            "1 0 1 2 0 0\n"
+            "4 1 z 1 1\n"
+            "4 1 q 1 2\n"
+            "0\n");
+}
+
+// One tuple the solver still decides is enough to leave the whole value open,
+// so the weight body comes back.
+TEST(GroundTest, AnAggregateOverAChoiceIsLeftToTheSolver) {
+  auto out = ground_source("{ p(1) }. p(2). q :- #count{ X : p(X) } >= 1.");
+  ASSERT_TRUE(out.ok()) << out.status();
+  // p(1)=2 is the choice's atom and p(2)=3 a fact. p(1) is counted through
+  // its own atom; p(2)'s tuple rests on a fact, so its support is empty and
+  // it needs an atom of its own (5) to be counted at all.
+  EXPECT_THAT(*out, HasSubstr("1 0 1 5 0 0\n"));
+  EXPECT_THAT(*out, HasSubstr("1 0 1 6 1 1 2 2 1 5 1\n"));
+  EXPECT_THAT(*out, HasSubstr("1 0 1 4 0 1 6\n"));
+}
+
+// A 'not' inside an element condition can point at a predicate this rule's
+// component is derived before, which would read here as an empty set rather
+// than an undecided one, so an element carrying one is never settled.
+TEST(GroundTest, NegationInsideAnElementLeavesTheAggregateToTheSolver) {
+  auto out =
+      ground_source("p(1). p(2). q :- #count{ X : p(X), not r(X) } >= 1.");
+  ASSERT_TRUE(out.ok()) << out.status();
+  EXPECT_THAT(*out, HasSubstr("1 0 1 6 1 1 2 4 1 5 1\n"));
+  EXPECT_THAT(*out, HasSubstr("1 0 1 3 0 1 6\n"));
+}
+
+// An aggregate under 'not' is settled when its rule is emitted, by which time
+// every component has derived, but not while atoms are still being derived:
+// its element predicates reach the head through negative edges only, which do
+// not order components. So q comes out with an empty body, but a rule reading
+// q still carries it rather than becoming a fact of its own.
+TEST(GroundTest, AnAggregateUnderNotIsSettledOnlyWhenTheRuleIsEmitted) {
+  auto out =
+      ground_source("p(1). p(2). q :- not #count{ X : p(X) } >= 3. s :- q.");
+  ASSERT_TRUE(out.ok()) << out.status();
+  EXPECT_THAT(*out, HasSubstr("1 0 1 1 0 0\n"));    // q, with nothing left
+  EXPECT_THAT(*out, HasSubstr("1 0 1 2 0 1 1\n"));  // s :- q
 }
 
 TEST(GroundTest, RecursionReachesFixpoint) {
@@ -152,14 +327,15 @@ TEST(GroundTest, RecursionReachesFixpoint) {
       "r(X, Z) :- r(X, Y), e(Y, Z).");
   ASSERT_TRUE(out.ok()) << out.status();
   // e(a,b)=1, e(b,c)=2, r(a,b)=3, r(b,c)=4, r(a,c)=5. The last rule fires
-  // once: r(a,b) joined with e(b,c) gives r(a,c).
+  // once: r(a,b) joined with e(b,c) gives r(a,c). Every atom follows from the
+  // two e facts alone, so the whole program is facts and no rules.
   EXPECT_EQ(*out,
             "asp 1 0 0\n"
             "1 0 1 1 0 0\n"
             "1 0 1 2 0 0\n"
-            "1 0 1 3 0 1 1\n"
-            "1 0 1 4 0 1 2\n"
-            "1 0 1 5 0 2 3 2\n"
+            "1 0 1 3 0 0\n"
+            "1 0 1 4 0 0\n"
+            "1 0 1 5 0 0\n"
             "4 6 e(a,b) 1 1\n"
             "4 6 e(b,c) 1 2\n"
             "4 6 r(a,b) 1 3\n"
@@ -179,19 +355,19 @@ TEST(GroundTest, NonRecursiveRuleSeesFullRecursiveFixpoint) {
       "r(X, Z) :- r(X, Y), e(Y, Z).\n"
       "t(X) :- r(X, Y).");
   ASSERT_TRUE(out.ok()) << out.status();
-  // e(a,b)=1, e(b,c)=2, r(a,b)=3, r(b,c)=4, r(a,c)=5, t(a)=6, t(b)=7. t(a)
-  // has two support rules: one from r(a,b), one from r(a,c), the atom r's
-  // recursion only derives on its second pass.
+  // e(a,b)=1, e(b,c)=2, r(a,b)=3, r(b,c)=4, r(a,c)=5, t(a)=6, t(b)=7. t(a) is
+  // derived twice, from r(a,b) and from r(a,c), the atom r's recursion only
+  // derives on its second pass, but both make it the same fact, and a fact is
+  // stated once however many rules derive it.
   EXPECT_EQ(*out,
             "asp 1 0 0\n"
             "1 0 1 1 0 0\n"
             "1 0 1 2 0 0\n"
-            "1 0 1 3 0 1 1\n"
-            "1 0 1 4 0 1 2\n"
-            "1 0 1 5 0 2 3 2\n"
-            "1 0 1 6 0 1 3\n"
-            "1 0 1 7 0 1 4\n"
-            "1 0 1 6 0 1 5\n"
+            "1 0 1 3 0 0\n"
+            "1 0 1 4 0 0\n"
+            "1 0 1 5 0 0\n"
+            "1 0 1 6 0 0\n"
+            "1 0 1 7 0 0\n"
             "4 6 e(a,b) 1 1\n"
             "4 6 e(b,c) 1 2\n"
             "4 6 r(a,b) 1 3\n"
@@ -202,13 +378,14 @@ TEST(GroundTest, NonRecursiveRuleSeesFullRecursiveFixpoint) {
             "0\n");
 }
 
-TEST(GroundTest, NegationAgainstUnrelatedRecursiveComponentKeepsDerivedAtom) {
+TEST(GroundTest, NegationAgainstUnrelatedRecursiveComponentSeesDerivedAtom) {
   // r/2 is its own recursive component and has no positive-dependency link
   // to p/1 or s/1; s only refers to r through 'not'. r(a, c) only shows up
   // once the recursion reaches its second pass, so this checks that emission
-  // sees it as derived and keeps 'not r(a, c)' in the body. If rules were
-  // ever emitted before r's component had fully run, this would wrongly look
-  // like r(a, c) is underivable and drop the negation instead.
+  // sees what that pass derived. Everything r rests on is a fact, so r(a, c)
+  // is a fact too, 'not r(a, c)' can never hold, and neither s rule survives.
+  // If rules were ever emitted before r's component had fully run, this would
+  // wrongly look like r(a, c) is underivable and emit the s rules instead.
   auto out = ground_source(
       "p(1). p(2).\n"
       "e(a, b). e(b, c).\n"
@@ -216,23 +393,19 @@ TEST(GroundTest, NegationAgainstUnrelatedRecursiveComponentKeepsDerivedAtom) {
       "r(X, Z) :- r(X, Y), e(Y, Z).\n"
       "s(N) :- p(N), not r(a, c).");
   ASSERT_TRUE(out.ok()) << out.status();
-  // Components now derive in topological order before anything is emitted,
-  // so e/r (r's component has no positive edge to p or s) derive before
-  // p/s: e(a,b)=1, e(b,c)=2, r(a,b)=3, r(b,c)=4, r(a,c)=5, p(1)=6, p(2)=7.
-  // r(a,c) is derived through the recursion, so 'not r(a, c)' stays in both
-  // s(1) and s(2)'s bodies, negated: 's(1) :- p(1), not r(a, c).' and
-  // likewise for s(2).
+  // Components derive in topological order before anything is emitted, so e/r
+  // (r's component has no positive edge to p or s) derive before p/s:
+  // e(a,b)=1, e(b,c)=2, r(a,b)=3, r(b,c)=4, r(a,c)=5, p(1)=6, p(2)=7. s(1)=8
+  // and s(2)=9 keep their names but get no rule, so no answer set holds them.
   EXPECT_EQ(*out,
             "asp 1 0 0\n"
             "1 0 1 1 0 0\n"
             "1 0 1 2 0 0\n"
-            "1 0 1 3 0 1 1\n"
-            "1 0 1 4 0 1 2\n"
-            "1 0 1 5 0 2 3 2\n"
+            "1 0 1 3 0 0\n"
+            "1 0 1 4 0 0\n"
+            "1 0 1 5 0 0\n"
             "1 0 1 6 0 0\n"
             "1 0 1 7 0 0\n"
-            "1 0 1 8 0 2 6 -5\n"
-            "1 0 1 9 0 2 7 -5\n"
             "4 6 e(a,b) 1 1\n"
             "4 6 e(b,c) 1 2\n"
             "4 6 r(a,b) 1 3\n"
@@ -245,15 +418,15 @@ TEST(GroundTest, NegationAgainstUnrelatedRecursiveComponentKeepsDerivedAtom) {
             "0\n");
 }
 
-TEST(GroundTest, NegationAgainstLaterComponentKeepsDerivedAtom) {
+TEST(GroundTest, NegationAgainstLaterComponentSeesDerivedAtom) {
   // c/2 is defined before q/1 and p/1 in the source, so its component id ends
   // up *higher* than p's: p's component has no positive edge into c (only
   // 'not c' references it), while q positively reaches p, pulling p's whole
   // component earlier in topological order. If grounding ever emits a
   // component's rules right after deriving that component, instead of
   // deriving every component first, it would process p before c has any
-  // atoms and wrongly conclude 'not c(x, z)' can never fail, dropping the
-  // negation instead of keeping it.
+  // atoms and wrongly conclude 'not c(x, z)' can never fail, emitting the p
+  // rules instead of dropping them.
   auto out = ground_source(
       "a(x, y). a(y, z).\n"
       "c(X, Y) :- a(X, Y).\n"
@@ -265,19 +438,17 @@ TEST(GroundTest, NegationAgainstLaterComponentKeepsDerivedAtom) {
   // a/c's (ids 2-3): q(1)=1, q(2)=2, p(1)=3, p(2)=4, a(x,y)=5, a(y,z)=6,
   // c(x,y)=7, c(y,z)=8, c(x,z)=9. c(x,z) is only derived on c's second pass,
   // after p has already been derived, but since nothing is emitted until
-  // every component has derived, 'not c(x, z)' still stays in both p(1) and
-  // p(2)'s bodies, negated.
+  // every component has derived, both p rules see it as the fact it is and
+  // are dropped: p(1) and p(2) are named but have no rule.
   EXPECT_EQ(*out,
             "asp 1 0 0\n"
             "1 0 1 1 0 0\n"
             "1 0 1 2 0 0\n"
-            "1 0 1 3 0 2 1 -9\n"
-            "1 0 1 4 0 2 2 -9\n"
             "1 0 1 5 0 0\n"
             "1 0 1 6 0 0\n"
-            "1 0 1 7 0 1 5\n"
-            "1 0 1 8 0 1 6\n"
-            "1 0 1 9 0 2 7 6\n"
+            "1 0 1 7 0 0\n"
+            "1 0 1 8 0 0\n"
+            "1 0 1 9 0 0\n"
             "4 4 q(1) 1 1\n"
             "4 4 q(2) 1 2\n"
             "4 4 p(1) 1 3\n"
@@ -290,20 +461,20 @@ TEST(GroundTest, NegationAgainstLaterComponentKeepsDerivedAtom) {
             "0\n");
 }
 
-TEST(GroundTest, NegationKeptWhenPossibleDroppedWhenNot) {
+TEST(GroundTest, NegationOverAFactKillsTheRuleOverAnUnderivableAtomGoesAway) {
   auto out = ground_source("p(1). p(2). q(1). s(X) :- p(X), not q(X).");
   ASSERT_TRUE(out.ok()) << out.status();
   // q/1 has no positive-dependency link to p/1 or s/1, so its singleton
   // component derives before p's: q(1)=1, p(1)=2, p(2)=3, s(1)=4, s(2)=5.
-  // q(1) is derivable, so 's(1) :- p(1), not q(1).' keeps the negation.
-  // q(2) is not, so 'not q(2)' is dropped: 's(2) :- p(2).'.
+  // q(1) is a fact, so 'not q(1)' can never hold and s(1) gets no rule at
+  // all. q(2) is underivable, so 'not q(2)' is dropped as satisfied, leaving
+  // 's(2) :- p(2).', and p(2) is a fact, so s(2) is one too.
   EXPECT_EQ(*out,
             "asp 1 0 0\n"
             "1 0 1 1 0 0\n"
             "1 0 1 2 0 0\n"
             "1 0 1 3 0 0\n"
-            "1 0 1 4 0 2 2 -1\n"
-            "1 0 1 5 0 1 3\n"
+            "1 0 1 5 0 0\n"
             "4 4 q(1) 1 1\n"
             "4 4 p(1) 1 2\n"
             "4 4 p(2) 1 3\n"
@@ -312,14 +483,41 @@ TEST(GroundTest, NegationKeptWhenPossibleDroppedWhenNot) {
             "0\n");
 }
 
-TEST(GroundTest, ComparisonFiltersInstances) {
-  auto out = ground_source("p(1). p(2). q(X) :- p(X), X < 2.");
+// An atom a choice leaves open is derivable without being a fact, which is
+// where a 'not' over it survives into the emitted rule.
+TEST(GroundTest, NegationKeptOverAnAtomThatIsOnlyPossible) {
+  auto out = ground_source("{ q(1) }. p(1). p(2). s(X) :- p(X), not q(X).");
   ASSERT_TRUE(out.ok()) << out.status();
+  // p(1)=1, p(2)=2, s(1)=3, s(2)=4, and the choice's own pair of atoms
+  // _cr0=5 and q(1)=6, each derived from the other's absence. 's(1) :- p(1),
+  // not q(1).' keeps the negation and loses the fact p(1); s(2) has nothing
+  // to rule out, since q(2) is underivable, so it is a fact.
   EXPECT_EQ(*out,
             "asp 1 0 0\n"
             "1 0 1 1 0 0\n"
             "1 0 1 2 0 0\n"
-            "1 0 1 3 0 1 1\n"
+            "1 0 1 3 0 1 -6\n"
+            "1 0 1 4 0 0\n"
+            "1 0 1 5 0 1 -6\n"
+            "1 0 1 6 0 1 -5\n"
+            "4 4 p(1) 1 1\n"
+            "4 4 p(2) 1 2\n"
+            "4 4 s(1) 1 3\n"
+            "4 4 s(2) 1 4\n"
+            "4 4 q(1) 1 6\n"
+            "0\n");
+}
+
+TEST(GroundTest, ComparisonFiltersInstances) {
+  auto out = ground_source("p(1). p(2). q(X) :- p(X), X < 2.");
+  ASSERT_TRUE(out.ok()) << out.status();
+  // '1 < 2' held at grounding time, so q(1) rests on the fact p(1) alone and
+  // is a fact in turn.
+  EXPECT_EQ(*out,
+            "asp 1 0 0\n"
+            "1 0 1 1 0 0\n"
+            "1 0 1 2 0 0\n"
+            "1 0 1 3 0 0\n"
             "4 4 p(1) 1 1\n"
             "4 4 p(2) 1 2\n"
             "4 4 q(1) 1 3\n"
@@ -343,12 +541,15 @@ TEST(GroundTest, ConstraintHasNoHead) {
   ASSERT_TRUE(out.ok()) << out.status();
   // p and q are each their own singleton component with no edges between
   // them (a constraint's body predicates get no outgoing edges at all), so
-  // q's component happens to derive first: q(1)=1, p(1)=2.
+  // q's component happens to derive first: q(1)=1, p(1)=2. Both are facts, so
+  // the constraint keeps neither, and a constraint with an empty body rules
+  // out every answer set, which is the right reading of ':- p(1), q(1).'
+  // when p(1) and q(1) both hold.
   EXPECT_EQ(*out,
             "asp 1 0 0\n"
             "1 0 1 1 0 0\n"
             "1 0 1 2 0 0\n"
-            "1 0 0 0 2 2 1\n"
+            "1 0 0 0 0\n"
             "4 4 q(1) 1 1\n"
             "4 4 p(1) 1 2\n"
             "0\n");
@@ -359,10 +560,10 @@ TEST(GroundTest, ZeroArityAtoms) {
   ASSERT_TRUE(out.ok()) << out.status();
   // p and q are each singleton components with no positive edge between
   // them ('not p' doesn't count), so q's component happens to derive first:
-  // q=1, p=2. 'not p' is still kept since p is derivable by emit time.
+  // q=1, p=2. p is a fact, so 'not p' can never hold and q keeps its name but
+  // gets no rule.
   EXPECT_EQ(*out,
             "asp 1 0 0\n"
-            "1 0 1 1 0 1 -2\n"
             "1 0 1 2 0 0\n"
             "4 1 q 1 1\n"
             "4 1 p 1 2\n"
@@ -370,63 +571,65 @@ TEST(GroundTest, ZeroArityAtoms) {
 }
 
 TEST(GroundTest, CountAggregateLowerBound) {
-  // p=1, q=2. Emitting q's rule allocates the element's aux atom (3, backed
-  // by 'p') and the '>= 1' bound-check atom (4, a weight rule over {3: 1}).
-  auto out = ground_source("p. q :- #count{ 1 : p } > 0.");
+  // p is left to a choice so the count stays open: p=2, q=3. The element's one
+  // tuple rests on p alone, so the weight body counts p itself, and only the
+  // '>= 1' bound-check atom (4) has to be invented.
+  auto out = ground_source("{ p }. q :- #count{ 1 : p } > 0.");
   ASSERT_TRUE(out.ok()) << out.status();
   EXPECT_EQ(*out,
             "asp 1 0 0\n"
-            "1 0 1 1 0 0\n"
-            "1 0 1 3 0 1 1\n"
-            "1 0 1 4 1 1 1 3 1\n"
-            "1 0 1 2 0 1 4\n"
-            "4 1 p 1 1\n"
-            "4 1 q 1 2\n"
-            "0\n");
-}
-
-TEST(GroundTest, SumAggregateWeighsByFirstTerm) {
-  // w(1,3)=1, w(2,5)=2, q=3. The element's first term (the weight) is V, not
-  // I: aux atoms 4 and 5 back the two element instances, and the weight rule
-  // sums their weights (3 and 5) rather than counting them.
-  auto out = ground_source("w(1,3). w(2,5). q :- #sum{ V,I : w(I,V) } >= 4.");
-  ASSERT_TRUE(out.ok()) << out.status();
-  EXPECT_EQ(*out,
-            "asp 1 0 0\n"
-            "1 0 1 1 0 0\n"
-            "1 0 1 2 0 0\n"
-            "1 0 1 4 0 1 1\n"
-            "1 0 1 5 0 1 2\n"
-            "1 0 1 6 1 4 2 4 3 5 5\n"
-            "1 0 1 3 0 1 6\n"
-            "4 6 w(1,3) 1 1\n"
-            "4 6 w(2,5) 1 2\n"
+            "1 0 1 1 0 1 -2\n"
+            "1 0 1 2 0 1 -1\n"
+            "1 0 1 4 1 1 1 2 1\n"
+            "1 0 1 3 0 1 4\n"
+            "4 1 p 1 2\n"
             "4 1 q 1 3\n"
             "0\n");
 }
 
-TEST(GroundTest, CountAggregateCombinedLowerAndUpperBound) {
-  // Both bound sides are present, so both a "low_ok" atom (8, count >= 1)
-  // and a "high_bad" atom (9, count >= 3) get defined, and q's rule requires
-  // low_ok and not high_bad together.
+TEST(GroundTest, SumAggregateWeighsByFirstTerm) {
+  // w(1,3)=3, w(2,5)=4, q=5. The element's first term (the weight) is V, not
+  // I: the weight body holds the two w atoms weighing 3 and 5, rather than
+  // counting them.
   auto out =
-      ground_source("p(1). p(2). p(3). q :- 1 <= #count{ X : p(X) } <= 2.");
+      ground_source("{ w(1,3) }. { w(2,5) }. q :- #sum{ V,I : w(I,V) } >= 4.");
   ASSERT_TRUE(out.ok()) << out.status();
   EXPECT_EQ(*out,
             "asp 1 0 0\n"
-            "1 0 1 1 0 0\n"
-            "1 0 1 2 0 0\n"
-            "1 0 1 3 0 0\n"
-            "1 0 1 5 0 1 1\n"
-            "1 0 1 6 0 1 2\n"
-            "1 0 1 7 0 1 3\n"
-            "1 0 1 8 1 1 3 5 1 6 1 7 1\n"
-            "1 0 1 9 1 3 3 5 1 6 1 7 1\n"
-            "1 0 1 4 0 2 8 -9\n"
-            "4 4 p(1) 1 1\n"
-            "4 4 p(2) 1 2\n"
-            "4 4 p(3) 1 3\n"
-            "4 1 q 1 4\n"
+            "1 0 1 1 0 1 -4\n"
+            "1 0 1 2 0 1 -3\n"
+            "1 0 1 3 0 1 -2\n"
+            "1 0 1 4 0 1 -1\n"
+            "1 0 1 6 1 4 2 3 3 4 5\n"
+            "1 0 1 5 0 1 6\n"
+            "4 6 w(1,3) 1 3\n"
+            "4 6 w(2,5) 1 4\n"
+            "4 1 q 1 5\n"
+            "0\n");
+}
+
+TEST(GroundTest, CountAggregateCombinedLowerAndUpperBound) {
+  // Both bound sides are present, so both a "low_ok" atom (8, count >= 1) and
+  // a "high_bad" atom (9, count >= 3) get defined over the three p atoms, and
+  // q's rule requires low_ok and not high_bad together.
+  auto out = ground_source(
+      "{ p(1) }. { p(2) }. { p(3) }. q :- 1 <= #count{ X : p(X) } <= 2.");
+  ASSERT_TRUE(out.ok()) << out.status();
+  EXPECT_EQ(*out,
+            "asp 1 0 0\n"
+            "1 0 1 1 0 1 -6\n"
+            "1 0 1 2 0 1 -5\n"
+            "1 0 1 3 0 1 -4\n"
+            "1 0 1 4 0 1 -3\n"
+            "1 0 1 5 0 1 -2\n"
+            "1 0 1 6 0 1 -1\n"
+            "1 0 1 8 1 1 3 4 1 5 1 6 1\n"
+            "1 0 1 9 1 3 3 4 1 5 1 6 1\n"
+            "1 0 1 7 0 2 8 -9\n"
+            "4 4 p(1) 1 4\n"
+            "4 4 p(2) 1 5\n"
+            "4 4 p(3) 1 6\n"
+            "4 1 q 1 7\n"
             "0\n");
 }
 
@@ -435,63 +638,68 @@ TEST(GroundTest, NegatedAggregateNegatesTheWholeBoundConjunction) {
   // (':- body, not #count{...} <bounds>.'). Since both bound sides are
   // present, negating requires a conjunction atom (7 := low_ok(5) and not
   // high_bad(6)) before the constraint can require 'not' of that.
-  auto out = ground_source("p(1). p(2). :- not 1 <= #count{ X : p(X) } <= 2.");
+  auto out =
+      ground_source("{ p(1) }. { p(2) }. :- not 1 <= #count{ X : p(X) } <= 2.");
   ASSERT_TRUE(out.ok()) << out.status();
   EXPECT_EQ(*out,
             "asp 1 0 0\n"
-            "1 0 1 1 0 0\n"
-            "1 0 1 2 0 0\n"
-            "1 0 1 3 0 1 1\n"
-            "1 0 1 4 0 1 2\n"
+            "1 0 1 1 0 1 -4\n"
+            "1 0 1 2 0 1 -3\n"
+            "1 0 1 3 0 1 -2\n"
+            "1 0 1 4 0 1 -1\n"
             "1 0 1 5 1 1 2 3 1 4 1\n"
             "1 0 1 6 1 3 2 3 1 4 1\n"
             "1 0 1 7 0 2 5 -6\n"
             "1 0 0 0 1 -7\n"
-            "4 4 p(1) 1 1\n"
-            "4 4 p(2) 1 2\n"
+            "4 4 p(1) 1 3\n"
+            "4 4 p(2) 1 4\n"
             "0\n");
 }
 
 TEST(GroundTest, CountAggregateEqualityUsesLowAndHighAuxAtoms) {
   // '= 2' needs both a low_eq (count >= 2) and high_bad_eq (count >= 3) atom,
-  // combined into eq_ok (6 := low_eq and not high_bad_eq); q's rule requires
+  // combined into eq_ok (5 := low_eq and not high_bad_eq); q's rule requires
   // eq_ok directly, != would require 'not eq_ok' instead.
-  auto out = ground_source("p(1). p(2). q :- #count{ X : p(X) } = 2.");
+  auto out = ground_source("{ p(1) }. { p(2) }. q :- #count{ X : p(X) } = 2.");
   ASSERT_TRUE(out.ok()) << out.status();
   EXPECT_EQ(*out,
             "asp 1 0 0\n"
-            "1 0 1 1 0 0\n"
-            "1 0 1 2 0 0\n"
-            "1 0 1 4 0 1 1\n"
-            "1 0 1 5 0 1 2\n"
-            "1 0 1 6 1 2 2 4 1 5 1\n"
-            "1 0 1 7 1 3 2 4 1 5 1\n"
-            "1 0 1 3 0 2 6 -7\n"
-            "4 4 p(1) 1 1\n"
-            "4 4 p(2) 1 2\n"
-            "4 1 q 1 3\n"
+            "1 0 1 1 0 1 -4\n"
+            "1 0 1 2 0 1 -3\n"
+            "1 0 1 3 0 1 -2\n"
+            "1 0 1 4 0 1 -1\n"
+            "1 0 1 6 1 2 2 3 1 4 1\n"
+            "1 0 1 7 1 3 2 3 1 4 1\n"
+            "1 0 1 5 0 2 6 -7\n"
+            "4 4 p(1) 1 3\n"
+            "4 4 p(2) 1 4\n"
+            "4 1 q 1 5\n"
             "0\n");
 }
 
 TEST(GroundTest, AggregateDedupesEqualTuplesAcrossElements) {
   // Two elements ('X : p(X)' and 'X : r(X)') both produce the tuple [1], so
-  // they share one aux atom (4) supported by two rules (one per element),
+  // they share one aux atom (6) supported by two rules (one per element),
   // and the weight rule only counts that shared atom once: the count can
-  // never reach 2, so q never derives even though both p(1) and r(1) hold.
-  auto out =
-      ground_source("p(1). r(1). q :- #count{ X : p(X) ; X : r(X) } >= 2.");
+  // never reach 2, so q is never derived even when both p(1) and r(1) hold.
+  // Two supports are what makes the atom necessary; a tuple with only one
+  // would be counted through the literal backing it.
+  auto out = ground_source(
+      "{ p(1) }. { r(1) }. q :- #count{ X : p(X) ; X : r(X) } >= 2.");
   ASSERT_TRUE(out.ok()) << out.status();
   EXPECT_EQ(*out,
             "asp 1 0 0\n"
-            "1 0 1 1 0 0\n"
-            "1 0 1 2 0 0\n"
-            "1 0 1 4 0 1 2\n"
-            "1 0 1 4 0 1 1\n"
-            "1 0 1 5 1 2 1 4 1\n"
-            "1 0 1 3 0 1 5\n"
-            "4 4 r(1) 1 1\n"
-            "4 4 p(1) 1 2\n"
-            "4 1 q 1 3\n"
+            "1 0 1 1 0 1 -2\n"
+            "1 0 1 2 0 1 -1\n"
+            "1 0 1 3 0 1 -4\n"
+            "1 0 1 4 0 1 -3\n"
+            "1 0 1 6 0 1 4\n"
+            "1 0 1 6 0 1 2\n"
+            "1 0 1 7 1 2 1 6 1\n"
+            "1 0 1 5 0 1 7\n"
+            "4 4 r(1) 1 2\n"
+            "4 4 p(1) 1 4\n"
+            "4 1 q 1 5\n"
             "0\n");
 }
 
@@ -506,8 +714,8 @@ TEST(GroundTest, WeakConstraintBecomesMinimize) {
             "asp 1 0 0\n"
             "1 0 1 1 0 0\n"
             "1 0 1 2 0 0\n"
-            "1 0 1 3 0 1 1\n"
-            "1 0 1 4 0 1 2\n"
+            "1 0 1 3 0 0\n"
+            "1 0 1 4 0 0\n"
             "2 0 2 3 1 4 1\n"
             "4 4 p(1) 1 1\n"
             "4 4 p(2) 1 2\n"
@@ -531,9 +739,9 @@ TEST(GroundTest, WeakConstraintsGroupByLevel) {
             "asp 1 0 0\n"
             "1 0 1 1 0 0\n"
             "1 0 1 2 0 0\n"
-            "1 0 1 3 0 1 2\n"
-            "1 0 1 4 0 1 2\n"
-            "1 0 1 5 0 1 1\n"
+            "1 0 1 3 0 0\n"
+            "1 0 1 4 0 0\n"
+            "1 0 1 5 0 0\n"
             "2 0 1 4 1\n"
             "2 2 2 3 5 5 3\n"
             "4 4 b(2) 1 1\n"
@@ -543,9 +751,9 @@ TEST(GroundTest, WeakConstraintsGroupByLevel) {
 
 TEST(GroundTest, WeakConstraintCountsEqualViolationsOnce) {
   // Both weak constraints produce the tuple (0, 1, 1), which is one ground
-  // _viol atom however many rules derive it. So atom 3 gets two support
-  // rules but appears once in the minimize statement: violating both costs 1
-  // in total, not 2.
+  // _viol atom however many rules derive it. So atom 3 appears once in the
+  // minimize statement: violating both costs 1 in total, not 2. Both a(1) and
+  // b(1) are facts, so the violation is a fact too, and unavoidable.
   auto out = ground_source(
       "a(1). b(1).\n"
       ":~ a(X). [1@0, X]\n"
@@ -555,8 +763,7 @@ TEST(GroundTest, WeakConstraintCountsEqualViolationsOnce) {
             "asp 1 0 0\n"
             "1 0 1 1 0 0\n"
             "1 0 1 2 0 0\n"
-            "1 0 1 3 0 1 2\n"
-            "1 0 1 3 0 1 1\n"
+            "1 0 1 3 0 0\n"
             "2 0 1 3 1\n"
             "4 4 b(1) 1 1\n"
             "4 4 a(1) 1 2\n"
@@ -573,8 +780,8 @@ TEST(GroundTest, WeakConstraintNonNumericWeightCostsNothing) {
             "asp 1 0 0\n"
             "1 0 1 1 0 0\n"
             "1 0 1 2 0 0\n"
-            "1 0 1 3 0 1 1\n"
-            "1 0 1 4 0 1 2\n"
+            "1 0 1 3 0 0\n"
+            "1 0 1 4 0 0\n"
             "2 0 1 4 1\n"
             "4 4 p(a) 1 1\n"
             "4 4 p(1) 1 2\n"
@@ -584,50 +791,51 @@ TEST(GroundTest, WeakConstraintNonNumericWeightCostsNothing) {
 TEST(GroundTest, SumIgnoresTuplesWithoutAnIntegerFirstTerm) {
   // #sum adds up only the tuples whose first term is an integer, so q(a)
   // contributes nothing and the weight body holds one literal, for p(1).
-  auto out = ground_source("p(1). q(a). r :- #sum{ X : p(X); Y : q(Y) } >= 1.");
+  auto out = ground_source(
+      "{ p(1) }. { q(a) }. r :- #sum{ X : p(X); Y : q(Y) } >= 1.");
   ASSERT_TRUE(out.ok()) << out.status();
-  EXPECT_THAT(*out, HasSubstr("1 0 1 5 1 1 1 4 1\n"));
+  EXPECT_THAT(*out, HasSubstr("1 0 1 6 1 1 1 4 1\n"));
 }
 
 TEST(GroundTest, CountIncludesTuplesWithoutAnIntegerFirstTerm) {
   // #count counts every tuple in the set, unlike #sum: both p(1) and q(a)
   // land in the weight body, so the count reaches 2.
-  auto out =
-      ground_source("p(1). q(a). r :- #count{ X : p(X); Y : q(Y) } >= 2.");
+  auto out = ground_source(
+      "{ p(1) }. { q(a) }. r :- #count{ X : p(X); Y : q(Y) } >= 2.");
   ASSERT_TRUE(out.ok()) << out.status();
-  EXPECT_THAT(*out, HasSubstr("1 0 1 6 1 2 2 4 1 5 1\n"));
+  EXPECT_THAT(*out, HasSubstr("1 0 1 6 1 2 2 4 1 2 1\n"));
 }
 
 TEST(GroundTest, NegativeSumWeightFlipsTheLiteral) {
-  // ASPIF weights must be positive, so '-1 * [tuple 3]' becomes
-  // '-1 + 1 * [not tuple 3]' and the bound moves from 0 to 1: atom 4 holds
-  // exactly when p's tuple is false, which is when the sum reaches 0.
-  auto out = ground_source("p. q :- #sum{ -1 : p } >= 0.");
+  // ASPIF weights must be positive, so '-1 * [p]' becomes '-1 + 1 * [not p]'
+  // and the bound moves from 0 to 1: atom 4 holds exactly when p is false,
+  // which is when the sum reaches 0.
+  auto out = ground_source("{ p }. q :- #sum{ -1 : p } >= 0.");
   ASSERT_TRUE(out.ok()) << out.status();
   EXPECT_EQ(*out,
             "asp 1 0 0\n"
-            "1 0 1 1 0 0\n"
-            "1 0 1 3 0 1 1\n"
-            "1 0 1 4 1 1 1 -3 1\n"
-            "1 0 1 2 0 1 4\n"
-            "4 1 p 1 1\n"
-            "4 1 q 1 2\n"
+            "1 0 1 1 0 1 -2\n"
+            "1 0 1 2 0 1 -1\n"
+            "1 0 1 4 1 1 1 -2 1\n"
+            "1 0 1 3 0 1 4\n"
+            "4 1 p 1 2\n"
+            "4 1 q 1 3\n"
             "0\n");
 }
 
 TEST(GroundTest, BoundNoPositiveWeightCanMissBecomesAFact) {
   // The sum is -1 or 0, so '>= -1' always holds. After the flip the bound is
   // 0, which positive weights always reach, so atom 4 is a plain fact.
-  auto out = ground_source("p. q :- #sum{ -1 : p } >= -1.");
+  auto out = ground_source("{ p }. q :- #sum{ -1 : p } >= -1.");
   ASSERT_TRUE(out.ok()) << out.status();
   EXPECT_EQ(*out,
             "asp 1 0 0\n"
-            "1 0 1 1 0 0\n"
-            "1 0 1 3 0 1 1\n"
+            "1 0 1 1 0 1 -2\n"
+            "1 0 1 2 0 1 -1\n"
             "1 0 1 4 0 0\n"
-            "1 0 1 2 0 1 4\n"
-            "4 1 p 1 1\n"
-            "4 1 q 1 2\n"
+            "1 0 1 3 0 1 4\n"
+            "4 1 p 1 2\n"
+            "4 1 q 1 3\n"
             "0\n");
 }
 
@@ -636,13 +844,13 @@ TEST(GroundTest, MixedSumWeightsFlipOnlyTheNegativeOnes) {
   // holds exactly when p is true and q is false.
   auto out = ground_source("{p}. {q}. r :- #sum{ 2 : p; -1 : q } >= 2.");
   ASSERT_TRUE(out.ok()) << out.status();
-  EXPECT_THAT(*out, HasSubstr("1 0 1 8 1 3 2 6 2 -7 1\n"));
+  EXPECT_THAT(*out, HasSubstr("1 0 1 6 1 3 2 4 2 -2 1\n"));
 }
 
 TEST(GroundTest, ZeroSumWeightIsLeftOutOfTheWeightBody) {
   // A tuple weighing 0 never changes the sum, so it gets no literal at all
   // and the bound of 0 leaves atom 4 a fact.
-  auto out = ground_source("p. q :- #sum{ 0 : p } >= 0.");
+  auto out = ground_source("{ p }. q :- #sum{ 0 : p } >= 0.");
   ASSERT_TRUE(out.ok()) << out.status();
   EXPECT_THAT(*out, HasSubstr("1 0 1 4 0 0\n"));
 }
@@ -660,8 +868,8 @@ TEST(GroundTest, ArithmeticInHeadTerm) {
             "asp 1 0 0\n"
             "1 0 1 1 0 0\n"
             "1 0 1 2 0 0\n"
-            "1 0 1 3 0 1 1\n"
-            "1 0 1 4 0 1 2\n"
+            "1 0 1 3 0 0\n"
+            "1 0 1 4 0 0\n"
             "4 4 p(1) 1 1\n"
             "4 4 p(2) 1 2\n"
             "4 4 q(2) 1 3\n"
@@ -678,7 +886,7 @@ TEST(GroundTest, ArithmeticInComparison) {
             "1 0 1 1 0 0\n"
             "1 0 1 2 0 0\n"
             "1 0 1 3 0 0\n"
-            "1 0 1 4 0 1 1\n"
+            "1 0 1 4 0 0\n"
             "4 4 p(1) 1 1\n"
             "4 4 p(2) 1 2\n"
             "4 4 p(3) 1 3\n"
@@ -711,7 +919,7 @@ TEST(GroundTest, UnaryMinusGivesNegativeNumbers) {
   EXPECT_EQ(*out,
             "asp 1 0 0\n"
             "1 0 1 1 0 0\n"
-            "1 0 1 2 0 1 1\n"
+            "1 0 1 2 0 0\n"
             "4 4 p(1) 1 1\n"
             "4 5 q(-1) 1 2\n"
             "0\n");
@@ -752,7 +960,7 @@ TEST(GroundTest, IllFormedHeadTermDropsTheInstance) {
             "asp 1 0 0\n"
             "1 0 1 1 0 0\n"
             "1 0 1 2 0 0\n"
-            "1 0 1 3 0 1 2\n"
+            "1 0 1 3 0 0\n"
             "4 4 p(0) 1 1\n"
             "4 4 p(2) 1 2\n"
             "4 4 q(2) 1 3\n"
@@ -792,9 +1000,9 @@ TEST(GroundTest, FunctionTermsMatchArgumentByArgument) {
             "1 0 1 1 0 0\n"
             "1 0 1 2 0 0\n"
             "1 0 1 3 0 0\n"
-            "1 0 1 4 0 1 3\n"
-            "1 0 1 5 0 1 1\n"
-            "1 0 1 6 0 1 2\n"
+            "1 0 1 4 0 0\n"
+            "1 0 1 5 0 0\n"
+            "1 0 1 6 0 0\n"
             "4 7 p(f(1)) 1 1\n"
             "4 7 p(f(2)) 1 2\n"
             "4 9 p(g(a,b)) 1 3\n"
@@ -812,7 +1020,7 @@ TEST(GroundTest, NestedFunctionTerms) {
   EXPECT_EQ(*out,
             "asp 1 0 0\n"
             "1 0 1 1 0 0\n"
-            "1 0 1 2 0 1 1\n"
+            "1 0 1 2 0 0\n"
             "4 10 p(f(g(1))) 1 1\n"
             "4 4 q(1) 1 2\n"
             "0\n");
@@ -830,7 +1038,7 @@ TEST(GroundTest, FunctionTermNeedsSameNameAndArity) {
             "1 0 1 1 0 0\n"
             "1 0 1 2 0 0\n"
             "1 0 1 3 0 0\n"
-            "1 0 1 4 0 1 1\n"
+            "1 0 1 4 0 0\n"
             "4 7 p(f(1)) 1 1\n"
             "4 7 p(g(1)) 1 2\n"
             "4 9 p(f(1,2)) 1 3\n"
@@ -848,7 +1056,7 @@ TEST(GroundTest, RepeatedVariableInsideFunctionTerm) {
             "asp 1 0 0\n"
             "1 0 1 1 0 0\n"
             "1 0 1 2 0 0\n"
-            "1 0 1 3 0 1 1\n"
+            "1 0 1 3 0 0\n"
             "4 9 p(f(1,1)) 1 1\n"
             "4 9 p(f(1,2)) 1 2\n"
             "4 4 q(1) 1 3\n"
@@ -880,8 +1088,8 @@ TEST(GroundTest, AssignmentBindsAVariable) {
             "asp 1 0 0\n"
             "1 0 1 1 0 0\n"
             "1 0 1 2 0 0\n"
-            "1 0 1 3 0 1 1\n"
-            "1 0 1 4 0 1 2\n"
+            "1 0 1 3 0 0\n"
+            "1 0 1 4 0 0\n"
             "4 4 p(1) 1 1\n"
             "4 4 p(2) 1 2\n"
             "4 4 q(2) 1 3\n"
@@ -939,25 +1147,26 @@ TEST(GroundTest, IllFormedAssignmentDropsTheInstance) {
 
 TEST(GroundTest, AssignmentBoundVariableUsedByALaterLiteral) {
   auto out = ground_source(
-      "p(1). p(2). r(2).\n"
+      "{ r(2) }. p(1). p(2).\n"
       "q(X) :- p(X), Y = X + 1, not r(Y).");
   ASSERT_TRUE(out.ok()) << out.status();
-  // X = 1 gives Y = 2, and r(2) is derived, so q(1) keeps 'not r(2)' in its
-  // body. X = 2 gives Y = 3, which r/1 never derived, so q(2) is a fact.
-  // r(2)=1, p(1)=2, p(2)=3, q(1)=4, q(2)=5: r/1 is its own component and is
-  // grounded before p/1.
+  // X = 1 gives Y = 2, and the choice leaves r(2) open, so q(1) keeps 'not
+  // r(2)' in its body. X = 2 gives Y = 3, which r/1 never derived, so q(2) is
+  // a fact. p(1)=1, p(2)=2, q(1)=3, q(2)=4, and the choice's own pair of atoms
+  // _cr0=5 and r(2)=6.
   EXPECT_EQ(*out,
             "asp 1 0 0\n"
             "1 0 1 1 0 0\n"
             "1 0 1 2 0 0\n"
-            "1 0 1 3 0 0\n"
-            "1 0 1 4 0 2 2 -1\n"
-            "1 0 1 5 0 1 3\n"
-            "4 4 r(2) 1 1\n"
-            "4 4 p(1) 1 2\n"
-            "4 4 p(2) 1 3\n"
-            "4 4 q(1) 1 4\n"
-            "4 4 q(2) 1 5\n"
+            "1 0 1 3 0 1 -6\n"
+            "1 0 1 4 0 0\n"
+            "1 0 1 5 0 1 -6\n"
+            "1 0 1 6 0 1 -5\n"
+            "4 4 p(1) 1 1\n"
+            "4 4 p(2) 1 2\n"
+            "4 4 q(1) 1 3\n"
+            "4 4 q(2) 1 4\n"
+            "4 4 r(2) 1 6\n"
             "0\n");
 }
 
@@ -974,44 +1183,43 @@ TEST(GroundTest, InequalityDoesNotAssign) {
 // that check for that value.
 
 TEST(GroundTest, CountAggregateValueBindsAVariable) {
-  auto out = ground_source("p. q(S) :- #count{ 1 : p } = S.");
+  auto out = ground_source("{ p }. q(S) :- #count{ 1 : p } = S.");
   ASSERT_TRUE(out.ok()) << out.status();
-  // The count is 0 or 1, so q(0)=2 and q(1)=3 are both ground. Each gets its
-  // own copy of the element's aux atom and bound checks: q(0) needs 'count >=
-  // 0' (5, a fact) and not 'count >= 1' (6), q(1) needs 'count >= 1' (8) and
-  // not 'count >= 2' (9). p is a fact, so a solver keeps only q(1).
+  // The count is 0 or 1, so q(0)=3 and q(1)=4 are both ground, each with its
+  // own bound checks over p: q(0) needs 'count >= 0' (5, a fact) and not
+  // 'count >= 1' (6), q(1) needs 'count >= 1' (7) and not 'count >= 2' (8).
+  // A solver keeps whichever matches its choice of p.
   EXPECT_EQ(*out,
             "asp 1 0 0\n"
-            "1 0 1 1 0 0\n"
-            "1 0 1 4 0 1 1\n"
+            "1 0 1 1 0 1 -2\n"
+            "1 0 1 2 0 1 -1\n"
             "1 0 1 5 0 0\n"
-            "1 0 1 6 1 1 1 4 1\n"
-            "1 0 1 2 0 2 5 -6\n"
-            "1 0 1 7 0 1 1\n"
-            "1 0 1 8 1 1 1 7 1\n"
-            "1 0 1 9 1 2 1 7 1\n"
-            "1 0 1 3 0 2 8 -9\n"
-            "4 1 p 1 1\n"
-            "4 4 q(0) 1 2\n"
-            "4 4 q(1) 1 3\n"
+            "1 0 1 6 1 1 1 2 1\n"
+            "1 0 1 3 0 2 5 -6\n"
+            "1 0 1 7 1 1 1 2 1\n"
+            "1 0 1 8 1 2 1 2 1\n"
+            "1 0 1 4 0 2 7 -8\n"
+            "4 1 p 1 2\n"
+            "4 4 q(0) 1 3\n"
+            "4 4 q(1) 1 4\n"
             "0\n");
 }
 
 TEST(GroundTest, EmptyAggregateValueBindsZero) {
-  // No element can produce a tuple, so the only value the count can take is 0.
+  // No element can produce a tuple, so the count is 0 whatever a solver does:
+  // the only value S takes is 0, and q(0) comes out as a fact.
   auto out = ground_source("q(S) :- #count{ X : p(X) } = S.");
   ASSERT_TRUE(out.ok()) << out.status();
   EXPECT_EQ(*out,
             "asp 1 0 0\n"
-            "1 0 1 2 0 0\n"
-            "1 0 1 3 1 1 0\n"
-            "1 0 1 1 0 2 2 -3\n"
+            "1 0 1 1 0 0\n"
             "4 4 q(0) 1 1\n"
             "0\n");
 }
 
 TEST(GroundTest, AggregateValueBindsFromEitherSide) {
-  auto out = ground_source("p(1). p(2). q(S) :- S = #count{ X : p(X) }.");
+  auto out =
+      ground_source("{ p(1) }. { p(2) }. q(S) :- S = #count{ X : p(X) }.");
   ASSERT_TRUE(out.ok()) << out.status();
   EXPECT_THAT(*out, HasSubstr("q(0)"));
   EXPECT_THAT(*out, HasSubstr("q(1)"));
@@ -1022,8 +1230,8 @@ TEST(GroundTest, AggregateValueBindsFromEitherSide) {
 TEST(GroundTest, SumAggregateValueRangesOverSubsetSums) {
   // Any subset of the two tuples can be in the set, so the sum is 0, 3, 5, or
   // 8, not every number in between.
-  auto out =
-      ground_source("w(1,3). w(2,5). total(S) :- #sum{ V,I : w(I,V) } = S.");
+  auto out = ground_source(
+      "{ w(1,3) }. { w(2,5) }. total(S) :- #sum{ V,I : w(I,V) } = S.");
   ASSERT_TRUE(out.ok()) << out.status();
   EXPECT_THAT(*out, HasSubstr("total(0)"));
   EXPECT_THAT(*out, HasSubstr("total(3)"));
@@ -1034,7 +1242,8 @@ TEST(GroundTest, SumAggregateValueRangesOverSubsetSums) {
 }
 
 TEST(GroundTest, NegativeSumWeightsReachNegativeValues) {
-  auto out = ground_source("w(-2). w(3). total(S) :- #sum{ W : w(W) } = S.");
+  auto out =
+      ground_source("{ w(-2) }. { w(3) }. total(S) :- #sum{ W : w(W) } = S.");
   ASSERT_TRUE(out.ok()) << out.status();
   EXPECT_THAT(*out, HasSubstr("total(-2)"));
   EXPECT_THAT(*out, HasSubstr("total(0)"));
@@ -1043,8 +1252,8 @@ TEST(GroundTest, NegativeSumWeightsReachNegativeValues) {
 }
 
 TEST(GroundTest, AggregateValueFeedsAnAssignment) {
-  auto out =
-      ground_source("p(1). p(2). q(T) :- #count{ X : p(X) } = S, T = S + 1.");
+  auto out = ground_source(
+      "{ p(1) }. { p(2) }. q(T) :- #count{ X : p(X) } = S, T = S + 1.");
   ASSERT_TRUE(out.ok()) << out.status();
   EXPECT_THAT(*out, HasSubstr("q(1)"));
   EXPECT_THAT(*out, HasSubstr("q(2)"));
@@ -1056,7 +1265,8 @@ TEST(GroundTest, ComparisonOnAnAggregateValueDropsInstances) {
   // 'S > 1' is checked once the aggregate binds S, and rules out the
   // instances for the values 0 and 1.
   auto out = ground_source(
-      "p(1). p(2). p(3). big(S) :- #count{ X : p(X) } = S, S > 1.");
+      "{ p(1) }. { p(2) }. { p(3) }.\n"
+      "big(S) :- #count{ X : p(X) } = S, S > 1.");
   ASSERT_TRUE(out.ok()) << out.status();
   EXPECT_THAT(*out, HasSubstr("big(2)"));
   EXPECT_THAT(*out, HasSubstr("big(3)"));
@@ -1081,7 +1291,7 @@ TEST(GroundTest, AggregateWaitsForAVariableAnotherAggregateBinds) {
   // is ground once the #sum has picked a value for X. To the #count on its
   // own, an unbound X reads as a local variable.
   auto out = ground_source(
-      "n(2). e(0,x). e(2,b). e(2,c).\n"
+      "{ n(2) }. { e(0,x) }. { e(2,b) }. { e(2,c) }.\n"
       "q(C) :- #count{ Y : e(X, Y) } = C, X = #sum{ Z : n(Z) }.");
   ASSERT_TRUE(out.ok()) << out.status();
   // The #sum is 0 or 2. X = 0 matches only e(0,x), so C is 0 or 1; X = 2
@@ -1094,7 +1304,7 @@ TEST(GroundTest, AggregateWaitsForAVariableAnotherAggregateBinds) {
 
 TEST(GroundTest, TwoAggregatesEachBindTheirOwnVariable) {
   auto out = ground_source(
-      "p(1). q(1).\n"
+      "{ p(1) }. { q(1) }.\n"
       "r(A, B) :- #count{ X : p(X) } = A, #count{ Y : q(Y) } = B.");
   ASSERT_TRUE(out.ok()) << out.status();
   // Each count is 0 or 1 on its own, so the rule grounds over all four pairs.
@@ -1115,10 +1325,12 @@ TEST(GroundTest, NegatedAggregateDoesNotBindItsValue) {
 
 TEST(GroundTest, TooManyAggregateValuesRejected) {
   // Powers of two give every sum from 0 to 2^13 - 1, past the cap on how many
-  // values one rule may be ground over.
+  // values one rule may be ground over. Each w is left to a choice, so every
+  // one of those sums is a value the aggregate really can take.
   auto out = ground_source(
-      "w(1). w(2). w(4). w(8). w(16). w(32). w(64). w(128). w(256). w(512).\n"
-      "w(1024). w(2048). w(4096).\n"
+      "{ w(1) }. { w(2) }. { w(4) }. { w(8) }. { w(16) }. { w(32) }.\n"
+      "{ w(64) }. { w(128) }. { w(256) }. { w(512) }. { w(1024) }.\n"
+      "{ w(2048) }. { w(4096) }.\n"
       "total(S) :- #sum{ W : w(W) } = S.");
   EXPECT_FALSE(out.ok());
   EXPECT_THAT(out.status().message(), HasSubstr("more than 4096"));

@@ -261,6 +261,14 @@ Parser::parse_aggregate_element() {
     }
   }
 
+  // '#count{ }' is the empty set, not a set holding one empty tuple, so an
+  // element with neither terms nor a condition is no element at all. Callers
+  // read this failure as "no element here", which leaves '{ }' empty.
+  if (terms == nullptr && literals == nullptr) {
+    return absl::InvalidArgumentError(
+        "an aggregate element needs a term or a condition");
+  }
+
   return std::make_unique<AggregateElement>(std::move(terms),
                                             std::move(literals));
 }

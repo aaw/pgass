@@ -175,7 +175,13 @@ absl::Status verify_safe(const Program& prog) {
             std::size_t prev_num_agg_bound = 0;
             do {
               prev_num_agg_bound = agg_bound_vars.size();
+              // '#count{ }' has no elements to bind anything.
+              if (aggregate->elements == nullptr) break;
               for (const auto& agg_element : *(aggregate->elements)) {
+                // An element with no condition, e.g. the '1' of '#count{ 1 }',
+                // puts its tuple in the set whatever else holds, so it binds
+                // nothing and needs nothing bound.
+                if (agg_element->literals == nullptr) continue;
                 for (const auto& naf_literal : *(agg_element->literals)) {
                   propagate_naf_literal(naf_literal.get(), agg_bound_vars,
                                         agg_vars);

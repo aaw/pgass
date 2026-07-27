@@ -326,6 +326,33 @@ TEST_F(ParserTest, ParseBodyNafAggregate) {
   EXPECT_FALSE(agg1->naf);
 }
 
+// '#count{ }' is the empty set. The grammar lets an aggregate element be
+// empty, which would read '{ }' as a set holding one empty tuple and count it.
+TEST_F(ParserTest, ParseAggregateWithNoElements) {
+  Parser parser("q :- #count{ } >= 0.");
+  auto stmt_status = parser.parse_statement();
+  ASSERT_TRUE(stmt_status.ok()) << stmt_status.status();
+  auto* agg =
+      dynamic_cast<Aggregate*>((*stmt_status)->body->items->at(0).get());
+  ASSERT_NE(agg, nullptr);
+  EXPECT_EQ(agg->elements, nullptr);
+}
+
+// An element needs a term or a condition, but not both: '#count{ 1 }' puts the
+// tuple 1 in the set whatever else holds.
+TEST_F(ParserTest, ParseAggregateElementWithNoCondition) {
+  Parser parser("q :- #count{ 1 } >= 1.");
+  auto stmt_status = parser.parse_statement();
+  ASSERT_TRUE(stmt_status.ok()) << stmt_status.status();
+  auto* agg =
+      dynamic_cast<Aggregate*>((*stmt_status)->body->items->at(0).get());
+  ASSERT_NE(agg, nullptr);
+  ASSERT_NE(agg->elements, nullptr);
+  ASSERT_EQ(agg->elements->size(), 1);
+  EXPECT_NE(agg->elements->at(0)->terms, nullptr);
+  EXPECT_EQ(agg->elements->at(0)->literals, nullptr);
+}
+
 TEST_F(ParserTest, ParseProgramGraphColoring) {
   Parser parser(R"(
     node(a). node(b). node(c). node(d).

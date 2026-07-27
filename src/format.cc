@@ -278,6 +278,8 @@ void format_aggregate_element(std::string* fmt, const AggregateElement& elem) {
 
 void format_aggregate_elements(std::string* fmt,
                                const AggregateElements& elems) {
+  // '#count{ }' has no elements at all.
+  if (!elems) return;
   absl::StrAppend(
       fmt, absl::StrJoin(*elems, ", ", [](std::string* out, const auto& elem) {
         format_aggregate_element(out, *elem);

@@ -218,6 +218,13 @@ struct PredData {
   }
 };
 
+// What one call to Store::insert did: the ASPIF atom the tuple has, and
+// whether this call is what gave it one.
+struct Inserted {
+  aspif::Atom atom;
+  bool is_new;
+};
+
 // Every ground atom derived so far, grouped by predicate. This is the
 // grounder's working state: derive_atoms() fills it by running the rules to
 // a fixpoint, and emit_rules() looks atoms up in it to build the ground
@@ -225,22 +232,41 @@ struct PredData {
 struct Store {
   absl::flat_hash_map<PredKey, PredData> preds;
   std::vector<PredKey> order;  // predicates in first-seen order
+  // Which atoms are facts, indexed by ASPIF atom number. A fact holds in every
+  // answer set: derive_from_rule() decides which atoms those are, and
+  // emit_rules() states them as facts instead of through their rules.
+  std::vector<bool> facts;
 
   const PredData* find(const PredKey& key) const {
     auto it = preds.find(key);
     return it == preds.end() ? nullptr : &it->second;
   }
 
+  bool is_fact(aspif::Atom atom) const {
+    return static_cast<size_t>(atom) < facts.size() && facts[atom];
+  }
+
+  // Records that `atom` is a fact, and returns true if that is news. Atom
+  // numbers are handed out in order, so `facts` is only ever grown at the end.
+  bool mark_fact(aspif::Atom atom) {
+    if (static_cast<size_t>(atom) >= facts.size()) facts.resize(atom + 1);
+    if (facts[atom]) return false;
+    facts[atom] = true;
+    return true;
+  }
+
   // Adds the tuple if it has not been seen before, giving it the next ASPIF
-  // atom number from `aspif_prog`. Returns true if the tuple was new.
-  bool insert(const PredKey& key, Tuple tuple, aspif::Program& aspif_prog) {
+  // atom number from `aspif_prog`.
+  Inserted insert(const PredKey& key, Tuple tuple, aspif::Program& aspif_prog) {
     auto [pit, new_pred] = preds.try_emplace(key);
     if (new_pred) order.push_back(key);
     PredData& data = pit->second;
-    bool is_new = data.index.try_emplace(tuple, data.atoms.size()).second;
-    if (!is_new) return false;
+    auto [it, is_new] = data.index.try_emplace(tuple, data.atoms.size());
+    if (!is_new) {
+      return Inserted{.atom = data.atoms[it->second].id, .is_new = false};
+    }
     data.atoms.push_back(GroundAtom{std::move(tuple), aspif_prog.new_atom()});
-    return true;
+    return Inserted{.atom = data.atoms.back().id, .is_new = true};
   }
 
   // Starts a derivation pass, so that what the last one derived becomes the
@@ -1068,6 +1094,29 @@ absl::StatusOr<std::vector<aspif::Atom>> matching_atoms(
   return matched;
 }
 
+// Whether every atom an instance's positive literals matched is a fact, which
+// makes the body of that instance true in every answer set.
+bool matched_all_facts(const std::vector<aspif::Lit>& matched,
+                       const Store& store) {
+  for (aspif::Lit lit : matched) {
+    if (!store.is_fact(lit)) return false;
+  }
+  return true;
+}
+
+// The positive literals an emitted body still needs. A literal for a fact is
+// true in every answer set, so the body holds exactly when it holds without
+// that literal, e.g. 'reachable(a, c) :- reachable(a, b), edge(b, c).' with
+// edge(b, c) a fact becomes 'reachable(a, c) :- reachable(a, b).'
+std::vector<aspif::Lit> without_facts(const std::vector<aspif::Lit>& matched,
+                                      const Store& store) {
+  std::vector<aspif::Lit> lits;
+  for (aspif::Lit lit : matched) {
+    if (!store.is_fact(lit)) lits.push_back(lit);
+  }
+  return lits;
+}
+
 // Negates each 'not p(...)' literal under `binding` into the literals the
 // emitted rule body needs. An atom the store never derived can never be true,
 // so it is dropped as trivially satisfied instead of being negated.
@@ -1076,8 +1125,11 @@ absl::StatusOr<std::vector<aspif::Atom>> matching_atoms(
 // when no stored r with 2 in its second argument is true, so all of them are
 // negated.
 //
-// Returns nullopt if one of the literals cannot match, e.g. 'not p(X / 0)':
-// that makes the whole rule instance nonexistent, not just this literal.
+// Returns nullopt when the body these literals belong to can hold in no answer
+// set, which is either of:
+//   - a literal that cannot match, e.g. 'not p(X / 0)': the rule instance does
+//     not exist at all, rather than existing without this literal;
+//   - a 'not' over a fact, which no answer set can satisfy.
 absl::StatusOr<std::optional<std::vector<aspif::Lit>>> negative_lits(
     const std::vector<const ClassicalLiteral*>& negative,
     const Binding& binding, const Store& store) {
@@ -1087,7 +1139,10 @@ absl::StatusOr<std::optional<std::vector<aspif::Lit>>> negative_lits(
     if (!can_match) return std::nullopt;
     ASSIGN_OR_RETURN(std::vector<aspif::Atom> matched,
                      matching_atoms(*literal, binding, store));
-    for (aspif::Atom atom : matched) lits.push_back(-atom);
+    for (aspif::Atom atom : matched) {
+      if (store.is_fact(atom)) return std::nullopt;
+      lits.push_back(-atom);
+    }
   }
   return lits;
 }
@@ -1161,13 +1216,69 @@ absl::StatusOr<std::vector<AggTuple>> collect_agg_tuples(
               std::optional<std::vector<aspif::Lit>> neg,
               negative_lits(parts.negative, instance.binding, store));
           if (!neg.has_value()) return absl::OkStatus();
-          std::vector<aspif::Lit> support = instance.matched;
+          std::vector<aspif::Lit> support =
+              without_facts(instance.matched, store);
           support.insert(support.end(), neg->begin(), neg->end());
           tuples[it->second].supports.push_back(std::move(support));
           return absl::OkStatus();
         }));
   }
   return tuples;
+}
+
+// Whether any element condition holds a 'not' over an atom, e.g. the
+// '#count{ X : p(X), not q(X) }' of a rule counting the p's without a q.
+// A comparison under 'not', like 'not X < 2', doesn't count: grounding decides
+// that one itself.
+bool elements_use_negation(const Aggregate& agg) {
+  if (agg.elements == nullptr) return false;
+  for (const auto& element : *agg.elements) {
+    if (element->literals == nullptr) continue;
+    for (const auto& naf : *element->literals) {
+      if (naf->naf && naf->literal->kind != Literal::BuiltinAtomKind) {
+        return true;
+      }
+    }
+  }
+  return false;
+}
+
+// The value the aggregate takes in every answer set, when grounding can work
+// that out on its own, e.g. the 2 of '#count{ X : p(X) }' over the facts p(1)
+// and p(2). Nullopt means the solver still has a say.
+//
+// Every tuple has to be settled for the value to be, and a tuple is settled
+// when one of its supports came out empty: every literal in that support was a
+// fact, so the tuple is in the set whatever the solver decides. One tuple whose
+// supports all carry a literal is enough to leave the value open.
+//
+// Element conditions must be free of 'not' for any of this to hold. safety.cc
+// keeps an aggregate's un-negated predicates out of the rule's own component,
+// so their atoms and facts are settled before this rule is ever ground, but it
+// leaves negated ones alone: 'not q(X)' inside an element can point at a
+// predicate that has no atoms yet, which would read here as a support that
+// nothing can take away.
+std::optional<int64_t> settled_agg_value(const Aggregate& agg,
+                                         const std::vector<AggTuple>& tuples) {
+  // #min and #max are rejected further on; their value is not this sum.
+  if (agg.function != AggregateFunctionType::kAGGREGATE_COUNT &&
+      agg.function != AggregateFunctionType::kAGGREGATE_SUM) {
+    return std::nullopt;
+  }
+  if (elements_use_negation(agg)) return std::nullopt;
+  int64_t value = 0;
+  for (const AggTuple& tuple : tuples) {
+    bool settled = false;
+    for (const std::vector<aspif::Lit>& support : tuple.supports) {
+      if (support.empty()) {
+        settled = true;
+        break;
+      }
+    }
+    if (!settled) return std::nullopt;
+    value += tuple.weight;
+  }
+  return value;
 }
 
 // A cap on how many values an aggregate may bind a variable to: each value
@@ -1183,7 +1294,12 @@ constexpr size_t kMaxAggregateValues = 4096;
 // by a fact, is harmless: its rule instance carries the literals that check
 // for that value, which no answer set satisfies.
 absl::StatusOr<std::vector<int64_t>> possible_values(
-    const std::vector<AggTuple>& tuples) {
+    const Aggregate& agg, const std::vector<AggTuple>& tuples) {
+  // An aggregate grounding has settled takes one value and no other, e.g. the
+  // 2 that 'q(S) :- #count{ X : p(X) } = S.' binds S to over two p facts.
+  if (std::optional<int64_t> value = settled_agg_value(agg, tuples)) {
+    return std::vector<int64_t>{*value};
+  }
   absl::btree_set<int64_t> reachable = {0};
   for (const AggTuple& tuple : tuples) {
     absl::btree_set<int64_t> extended = reachable;
@@ -1213,12 +1329,16 @@ std::vector<size_t> agg_output_slots(const Aggregate& agg,
 }
 
 // The slots of every variable occurring anywhere in an aggregate: in its
-// bounds, in its element terms, and in its element conditions.
-absl::flat_hash_set<size_t> agg_variable_slots(const Aggregate& agg,
-                                               const Binding& binding) {
-  absl::flat_hash_set<size_t> slots;
+// bounds, in its element terms, and in its element conditions. Ascending and
+// without repeats, so that waits_for_another() can search it and AggCache can
+// read one aggregate's slots in the same order every time.
+std::vector<size_t> agg_variable_slots(const Aggregate& agg,
+                                       const Binding& binding) {
+  std::vector<size_t> slots;
   collect::for_each_variable(
-      agg, [&](const Variable& var) { slots.insert(binding.slot_of(var)); });
+      agg, [&](const Variable& var) { slots.push_back(binding.slot_of(var)); });
+  std::sort(slots.begin(), slots.end());
+  slots.erase(std::unique(slots.begin(), slots.end()), slots.end());
   return slots;
 }
 
@@ -1228,11 +1348,11 @@ absl::flat_hash_set<size_t> agg_variable_slots(const Aggregate& agg,
 bool waits_for_another(const Aggregate& agg,
                        const std::vector<const Aggregate*>& pending,
                        const Binding& binding) {
-  absl::flat_hash_set<size_t> slots = agg_variable_slots(agg, binding);
+  const std::vector<size_t> slots = agg_variable_slots(agg, binding);
   for (const Aggregate* other : pending) {
     if (other == &agg) continue;
     for (size_t slot : agg_output_slots(*other, binding)) {
-      if (slots.contains(slot)) return true;
+      if (std::binary_search(slots.begin(), slots.end(), slot)) return true;
     }
   }
   return false;
@@ -1249,7 +1369,7 @@ absl::StatusOr<std::vector<Instance>> expand_over_values(
   for (const Instance& instance : instances) {
     ASSIGN_OR_RETURN(std::vector<AggTuple> tuples,
                      collect_agg_tuples(agg, instance.binding, store));
-    ASSIGN_OR_RETURN(std::vector<int64_t> values, possible_values(tuples));
+    ASSIGN_OR_RETURN(std::vector<int64_t> values, possible_values(agg, tuples));
     for (int64_t value : values) {
       Instance next = instance;
       for (size_t slot : outputs)
@@ -1306,19 +1426,26 @@ absl::StatusOr<std::vector<Instance>> bind_agg_outputs(
   return instances;
 }
 
-// Grounds an aggregate's elements into the weighted literals its value sums
-// over. Each distinct tuple gets a fresh auxiliary atom, supported by one
-// plain rule per grounding that produced it. Multiple such rules give the atom
-// OR semantics for free, exactly modeling "this tuple is in the set if any
+// Turns an aggregate's tuples into the weighted literals its value sums over.
+// Each distinct tuple gets a fresh auxiliary atom, supported by one plain rule
+// per grounding that produced it. Multiple such rules give the atom OR
+// semantics for free, exactly modeling "this tuple is in the set if any
 // grounding satisfies it".
-absl::StatusOr<std::vector<aspif::WeightedLit>> ground_agg_elements(
-    const Aggregate& agg, const Binding& outer_binding, const Store& store,
-    aspif::Program& result) {
-  ASSIGN_OR_RETURN(std::vector<AggTuple> tuples,
-                   collect_agg_tuples(agg, outer_binding, store));
+std::vector<aspif::WeightedLit> ground_agg_elements(
+    const std::vector<AggTuple>& tuples, aspif::Program& result) {
   std::vector<aspif::WeightedLit> weighted;
   weighted.reserve(tuples.size());
   for (const AggTuple& tuple : tuples) {
+    // A tuple with one support holding one literal needs no atom of its own:
+    // that literal already says exactly "this tuple is in the set". Two tuples
+    // can land on the same literal, e.g. the '#count{ 1 : p ; 2 : p }' whose
+    // value is 2 when p holds, and a weight body adds up its literals, so the
+    // two entries keep counting as the two tuples they are.
+    if (tuple.supports.size() == 1 && tuple.supports.front().size() == 1) {
+      weighted.push_back(
+          {.lit = tuple.supports.front().front(), .weight = tuple.weight});
+      continue;
+    }
     aspif::Atom atom = result.new_atom();
     weighted.push_back({.lit = atom, .weight = tuple.weight});
     for (const std::vector<aspif::Lit>& support : tuple.supports) {
@@ -1326,6 +1453,10 @@ absl::StatusOr<std::vector<aspif::WeightedLit>> ground_agg_elements(
       rule.head = {atom};
       rule.body = support;
       result.rules.push_back(std::move(rule));
+      // A support left empty, because every literal in it was a fact, puts the
+      // tuple in the set unconditionally. Whatever the remaining supports say,
+      // they can only say it again.
+      if (support.empty()) break;
     }
   }
   return weighted;
@@ -1345,6 +1476,16 @@ struct AggBounds {
   }
   void apply_upper(int64_t k) {
     upper = upper.has_value() ? std::min(*upper, k) : k;
+  }
+
+  // Whether a value meets every bound collected here.
+  bool hold_for(int64_t value) const {
+    if (lower.has_value() && value < *lower) return false;
+    if (upper.has_value() && value > *upper) return false;
+    for (int64_t k : not_equal) {
+      if (value == k) return false;
+    }
+    return true;
   }
 };
 
@@ -1472,14 +1613,77 @@ absl::StatusOr<std::optional<int64_t>> eval_bound(const Term& term,
   return value->number;
 }
 
+// Reads the (up to two) bound sides of an aggregate under `binding`. Nullopt
+// means a bound is ill-formed, e.g. the '4 / 0' of '#count{...} >= 4 / X'
+// under X = 0, which makes the enclosing rule instance nonexistent.
+absl::StatusOr<std::optional<AggBounds>> eval_agg_bounds(
+    const Aggregate& agg, const Binding& binding) {
+  AggBounds bounds;
+  if (agg.lb_term != nullptr) {
+    ASSIGN_OR_RETURN(std::optional<int64_t> k,
+                     eval_bound(*agg.lb_term, binding));
+    if (!k.has_value()) return std::nullopt;
+    apply_lower_bound(*k, agg.lb_op, bounds);
+  }
+  if (agg.ub_term != nullptr) {
+    ASSIGN_OR_RETURN(std::optional<int64_t> k,
+                     eval_bound(*agg.ub_term, binding));
+    if (!k.has_value()) return std::nullopt;
+    apply_upper_bound(*k, agg.ub_op, bounds);
+  }
+  return bounds;
+}
+
+// Whether an aggregate whose value grounding has settled holds, e.g. true for
+// the '#count{ X : p(X) } >= 1' of a rule over the fact p(1). Nullopt when the
+// value is not settled, which leaves the aggregate for the solver.
+std::optional<bool> settled_agg_holds(const Aggregate& agg,
+                                      const AggBounds& bounds,
+                                      const std::vector<AggTuple>& tuples) {
+  std::optional<int64_t> value = settled_agg_value(agg, tuples);
+  if (!value.has_value()) return std::nullopt;
+  const bool holds = bounds.hold_for(*value);
+  return agg.naf ? !holds : holds;
+}
+
+// Whether grounding settles `agg` under `binding`, and if so whether it holds,
+// asked while atoms are still being derived. Nullopt means the solver decides,
+// which is also the answer for an aggregate this phase is too early to judge.
+absl::StatusOr<std::optional<bool>> settle_aggregate(const Aggregate& agg,
+                                                     const Binding& binding,
+                                                     const Store& store) {
+  // An aggregate under 'not' is the too-early case. Its element predicates
+  // reach the rule's head through negative dependency edges only, and those
+  // don't order components, so 'q :- not #count{ X : p(X) } >= 1.' can have q's
+  // component derived before p has a single atom. Counting there would find an
+  // empty set and read the negation as satisfied. emit_rules() runs once every
+  // component has derived and settles these safely.
+  if (agg.naf) return std::nullopt;
+  // A 'not' inside an element points at a predicate the same way; see
+  // settled_agg_value().
+  if (elements_use_negation(agg)) return std::nullopt;
+  ASSIGN_OR_RETURN(std::optional<AggBounds> bounds,
+                   eval_agg_bounds(agg, binding));
+  if (!bounds.has_value()) return std::nullopt;
+  ASSIGN_OR_RETURN(std::vector<AggTuple> tuples,
+                   collect_agg_tuples(agg, binding, store));
+  return settled_agg_holds(agg, *bounds, tuples);
+}
+
 // Grounds one Aggregate body item into the literals that must be appended to
 // the enclosing rule's body for the aggregate to hold, e.g. '#count{X :
 // p(X)} >= 2' grounds to a single literal referencing a fresh atom defined
 // by an ASPIF weight-body rule. Only #count and #sum are supported: they map
 // directly onto ASPIF's weight body, whereas #min/#max would need a
 // different (guess-and-check) encoding.
-// Returns nullopt if one of the aggregate's bounds is ill-formed, which
-// makes the whole enclosing rule instance nonexistent.
+//
+// An aggregate whose value grounding has settled needs no encoding at all: it
+// either holds in every answer set, and so asks nothing of the rule's body, or
+// in none, and takes the rule instance with it.
+//
+// Returns nullopt if the aggregate can hold in no answer set, either because
+// one of its bounds is ill-formed or because its settled value misses them.
+// Both make the whole enclosing rule instance nonexistent.
 absl::StatusOr<std::optional<std::vector<aspif::Lit>>> ground_aggregate(
     const Aggregate& agg, const Binding& outer_binding, const Store& store,
     aspif::Program& result) {
@@ -1489,22 +1693,20 @@ absl::StatusOr<std::optional<std::vector<aspif::Lit>>> ground_aggregate(
         "#min and #max aggregates are not supported yet");
   }
 
-  AggBounds bounds;
-  if (agg.lb_term != nullptr) {
-    ASSIGN_OR_RETURN(std::optional<int64_t> k,
-                     eval_bound(*agg.lb_term, outer_binding));
-    if (!k.has_value()) return std::nullopt;
-    apply_lower_bound(*k, agg.lb_op, bounds);
-  }
-  if (agg.ub_term != nullptr) {
-    ASSIGN_OR_RETURN(std::optional<int64_t> k,
-                     eval_bound(*agg.ub_term, outer_binding));
-    if (!k.has_value()) return std::nullopt;
-    apply_upper_bound(*k, agg.ub_op, bounds);
+  ASSIGN_OR_RETURN(std::optional<AggBounds> maybe_bounds,
+                   eval_agg_bounds(agg, outer_binding));
+  if (!maybe_bounds.has_value()) return std::nullopt;
+  const AggBounds& bounds = *maybe_bounds;
+
+  ASSIGN_OR_RETURN(std::vector<AggTuple> tuples,
+                   collect_agg_tuples(agg, outer_binding, store));
+  if (std::optional<bool> holds = settled_agg_holds(agg, bounds, tuples)) {
+    if (!*holds) return std::nullopt;
+    return std::vector<aspif::Lit>{};
   }
 
-  ASSIGN_OR_RETURN(std::vector<aspif::WeightedLit> weighted,
-                   ground_agg_elements(agg, outer_binding, store, result));
+  std::vector<aspif::WeightedLit> weighted =
+      ground_agg_elements(tuples, result);
 
   // The conjunction of literals that together mean "the bound holds". Only
   // "at least" is available, so the other comparisons are phrased in terms of
@@ -1528,14 +1730,93 @@ absl::StatusOr<std::optional<std::vector<aspif::Lit>>> ground_aggregate(
   return std::vector<aspif::Lit>{negate_conjunction(extra, result)};
 }
 
+// Grounds each aggregate once per way of reading it, however many rule
+// instances read it that way.
+//
+// What an aggregate grounds to depends on the aggregate and on the values its
+// own variables have, and on nothing else, so instances that agree on those
+// share one encoding, auxiliary atoms and all. Every instance of
+// 'p(X) :- dom(X), #count{ Y : r(Y) } >= 2.' reads the #count the same way,
+// because it mentions no variable the rest of the rule binds, so the whole
+// rule needs the one encoding.
+//
+// Sharing an auxiliary atom between rules is sound because the atom means the
+// same thing in each: the rules defining it are built from the same tuples.
+class AggCache {
+ public:
+  // The literals `agg` contributes to a rule body under `binding`, as
+  // ground_aggregate() gives them, and nullopt in the same cases.
+  absl::StatusOr<std::optional<std::vector<aspif::Lit>>> ground(
+      const Aggregate& agg, const Binding& binding, const Store& store,
+      aspif::Program& result) {
+    Key key = key_for(agg, binding);
+    auto it = ground_.find(key);
+    if (it != ground_.end()) return it->second;
+
+    ASSIGN_OR_RETURN(std::optional<std::vector<aspif::Lit>> lits,
+                     ground_aggregate(agg, binding, store, result));
+    ground_.emplace(std::move(key), lits);
+    return lits;
+  }
+
+  // Whether grounding settles `agg` under `binding`, and if so whether it
+  // holds, as settle_aggregate() works it out. Deriving atoms asks this once
+  // per instance and over the same tuples, so the answer is worth keeping
+  // here too. It stays true for the whole of grounding: safety.cc keeps an
+  // aggregate's predicates in components that are complete before any rule
+  // reading them is ground, so what its elements produce cannot change.
+  absl::StatusOr<std::optional<bool>> settle(const Aggregate& agg,
+                                             const Binding& binding,
+                                             const Store& store) {
+    Key key = key_for(agg, binding);
+    auto it = settled_.find(key);
+    if (it != settled_.end()) return it->second;
+
+    ASSIGN_OR_RETURN(std::optional<bool> holds,
+                     settle_aggregate(agg, binding, store));
+    settled_.emplace(std::move(key), holds);
+    return holds;
+  }
+
+ private:
+  // One aggregate together with what its variables are bound to. A slot with
+  // no value is a variable local to the aggregate, which every instance leaves
+  // for the aggregate's own grounding to bind.
+  struct Key {
+    const Aggregate* agg;
+    std::vector<std::optional<Value>> values;
+
+    bool operator==(const Key&) const = default;
+
+    template <typename H>
+    friend H AbslHashValue(H h, const Key& key) {
+      return H::combine(std::move(h), key.agg, key.values);
+    }
+  };
+
+  Key key_for(const Aggregate& agg, const Binding& binding) {
+    Key key{.agg = &agg};
+    for (size_t slot : agg_variable_slots(agg, binding)) {
+      const Value* value = binding.at(slot);
+      key.values.push_back(value == nullptr ? std::nullopt
+                                            : std::optional<Value>(*value));
+    }
+    return key;
+  }
+
+  absl::flat_hash_map<Key, std::optional<std::vector<aspif::Lit>>> ground_;
+  absl::flat_hash_map<Key, std::optional<bool>> settled_;
+};
+
 // --------------------------------------------------------------------------
 // Building the ground program
 //
 // Two phases. derive_atoms() runs the rules to a fixpoint to find every atom
-// that could appear in an answer set and numbers it; emit_rules() then walks
-// the rules again and emits one ASPIF rule per instance, in terms of those
-// numbers. The rest turns the store into the program's minimize statements,
-// output names, and query assumption.
+// that could appear in an answer set, numbers it, and works out which of them
+// are facts; emit_rules() then walks the rules again and emits one ASPIF rule
+// per instance, in terms of those numbers, leaving out what the facts have
+// already settled. The rest turns the store into the program's minimize
+// statements, output names, and query assumption.
 // --------------------------------------------------------------------------
 
 // Whether the body parts derive_atoms() otherwise ignores are well-formed
@@ -1564,14 +1845,51 @@ absl::StatusOr<bool> ignored_parts_are_well_formed(const BodyParts& parts,
   return true;
 }
 
+// What a derivation pass changed, which is what decides whether another pass
+// is worth running and what it has to look at.
+struct Changes {
+  // An atom was derived for the first time.
+  bool atoms = false;
+  // An atom the store already held became a fact. Marking it added no atom, so
+  // the next pass's delta would not revisit the rules that read it; see
+  // derive_atoms().
+  bool facts = false;
+};
+
+// Whether grounding settles every aggregate in a body and finds them all
+// satisfied, which is what lets an instance carrying aggregates derive a fact.
+absl::StatusOr<bool> aggregates_settle_true(
+    const std::vector<const Aggregate*>& aggregates, const Binding& binding,
+    const Store& store, AggCache& cache) {
+  for (const Aggregate* aggregate : aggregates) {
+    ASSIGN_OR_RETURN(std::optional<bool> holds,
+                     cache.settle(*aggregate, binding, store));
+    if (!holds.has_value() || !*holds) return false;
+  }
+  return true;
+}
+
 // Runs one rule against the store and adds the head atom of every instance it
-// finds, setting `changed` if any of them was new. `delta_position` picks the
+// finds, recording in `changed` what that did. `delta_position` picks the
 // positive literal to read the previous pass's atoms from (see
 // find_instances), or nullopt to read the whole store.
+//
+// An instance whose positive literals all matched facts derives its head atom
+// as a fact in turn: every one of those atoms holds in every answer set, so the
+// body does, so the head does. That is only sound for a rule whose body has
+// nothing else in it that can fail. A 'not q' is exactly such a thing, and this
+// phase ignores it (see derive_atoms), so a rule carrying one derives no facts.
+// An aggregate is one only sometimes, so AggCache::settle() is asked about it,
+// last, once the cheap reasons not to bother have been ruled out.
+//
+// This is where 'p(1).' becomes a fact, and where a rule over facts alone, like
+// the second rule of "edge(a, b). reachable(X, Y) :- edge(X, Y).", passes
+// factness on.
 absl::Status derive_from_rule(const RuleView& rule,
                               std::optional<size_t> delta_position,
-                              Store& store, aspif::Program& aspif_prog,
-                              bool& changed) {
+                              Store& store, AggCache& cache,
+                              aspif::Program& aspif_prog, Changes& changed) {
+  const bool derives_facts = rule.parts.negative.empty();
   return find_instances(
       rule.parts, store, Binding(rule.slots),
       [&](const Instance& instance) -> absl::Status {
@@ -1581,8 +1899,19 @@ absl::Status derive_from_rule(const RuleView& rule,
         ASSIGN_OR_RETURN(std::optional<Tuple> tuple,
                          eval_terms(rule.head->args, instance.binding));
         if (!tuple.has_value()) return absl::OkStatus();
-        if (store.insert(pred_key(*rule.head), *std::move(tuple), aspif_prog)) {
-          changed = true;
+        const Inserted head =
+            store.insert(pred_key(*rule.head), *std::move(tuple), aspif_prog);
+        if (head.is_new) changed.atoms = true;
+        if (derives_facts && matched_all_facts(instance.matched, store)) {
+          ASSIGN_OR_RETURN(
+              bool aggregates_hold,
+              aggregates_settle_true(rule.parts.aggregates, instance.binding,
+                                     store, cache));
+          if (!aggregates_hold) return absl::OkStatus();
+          const bool newly_fact = store.mark_fact(head.atom);
+          // Marking an atom the store already held is the one change a delta
+          // pass cannot carry; see derive_atoms().
+          if (newly_fact && !head.is_new) changed.facts = true;
         }
         return absl::OkStatus();
       },
@@ -1621,49 +1950,96 @@ absl::Status derive_from_rule(const RuleView& rule,
 // which is enough because nothing it reads can still change: it reaches the
 // store only through an aggregate binding a variable to its value, and those
 // predicates sit in an earlier component, as noted above.
+//
+// Which atoms are facts is settled here too, by the same repeated passes:
+// marking an atom a fact can make the head of a rule that reads it a fact, so
+// factness spreads until a pass marks nothing new, just as atoms do. A pass
+// that only marked facts is the one case the delta cannot carry, because a
+// rule reading that atom sees no new atom to re-run on, so the pass after it
+// reads the whole store instead.
 absl::Status derive_atoms(const std::vector<const RuleView*>& rules,
-                          Store& store, aspif::Program& aspif_prog) {
+                          Store& store, AggCache& cache,
+                          aspif::Program& aspif_prog) {
   // The first pass reads the whole store. It is the only one that fires the
   // rules with no positive literals, and it derives the delta the passes below
   // start from.
-  bool changed = false;
+  Changes changed;
   for (const RuleView* rule : rules) {
     if (rule->head == nullptr) continue;
-    RETURN_IF_ERROR(
-        derive_from_rule(*rule, std::nullopt, store, aspif_prog, changed));
+    RETURN_IF_ERROR(derive_from_rule(*rule, std::nullopt, store, cache,
+                                     aspif_prog, changed));
   }
 
-  do {
-    changed = false;
+  bool full_scan = changed.facts;
+  while (changed.atoms || changed.facts) {
+    changed = Changes{};
     store.begin_pass();
     for (const RuleView* rule : rules) {
       if (rule->head == nullptr) continue;
+      if (full_scan) {
+        RETURN_IF_ERROR(derive_from_rule(*rule, std::nullopt, store, cache,
+                                         aspif_prog, changed));
+        continue;
+      }
       for (size_t position = 0; position < rule->parts.positive.size();
            ++position) {
-        RETURN_IF_ERROR(
-            derive_from_rule(*rule, position, store, aspif_prog, changed));
+        RETURN_IF_ERROR(derive_from_rule(*rule, position, store, cache,
+                                         aspif_prog, changed));
       }
     }
-  } while (changed);
+    full_scan = changed.facts;
+  }
   return absl::OkStatus();
 }
 
 // Emits one ASPIF rule per rule instance. A 'not q' whose atom q was never
 // derived by derive_atoms() can never be true, so the literal is dropped as
 // satisfied; otherwise it stays in the rule body, negated.
+//
+// An instance whose head is a fact needs no rule of its own. The atom holds in
+// every answer set whatever this instance says, so all that has to reach the
+// solver is the fact itself, once, however many rules derive it: that is what
+// `emitted_facts` keeps track of, across the components emitted before this
+// one. A transitive closure over a graph of facts is entirely facts this way,
+// and reaches the solver with no rules at all.
+//
+// A body literal for a fact goes the same way, dropped from the rules that do
+// get emitted, since a body holds exactly when it holds without it.
 absl::Status emit_rules(const std::vector<const RuleView*>& rules,
-                        const Store& store, aspif::Program& result) {
+                        const Store& store,
+                        absl::flat_hash_set<aspif::Atom>& emitted_facts,
+                        AggCache& aggregates, aspif::Program& result) {
   for (const RuleView* rule_ptr : rules) {
     const RuleView& rule = *rule_ptr;
     RETURN_IF_ERROR(find_instances(
         rule.parts, store, Binding(rule.slots),
         [&](const Instance& instance) -> absl::Status {
-          // The head is looked up last, once every reason to drop the instance
+          // The head atom is looked up here, but an instance that has none is
+          // only an error further down, once every reason to drop the instance
           // has been ruled out: derive_atoms() dropped the same instances, so a
           // head atom looked up for one of them would be missing from the
           // store.
+          std::optional<Tuple> head_tuple;
+          const GroundAtom* head = nullptr;
+          if (rule.head != nullptr) {
+            ASSIGN_OR_RETURN(head_tuple,
+                             eval_terms(rule.head->args, instance.binding));
+            // An ill-formed head, e.g. the 'q(X / 0)' of "q(X / 0) :- p(X).",
+            // means this instance has no ground rule. derive_atoms() skipped it
+            // for the same reason, so nothing is missing from the store.
+            if (!head_tuple.has_value()) return absl::OkStatus();
+            const PredData* data = store.find(pred_key(*rule.head));
+            head = data == nullptr ? nullptr : data->find(*head_tuple);
+            if (head != nullptr && store.is_fact(head->id)) {
+              if (emitted_facts.insert(head->id).second) {
+                result.rules.push_back(aspif::Rule{.head = {head->id}});
+              }
+              return absl::OkStatus();
+            }
+          }
+
           aspif::Rule aspif_rule;
-          aspif_rule.body = instance.matched;
+          aspif_rule.body = without_facts(instance.matched, store);
           ASSIGN_OR_RETURN(
               std::optional<std::vector<aspif::Lit>> neg,
               negative_lits(rule.parts.negative, instance.binding, store));
@@ -1674,28 +2050,19 @@ absl::Status emit_rules(const std::vector<const RuleView*>& rules,
           for (const Aggregate* aggregate : rule.parts.aggregates) {
             ASSIGN_OR_RETURN(
                 std::optional<std::vector<aspif::Lit>> extra,
-                ground_aggregate(*aggregate, instance.binding, store, result));
+                aggregates.ground(*aggregate, instance.binding, store, result));
             if (!extra.has_value()) return absl::OkStatus();
             aspif_rule.body.insert(aspif_rule.body.end(), extra->begin(),
                                    extra->end());
           }
 
           if (rule.head != nullptr) {
-            ASSIGN_OR_RETURN(std::optional<Tuple> tuple,
-                             eval_terms(rule.head->args, instance.binding));
-            // An ill-formed head, e.g. the 'q(X / 0)' of "q(X / 0) :- p(X).",
-            // means this instance has no ground rule. derive_atoms() skipped it
-            // for the same reason, so nothing is missing from the store.
-            if (!tuple.has_value()) return absl::OkStatus();
             // derive_atoms() added every derivable head atom, so a miss means
             // the program never passed verify_safe().
-            const PredData* data = store.find(pred_key(*rule.head));
-            const GroundAtom* head =
-                data == nullptr ? nullptr : data->find(*tuple);
             if (head == nullptr) {
               return absl::InternalError(
                   absl::StrCat("grounding derived no atom for the head '",
-                               printed_atom(rule.head->id, *tuple),
+                               printed_atom(rule.head->id, *head_tuple),
                                "'; was the program checked by verify_safe()?"));
             }
             aspif_rule.head.push_back(head->id);
@@ -1828,11 +2195,16 @@ absl::StatusOr<aspif::Program> ground(const Program& prog) {
   // emitted after every atom exists.
   aspif::Program result;
   Store store;
+  // One cache across both phases: they ask different questions about the same
+  // aggregates, and what either answer rests on is complete before it is asked.
+  AggCache aggregates;
+  absl::flat_hash_set<aspif::Atom> emitted_facts;
   for (const auto& component_rules : rules_by_component) {
-    RETURN_IF_ERROR(derive_atoms(component_rules, store, result));
+    RETURN_IF_ERROR(derive_atoms(component_rules, store, aggregates, result));
   }
   for (const auto& component_rules : rules_by_component) {
-    RETURN_IF_ERROR(emit_rules(component_rules, store, result));
+    RETURN_IF_ERROR(
+        emit_rules(component_rules, store, emitted_facts, aggregates, result));
   }
   emit_minimize(store, result);
   name_outputs(store, result);
