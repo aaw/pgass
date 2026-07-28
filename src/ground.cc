@@ -219,21 +219,9 @@ struct Store {
 // matching 'f(X, b)' against a stored f(1, b) binds X to 1.
 // --------------------------------------------------------------------------
 
-absl::StatusOr<std::optional<Sym>> eval_term(const Term& term,
-                                             const Binding& binding,
-                                             Symbols& syms);
-
-// Evaluates a term that has to come out as a number, e.g. either side of a
-// '+'. Returns nullopt if it doesn't, e.g. for the 'a + 1' that 'X + 1'
-// becomes under the binding {X: a}: arithmetic is only defined on integers,
-// so that binding is ill-formed and its rule instance does not exist.
 absl::StatusOr<std::optional<int64_t>> eval_number(const Term& term,
                                                    const Binding& binding,
-                                                   Symbols& syms) {
-  ASSIGN_OR_RETURN(std::optional<Sym> value, eval_term(term, binding, syms));
-  if (!value.has_value() || !syms.is_number(*value)) return std::nullopt;
-  return syms.number_of(*value);
-}
+                                                   Symbols& syms);
 
 // Evaluates a term to its ground value, e.g. 'X' evaluates to 1 under the
 // binding {X: 1}. Every variable must already be bound.
@@ -308,6 +296,18 @@ absl::StatusOr<std::optional<Sym>> eval_term(const Term& term,
     }
   }
   return absl::InternalError("unknown term kind");
+}
+
+// Evaluates a term that has to come out as a number, e.g. either side of a
+// '+'. Returns nullopt if it doesn't, e.g. for the 'a + 1' that 'X + 1'
+// becomes under the binding {X: a}: arithmetic is only defined on integers,
+// so that binding is ill-formed and its rule instance does not exist.
+absl::StatusOr<std::optional<int64_t>> eval_number(const Term& term,
+                                                   const Binding& binding,
+                                                   Symbols& syms) {
+  ASSIGN_OR_RETURN(std::optional<Sym> value, eval_term(term, binding, syms));
+  if (!value.has_value() || !syms.is_number(*value)) return std::nullopt;
+  return syms.number_of(*value);
 }
 
 // Evaluates a list of terms under `binding`, e.g. the 'X, 2' of 'p(X, 2)'
@@ -621,10 +621,9 @@ struct Assignment {
 // or holds an already-bound variable gives null.
 const Variable* unbound_var(const Term* term, BinopType op,
                             const Binding& binding) {
-  if (term == nullptr || op != BinopType::kEQUAL ||
-      term->kind != Term::VariableKind) {
-    return nullptr;
-  }
+  if (term == nullptr) return nullptr;
+  if (op != BinopType::kEQUAL) return nullptr;
+  if (term->kind != Term::VariableKind) return nullptr;
   const Variable& variable = static_cast<const Variable&>(*term);
   if (binding.contains(variable)) return nullptr;
   return &variable;
@@ -1138,7 +1137,7 @@ absl::StatusOr<std::vector<AggTuple>> collect_agg_tuples(
           ASSIGN_OR_RETURN(std::optional<Tuple> maybe_tuple,
                            eval_terms(element.terms, instance.binding, syms));
           if (!maybe_tuple.has_value()) return absl::OkStatus();
-          Tuple tuple = *std::move(maybe_tuple);
+          Tuple tuple = std::move(*maybe_tuple);
           int64_t weight = 1;
           if (agg.function == AggregateFunctionType::kAGGREGATE_SUM) {
             // #sum adds up the tuples whose first term is an integer and
@@ -1913,16 +1912,11 @@ absl::Status derive_atoms(const std::vector<const RuleView*>& rules,
                           aspif::Program& aspif_prog) {
   // The first pass reads the whole store. It is the only one that fires the
   // rules with no positive literals, and it derives the delta the passes below
-  // start from.
+  // start from. Later passes are semi-naive unless the only change was marking
+  // facts, which a delta cannot carry, so the next pass reads the whole store.
+  bool full_scan = true;
   Changes changed;
-  for (const RuleView* rule : rules) {
-    if (rule->head == nullptr) continue;
-    RETURN_IF_ERROR(derive_from_rule(*rule, std::nullopt, store, syms, cache,
-                                     aspif_prog, changed));
-  }
-
-  bool full_scan = changed.facts;
-  while (changed.atoms || changed.facts) {
+  while (full_scan || changed.atoms) {
     changed = Changes{};
     store.begin_pass();
     for (const RuleView* rule : rules) {
@@ -1938,7 +1932,7 @@ absl::Status derive_atoms(const std::vector<const RuleView*>& rules,
                                          aspif_prog, changed));
       }
     }
-    full_scan = changed.facts;
+    full_scan = changed.facts && !changed.atoms;
   }
   return absl::OkStatus();
 }
