@@ -235,8 +235,8 @@ absl::StatusOr<std::optional<Sym>> eval_term(const Term& term,
                                              Symbols& syms) {
   switch (term.kind) {
     case Term::NumberKind:
-      // TODO: wraps on this cast and on overflow below; TODO.md tracks moving
-      // to unlimited precision integers.
+      // TODO: this cast and the arithmetic below wrap on overflow; move to
+      // unlimited precision integers to fix.
       return syms.number(
           static_cast<int64_t>(static_cast<const Number&>(term).value));
     case Term::StringKind:
@@ -501,20 +501,17 @@ struct RuleView {
 VarSlots make_var_slots(const RuleView& rule) {
   VarSlots slots;
   absl::flat_hash_map<std::string_view, size_t> by_name;
-  // Takes a literal or an aggregate, whichever collect::for_each_variable
-  // overload fits the node.
-  auto add_from = [&](const auto& node) {
-    collect::for_each_variable(
-        node, [&](const Variable& var) { slots.add(var, by_name); });
-  };
+  auto record = [&](const Variable& var) { slots.add(var, by_name); };
 
-  if (rule.head != nullptr) add_from(*rule.head);
+  if (rule.head != nullptr) collect::for_each_variable(*rule.head, record);
   for (const ClassicalLiteral* literal : rule.parts.positive)
-    add_from(*literal);
+    collect::for_each_variable(*literal, record);
   for (const ClassicalLiteral* literal : rule.parts.negative)
-    add_from(*literal);
-  for (const NafLiteral* naf : rule.parts.comparisons) add_from(*naf->literal);
-  for (const Aggregate* agg : rule.parts.aggregates) add_from(*agg);
+    collect::for_each_variable(*literal, record);
+  for (const NafLiteral* naf : rule.parts.comparisons)
+    collect::for_each_variable(*naf->literal, record);
+  for (const Aggregate* agg : rule.parts.aggregates)
+    collect::for_each_variable(*agg, record);
   return slots;
 }
 
@@ -723,11 +720,13 @@ struct AtomRange {
 // so it skips the instances an earlier pass already found.
 AtomRange scan_range(const PredData& data, std::optional<size_t> delta_position,
                      size_t position) {
-  if (!delta_position.has_value()) return {0, data.atoms.size()};
-  if (position == *delta_position) {
-    return {data.size_before_prev_pass, data.size_before_pass};
+  if (!delta_position.has_value()) {
+    return {.begin = 0, .end = data.atoms.size()};
   }
-  return {0, data.size_before_pass};
+  if (position == *delta_position) {
+    return {.begin = data.size_before_prev_pass, .end = data.size_before_pass};
+  }
+  return {.begin = 0, .end = data.size_before_pass};
 }
 
 // The order a join visits a body's positive literals in. The delta literal goes
@@ -742,7 +741,7 @@ std::vector<size_t> join_order(size_t count,
   order.reserve(count);
   if (delta_position.has_value()) order.push_back(*delta_position);
   for (size_t k = 0; k < count; ++k) {
-    if (k != delta_position) order.push_back(k);
+    if (!delta_position.has_value() || k != *delta_position) order.push_back(k);
   }
   return order;
 }
@@ -1002,7 +1001,7 @@ absl::Status find_instances(
             .order = join_order(parts.positive.size(), delta_position),
             .delta_position = delta_position};
   join.steps.resize(join.order.size());
-  Instance instance{std::move(seed), {}};
+  Instance instance{.binding = std::move(seed), .matched = {}};
   return extend(join, 0, instance, emit);
 }
 
@@ -1079,8 +1078,8 @@ absl::StatusOr<std::optional<std::vector<aspif::Lit>>> negative_lits(
     const Binding& binding, const Store& store, Symbols& syms) {
   std::vector<aspif::Lit> lits;
   for (const ClassicalLiteral* literal : negative) {
-    ASSIGN_OR_RETURN(bool can_match, args_can_match(*literal, binding, syms));
-    if (!can_match) return std::nullopt;
+    ASSIGN_OR_RETURN(bool matchable, args_can_match(*literal, binding, syms));
+    if (!matchable) return std::nullopt;
     ASSIGN_OR_RETURN(std::vector<aspif::Atom> matched,
                      matching_atoms(*literal, binding, store, syms));
     for (aspif::Atom atom : matched) {
@@ -1242,9 +1241,8 @@ absl::StatusOr<std::vector<int64_t>> possible_values(
     const Aggregate& agg, const std::vector<AggTuple>& tuples) {
   // An aggregate grounding has settled takes one value and no other, e.g. the
   // 2 that 'q(S) :- #count{ X : p(X) } = S.' binds S to over two p facts.
-  if (std::optional<int64_t> value = settled_agg_value(agg, tuples)) {
-    return std::vector<int64_t>{*value};
-  }
+  std::optional<int64_t> settled = settled_agg_value(agg, tuples);
+  if (settled.has_value()) return std::vector<int64_t>{*settled};
   absl::btree_set<int64_t> reachable = {0};
   for (const AggTuple& tuple : tuples) {
     absl::btree_set<int64_t> extended = reachable;
@@ -1649,8 +1647,9 @@ absl::StatusOr<std::optional<std::vector<aspif::Lit>>> ground_aggregate(
 
   ASSIGN_OR_RETURN(std::vector<AggTuple> tuples,
                    collect_agg_tuples(agg, outer_binding, store, syms));
-  if (std::optional<bool> holds = settled_agg_holds(agg, bounds, tuples)) {
-    if (!*holds) return std::nullopt;
+  std::optional<bool> settled = settled_agg_holds(agg, bounds, tuples);
+  if (settled.has_value()) {
+    if (!*settled) return std::nullopt;
     return std::vector<aspif::Lit>{};
   }
 
@@ -1776,8 +1775,8 @@ absl::StatusOr<bool> ignored_parts_are_well_formed(const BodyParts& parts,
                                                    const Binding& binding,
                                                    Symbols& syms) {
   for (const ClassicalLiteral* literal : parts.negative) {
-    ASSIGN_OR_RETURN(bool can_match, args_can_match(*literal, binding, syms));
-    if (!can_match) return false;
+    ASSIGN_OR_RETURN(bool matchable, args_can_match(*literal, binding, syms));
+    if (!matchable) return false;
   }
   for (const Aggregate* aggregate : parts.aggregates) {
     if (aggregate->lb_term != nullptr) {
@@ -1809,17 +1808,17 @@ struct Changes {
 // satisfied, which is what lets an instance carrying aggregates derive a fact.
 absl::StatusOr<bool> aggregates_settle_true(
     const std::vector<const Aggregate*>& aggregates, const Binding& binding,
-    const Store& store, Symbols& syms, AggCache& cache) {
+    const Store& store, Symbols& syms, AggCache& agg_cache) {
   for (const Aggregate* aggregate : aggregates) {
     ASSIGN_OR_RETURN(std::optional<bool> holds,
-                     cache.settle(*aggregate, binding, store, syms));
+                     agg_cache.settle(*aggregate, binding, store, syms));
     if (!holds.has_value() || !*holds) return false;
   }
   return true;
 }
 
 // Runs one rule against the store and adds the head atom of every instance it
-// finds, recording in `changed` what that did. `delta_position` picks the
+// finds, recording in `changes` what that did. `delta_position` picks the
 // positive literal to read the previous pass's atoms from (see
 // find_instances), or nullopt to read the whole store.
 //
@@ -1836,8 +1835,8 @@ absl::StatusOr<bool> aggregates_settle_true(
 // factness on.
 absl::Status derive_from_rule(const RuleView& rule,
                               std::optional<size_t> delta_position,
-                              Store& store, Symbols& syms, AggCache& cache,
-                              aspif::Program& aspif_prog, Changes& changed) {
+                              Store& store, Symbols& syms, AggCache& agg_cache,
+                              aspif::Program& aspif_prog, Changes& changes) {
   const bool derives_facts = rule.parts.negative.empty();
   return find_instances(
       rule.parts, store, syms, Binding(rule.slots),
@@ -1851,17 +1850,17 @@ absl::Status derive_from_rule(const RuleView& rule,
         if (!tuple.has_value()) return absl::OkStatus();
         const Inserted head =
             store.insert(pred_key(*rule.head), *std::move(tuple), aspif_prog);
-        if (head.is_new) changed.atoms = true;
+        if (head.is_new) changes.atoms = true;
         if (derives_facts && matched_all_facts(instance.matched, store)) {
           ASSIGN_OR_RETURN(
               bool aggregates_hold,
               aggregates_settle_true(rule.parts.aggregates, instance.binding,
-                                     store, syms, cache));
+                                     store, syms, agg_cache));
           if (!aggregates_hold) return absl::OkStatus();
           const bool newly_fact = store.mark_fact(head.atom);
           // Marking an atom the store already held is the one change a delta
           // pass cannot carry; see derive_atoms().
-          if (newly_fact && !head.is_new) changed.facts = true;
+          if (newly_fact && !head.is_new) changes.facts = true;
         }
         return absl::OkStatus();
       },
@@ -1908,31 +1907,31 @@ absl::Status derive_from_rule(const RuleView& rule,
 // rule reading that atom sees no new atom to re-run on, so the pass after it
 // reads the whole store instead.
 absl::Status derive_atoms(const std::vector<const RuleView*>& rules,
-                          Store& store, Symbols& syms, AggCache& cache,
+                          Store& store, Symbols& syms, AggCache& agg_cache,
                           aspif::Program& aspif_prog) {
   // The first pass reads the whole store. It is the only one that fires the
   // rules with no positive literals, and it derives the delta the passes below
   // start from. Later passes are semi-naive unless the only change was marking
   // facts, which a delta cannot carry, so the next pass reads the whole store.
   bool full_scan = true;
-  Changes changed;
-  while (full_scan || changed.atoms) {
-    changed = Changes{};
+  Changes changes;
+  while (full_scan || changes.atoms) {
+    changes = Changes{};
     store.begin_pass();
     for (const RuleView* rule : rules) {
       if (rule->head == nullptr) continue;
       if (full_scan) {
         RETURN_IF_ERROR(derive_from_rule(*rule, std::nullopt, store, syms,
-                                         cache, aspif_prog, changed));
+                                         agg_cache, aspif_prog, changes));
         continue;
       }
       for (size_t position = 0; position < rule->parts.positive.size();
            ++position) {
-        RETURN_IF_ERROR(derive_from_rule(*rule, position, store, syms, cache,
-                                         aspif_prog, changed));
+        RETURN_IF_ERROR(derive_from_rule(*rule, position, store, syms,
+                                         agg_cache, aspif_prog, changes));
       }
     }
-    full_scan = changed.facts && !changed.atoms;
+    full_scan = changes.facts && !changes.atoms;
   }
   return absl::OkStatus();
 }
@@ -1953,7 +1952,7 @@ absl::Status derive_atoms(const std::vector<const RuleView*>& rules,
 absl::Status emit_rules(const std::vector<const RuleView*>& rules,
                         const Store& store, Symbols& syms,
                         absl::flat_hash_set<aspif::Atom>& emitted_facts,
-                        AggCache& aggregates, aspif::Program& result) {
+                        AggCache& agg_cache, aspif::Program& result) {
   for (const RuleView* rule_ptr : rules) {
     const RuleView& rule = *rule_ptr;
     RETURN_IF_ERROR(find_instances(
@@ -1995,8 +1994,8 @@ absl::Status emit_rules(const std::vector<const RuleView*>& rules,
 
           for (const Aggregate* aggregate : rule.parts.aggregates) {
             ASSIGN_OR_RETURN(std::optional<std::vector<aspif::Lit>> extra,
-                             aggregates.ground(*aggregate, instance.binding,
-                                               store, syms, result));
+                             agg_cache.ground(*aggregate, instance.binding,
+                                              store, syms, result));
             if (!extra.has_value()) return absl::OkStatus();
             aspif_rule.body.insert(aspif_rule.body.end(), extra->begin(),
                                    extra->end());
@@ -2147,15 +2146,15 @@ absl::StatusOr<aspif::Program> ground(const Program& prog) {
   Store store;
   // One cache across both phases: they ask different questions about the same
   // aggregates, and what either answer rests on is complete before it is asked.
-  AggCache aggregates;
+  AggCache agg_cache;
   absl::flat_hash_set<aspif::Atom> emitted_facts;
   for (const auto& component_rules : rules_by_component) {
     RETURN_IF_ERROR(
-        derive_atoms(component_rules, store, syms, aggregates, result));
+        derive_atoms(component_rules, store, syms, agg_cache, result));
   }
   for (const auto& component_rules : rules_by_component) {
     RETURN_IF_ERROR(emit_rules(component_rules, store, syms, emitted_facts,
-                               aggregates, result));
+                               agg_cache, result));
   }
   emit_minimize(store, syms, result);
   name_outputs(store, syms, result);
