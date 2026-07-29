@@ -1,7 +1,7 @@
 % Color a graph with two colors so no edge connects same-colored nodes.
 % Each node is red or green (the two rules below force exactly one choice),
 % and the constraints reject colorings where an edge's ends match.
-% Try: pgass --ground two-coloring.lp | clasp 0
+% Try: pgass --models 0 two-coloring.lp
 
 node(1). node(2). node(3). node(4).
 edge(1, 2).

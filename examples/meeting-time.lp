@@ -3,6 +3,10 @@
 % different priority levels: level 1 outranks level 0, so the solver first
 % minimizes the people who cannot attend at all, and only then breaks ties by
 % minimizing the people who merely dislike the slot.
+%
+% pgass grounds both weak constraints but cannot yet solve them: cvc5 has no
+% optimization API, so finding the cheapest answer set needs a branch-and-bound
+% loop pgass does not have. clasp does the optimizing here.
 % Try: pgass --ground meeting-time.lp | clasp --opt-mode=opt
 
 slot(morning). slot(noon). slot(evening).

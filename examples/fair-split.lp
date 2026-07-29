@@ -3,7 +3,7 @@
 % their totals: '#sum{...} = A' binds A to the sum rather than comparing it
 % against a number already known. Naming both totals is what lets the last
 % rule compare them against each other, which no single aggregate can do.
-% Try: pgass --ground fair-split.lp | clasp 0
+% Try: pgass --models 0 fair-split.lp
 
 chore(dishes, 3). chore(laundry, 2). chore(vacuum, 4). chore(shopping, 5).
 

@@ -1,5 +1,5 @@
 % Which nodes can reach which over directed edges?
-% Try: pgass --ground reachability.lp | clasp
+% Try: pgass reachability.lp
 
 edge(a, b).
 edge(b, c).
