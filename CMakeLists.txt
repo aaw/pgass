@@ -150,8 +150,10 @@ target_link_libraries(solve_lib
     aspif_lib
     absl::statusor
   PRIVATE
+    absl::check
     absl::strings
     cvc5::cvc5
+    graph_lib
 )
 
 add_executable(pgass src/pgass.cc)
@@ -226,6 +228,17 @@ target_link_libraries(ground_test
     GTest::gmock
 )
 
+add_executable(solve_test src/solve_test.cc)
+target_compile_options(solve_test PRIVATE ${PGASS_WARNINGS})
+target_link_libraries(solve_test
+  PRIVATE
+    ground_lib
+    normalize_lib
+    solve_lib
+    GTest::gtest_main
+    GTest::gmock
+)
+
 add_executable(graph_test src/graph_test.cc)
 target_compile_options(graph_test PRIVATE ${PGASS_WARNINGS})
 target_link_libraries(graph_test
@@ -243,3 +256,4 @@ gtest_discover_tests(collect_test)
 gtest_discover_tests(graph_test)
 gtest_discover_tests(aspif_test)
 gtest_discover_tests(ground_test)
+gtest_discover_tests(solve_test)

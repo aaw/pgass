@@ -32,6 +32,9 @@ struct SolveOptions {
 // empty vector; note that this is not the same as returning one AnswerSet whose
 // atoms are empty, which is what a program whose only answer set is the empty
 // one returns.
+//
+// Choice and disjunctive rule heads and weak constraints return an
+// UnimplementedError; solve.cc says what each would take.
 absl::StatusOr<std::vector<AnswerSet>> solve(const aspif::Program& prog,
                                              const SolveOptions& options);
 
