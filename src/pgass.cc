@@ -1,8 +1,11 @@
+#include <cstdint>
+#include <cstdlib>
 #include <fstream>
 #include <iostream>
 #include <string>
 #include <vector>
 
+#include "absl/container/flat_hash_set.h"
 #include "absl/flags/flag.h"
 #include "absl/flags/parse.h"
 #include "absl/flags/usage.h"
@@ -13,10 +16,44 @@
 #include "normalize.h"
 #include "parse.h"
 #include "safety.h"
+#include "solve.h"
 
 ABSL_FLAG(bool, format, false, "Format the program and print to stdout");
 ABSL_FLAG(bool, ground, false,
           "Ground the program, print it as aspif text, and exit");
+ABSL_FLAG(int, models, 1,
+          "How many answer sets to look for; 0 means all of them");
+
+namespace {
+
+// Prints one answer set the way clingo does: the names of the Output
+// statements whose condition holds, separated by spaces.
+void print_answer_set(const aspif::Program& prog, const AnswerSet& answer_set) {
+  absl::flat_hash_set<aspif::Atom> is_true(answer_set.atoms.begin(),
+                                           answer_set.atoms.end());
+  bool first = true;
+  for (const aspif::Output& output : prog.outputs) {
+    bool holds = true;
+    for (aspif::Lit lit : output.condition) {
+      if (is_true.contains(std::abs(lit)) != (lit > 0)) {
+        holds = false;
+        break;
+      }
+    }
+    if (!holds) continue;
+    if (!first) std::cout << ' ';
+    std::cout << output.name;
+    first = false;
+  }
+  std::cout << "\n";
+  if (!answer_set.costs.empty()) {
+    std::cout << "Cost:";
+    for (std::int64_t cost : answer_set.costs) std::cout << ' ' << cost;
+    std::cout << "\n";
+  }
+}
+
+}  // namespace
 
 int main(int argc, char** argv) {
   absl::SetProgramUsageMessage(
@@ -82,5 +119,23 @@ int main(int argc, char** argv) {
     std::cout << to_aspif(*grounded);
     return 0;
   }
+
+  SolveOptions options;
+  options.max_answer_sets = absl::GetFlag(FLAGS_models);
+  auto answer_sets = solve(*grounded, options);
+  if (!answer_sets.ok()) {
+    std::cerr << "pgass: solve error: " << answer_sets.status().message()
+              << "\n";
+    return 1;
+  }
+  if (answer_sets->empty()) {
+    std::cout << "UNSATISFIABLE\n";
+    return 0;
+  }
+  for (size_t i = 0; i < answer_sets->size(); ++i) {
+    std::cout << "Answer: " << i + 1 << "\n";
+    print_answer_set(*grounded, (*answer_sets)[i]);
+  }
+  std::cout << "SATISFIABLE\n";
   return 0;
 }

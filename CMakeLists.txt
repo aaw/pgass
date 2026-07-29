@@ -38,6 +38,9 @@ set(ABSL_PROPAGATE_CXX_STD ON CACHE BOOL "" FORCE)
 
 FetchContent_MakeAvailable(googletest abseil-cpp)
 
+# cvc5, the SMT solver the QF_IDL translation is handed to.
+include(cmake/cvc5.cmake)
+
 add_library(parse_lib STATIC src/parse.cc src/ast.cc)
 target_compile_options(parse_lib PRIVATE ${PGASS_WARNINGS})
 target_include_directories(parse_lib PUBLIC src)
@@ -136,6 +139,21 @@ target_link_libraries(format_lib
     parse_lib
 )
 
+add_library(solve_lib STATIC src/solve.cc)
+target_compile_options(solve_lib PRIVATE ${PGASS_WARNINGS})
+target_include_directories(solve_lib PUBLIC src)
+# PUBLIC because cvc5's dependencies reach the final link line as bare names;
+# see cmake/cvc5.cmake.
+target_link_directories(solve_lib PUBLIC ${PGASS_CVC5_LIB_DIR})
+target_link_libraries(solve_lib
+  PUBLIC
+    aspif_lib
+    absl::statusor
+  PRIVATE
+    absl::strings
+    cvc5::cvc5
+)
+
 add_executable(pgass src/pgass.cc)
 target_compile_options(pgass PRIVATE ${PGASS_WARNINGS})
 target_link_libraries(pgass
@@ -144,7 +162,9 @@ target_link_libraries(pgass
     ground_lib
     normalize_lib
     safety_lib
+    solve_lib
     absl::check
+    absl::flat_hash_set
     absl::flags
     absl::flags_parse
     absl::flags_usage
@@ -183,7 +203,6 @@ target_compile_options(collect_test PRIVATE ${PGASS_WARNINGS})
 target_link_libraries(collect_test
   PRIVATE
     collect_lib
-    parse_lib
     GTest::gtest_main
     GTest::gmock
 )
@@ -212,7 +231,6 @@ target_compile_options(graph_test PRIVATE ${PGASS_WARNINGS})
 target_link_libraries(graph_test
   PRIVATE
     graph_lib
-    parse_lib
     GTest::gtest_main
     GTest::gmock
 )
