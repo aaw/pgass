@@ -3,14 +3,19 @@
 #include <cvc5/cvc5.h>
 
 #include <cstddef>
+#include <cstdint>
+#include <optional>
 #include <utility>
 #include <vector>
 
+#include "absl/container/btree_map.h"
 #include "absl/log/check.h"
 #include "absl/status/status.h"
+#include "absl/status/statusor.h"
 #include "absl/strings/str_cat.h"
 #include "aspif.h"
 #include "graph.h"
+#include "macros.h"
 
 namespace {
 
@@ -28,9 +33,8 @@ namespace {
 // more general QF_LIA. Every QF_IDL formula is also a QF_LIA formula, so
 // answering QF_LIA is never wrong, only slower.
 const char* logic_for(const aspif::Program& prog) {
-  // check_supported rejects minimize statements, so this branch never fires
-  // today. It states the rule anyway, because a weighted sum is a weighted sum
-  // whether it comes from an aggregate or a weak constraint.
+  // A weighted sum is a weighted sum whether it comes from an aggregate or a
+  // weak constraint.
   if (!prog.minimize.empty()) return "QF_LIA";
   for (const aspif::Rule& rule : prog.rules) {
     if (rule.body_type == aspif::Rule::BodyType::kWeight) return "QF_LIA";
@@ -58,16 +62,6 @@ absl::Status check_supported(const aspif::Program& prog) {
       return absl::UnimplementedError(
           "disjunctive rule heads are not supported");
     }
-  }
-  // cvc5 has no optimization API, so a minimize statement cannot be handed to
-  // it. Supporting one means a branch-and-bound loop here: find any answer set,
-  // work out its cost, assert that the cost is strictly lower, and repeat until
-  // the result is unsat, whereupon the last answer set found is the optimal
-  // one. With several priority levels that runs once per level, each settled
-  // level frozen with an equality before moving on to the next.
-  if (!prog.minimize.empty()) {
-    return absl::UnimplementedError(
-        "weak constraints are not supported: optimization is not implemented");
   }
   return absl::OkStatus();
 }
@@ -211,6 +205,24 @@ cvc5::Term literal_term(cvc5::TermManager& tm,
   return tm.mkTerm(cvc5::Kind::NOT, {atom_var[-lit]});
 }
 
+// The integer term adding up the weights of the true literals of `lits`. Each
+// literal contributes its weight when it holds and zero when it does not. Both
+// a weight body and a minimize statement are that sum. One is compared against
+// a bound, the other minimized.
+cvc5::Term weighted_sum(cvc5::TermManager& tm,
+                        const std::vector<cvc5::Term>& atom_var,
+                        const std::vector<aspif::WeightedLit>& lits) {
+  const cvc5::Term zero = tm.mkInteger(0);
+  std::vector<cvc5::Term> addends;
+  addends.reserve(lits.size());
+  for (const aspif::WeightedLit& weighted : lits) {
+    addends.push_back(
+        tm.mkTerm(cvc5::Kind::ITE, {literal_term(tm, atom_var, weighted.lit),
+                                    tm.mkInteger(weighted.weight), zero}));
+  }
+  return sum(tm, addends);
+}
+
 // The formula for one rule body.
 cvc5::Term body_term(cvc5::TermManager& tm,
                      const std::vector<cvc5::Term>& atom_var,
@@ -224,16 +236,10 @@ cvc5::Term body_term(cvc5::TermManager& tm,
     return conjunction(tm, conjuncts);
   }
   // A weight body holds when the weights of its true literals reach
-  // lower_bound, so each literal adds its weight or zero.
-  std::vector<cvc5::Term> addends;
-  addends.reserve(rule.weighted_body.size());
-  for (const aspif::WeightedLit& weighted : rule.weighted_body) {
-    addends.push_back(tm.mkTerm(
-        cvc5::Kind::ITE, {literal_term(tm, atom_var, weighted.lit),
-                          tm.mkInteger(weighted.weight), tm.mkInteger(0)}));
-  }
+  // lower_bound.
   return tm.mkTerm(cvc5::Kind::GEQ,
-                   {sum(tm, addends), tm.mkInteger(rule.lower_bound)});
+                   {weighted_sum(tm, atom_var, rule.weighted_body),
+                    tm.mkInteger(rule.lower_bound)});
 }
 
 // One rule deriving one atom.
@@ -359,6 +365,183 @@ void assert_ranking(cvc5::TermManager& tm, cvc5::Solver& solver,
   }
 }
 
+// One priority level to minimize.
+struct LevelCost {
+  // The weighted sum of the level's literals.
+  cvc5::Term cost;
+  // A cost no answer set can go below, which is where bisecting starts. Only a
+  // negative weight can push the sum under zero, so this is the negative
+  // weights added up.
+  std::int64_t lower_bound = 0;
+};
+
+// One entry per priority level, the most important level first. That is the
+// order the levels have to be settled in. A weak constraint at level 2 outranks
+// every weak constraint at level 1, however many of the latter there are.
+//
+// Two minimize statements sharing a priority are one level, since the semantics
+// is the total cost at each level and not the cost of each statement. Grounding
+// already emits one statement per level, but aspif permits several.
+std::vector<LevelCost> collect_level_costs(
+    cvc5::TermManager& tm, const aspif::Program& prog,
+    const std::vector<cvc5::Term>& atom_var) {
+  absl::btree_map<std::int64_t, std::vector<aspif::WeightedLit>> by_priority;
+  for (const aspif::Minimize& minimize : prog.minimize) {
+    std::vector<aspif::WeightedLit>& lits = by_priority[minimize.priority];
+    lits.insert(lits.end(), minimize.lits.begin(), minimize.lits.end());
+  }
+
+  std::vector<LevelCost> level_costs;
+  level_costs.reserve(by_priority.size());
+  // btree_map orders its keys ascending, so walking it backwards puts the
+  // highest priority first.
+  for (auto it = by_priority.rbegin(); it != by_priority.rend(); ++it) {
+    std::int64_t lower_bound = 0;
+    for (const aspif::WeightedLit& weighted : it->second) {
+      if (weighted.weight < 0) lower_bound += weighted.weight;
+    }
+    level_costs.push_back(
+        LevelCost{.cost = weighted_sum(tm, atom_var, it->second),
+                  .lower_bound = lower_bound});
+  }
+  return level_costs;
+}
+
+// Reads an integer the solver assigned. cvc5 works in unbounded integers, so a
+// program whose weights add up past 2^63 has a cost no std::int64_t can hold.
+// Better to say so than to report a wrapped-around number.
+absl::StatusOr<std::int64_t> int64_value(const cvc5::Term& value) {
+  if (!value.isInt64Value()) {
+    return absl::OutOfRangeError(absl::StrCat(
+        "cost ", value.getIntegerValue(), " does not fit in a 64-bit integer"));
+  }
+  return value.getInt64Value();
+}
+
+absl::Status undecided(const cvc5::Result& result) {
+  return absl::InternalError(
+      absl::StrCat("cvc5 returned '", result.toString(),
+                   "' rather than deciding the program"));
+}
+
+// The least cost a level can take, or nullopt when the program has no answer
+// set. Both searches below return that, and leave the solver holding whatever
+// bounds they proved along the way.
+using LeastCost = absl::StatusOr<std::optional<std::int64_t>>;
+
+// Finds any answer set, works out its cost, then asks for a strictly lower one.
+// Repeats until that comes back unsat. The last cost seen is the least
+// reachable one.
+//
+// The bounds only ever shrink, so each one can be asserted on top of the last
+// with no bookkeeping. They all go in one push() scope. The final bound is
+// unsatisfiable by construction, so it has to be popped before any later query.
+LeastCost minimize_by_stepping_down(cvc5::TermManager& tm, cvc5::Solver& solver,
+                                    const LevelCost& level) {
+  std::optional<std::int64_t> best;
+  solver.push();
+  while (true) {
+    const cvc5::Result result = solver.checkSat();
+    if (result.isUnsat()) break;
+    if (!result.isSat()) return undecided(result);
+    ASSIGN_OR_RETURN(best, int64_value(solver.getValue(level.cost)));
+    solver.assertFormula(
+        tm.mkTerm(cvc5::Kind::LT, {level.cost, tm.mkInteger(*best)}));
+  }
+  solver.pop();
+  return best;
+}
+
+// Halves the range the least cost is known to lie in until it holds one value.
+//
+// `high` is always a cost some answer set reaches and `low` one that none
+// beats. So the least cost stays in [low, high] and the two meet on it. Each
+// probe either pulls `high` down to the cost of the answer set it found or
+// lifts `low` past the bound it refuted. Both of those are permanent. The
+// probed bound itself is not, so it goes in as an assumption of the one query
+// rather than an assertion.
+LeastCost minimize_by_bisecting(cvc5::TermManager& tm, cvc5::Solver& solver,
+                                const LevelCost& level) {
+  // One answer set to start the range off. Its absence is how an unsatisfiable
+  // program shows up.
+  const cvc5::Result first = solver.checkSat();
+  if (first.isUnsat()) return std::nullopt;
+  if (!first.isSat()) return undecided(first);
+  ASSIGN_OR_RETURN(std::int64_t high, int64_value(solver.getValue(level.cost)));
+  solver.assertFormula(
+      tm.mkTerm(cvc5::Kind::LEQ, {level.cost, tm.mkInteger(high)}));
+
+  std::int64_t low = level.lower_bound;
+  while (low < high) {
+    // Rounds down, so the midpoint stays below `high` and the range really
+    // shrinks.
+    const std::int64_t middle = low + (high - low) / 2;
+    const cvc5::Result probe = solver.checkSatAssuming(
+        tm.mkTerm(cvc5::Kind::LEQ, {level.cost, tm.mkInteger(middle)}));
+    if (probe.isSat()) {
+      // The answer set found may cost well under what the probe asked for, so
+      // take its cost rather than the midpoint.
+      ASSIGN_OR_RETURN(high, int64_value(solver.getValue(level.cost)));
+      solver.assertFormula(
+          tm.mkTerm(cvc5::Kind::LEQ, {level.cost, tm.mkInteger(high)}));
+    } else if (probe.isUnsat()) {
+      low = middle + 1;
+      solver.assertFormula(
+          tm.mkTerm(cvc5::Kind::GEQ, {level.cost, tm.mkInteger(low)}));
+    } else {
+      return undecided(probe);
+    }
+  }
+  return high;
+}
+
+LeastCost minimize_level(cvc5::TermManager& tm, cvc5::Solver& solver,
+                         const LevelCost& level,
+                         SolveOptions::Optimizer optimizer) {
+  switch (optimizer) {
+    case SolveOptions::Optimizer::kLinear:
+      return minimize_by_stepping_down(tm, solver, level);
+    case SolveOptions::Optimizer::kBisect:
+      return minimize_by_bisecting(tm, solver, level);
+  }
+}
+
+// Settles every level in turn and leaves `solver` asserting that each level's
+// cost equals the least value it can take. Returns the least cost of each
+// level, or no costs at all when the program has no answer set.
+//
+// cvc5 has no optimization API, so this is branch and bound by hand, in one of
+// the two shapes above. The hardest instances to solve are the unsat ones with
+// a bound near the sat/unsat threshold. Stepping down one model at a time only
+// ever solves one of those, the last one, which is why it is the default.
+// Bisecting the range makes fewer solver calls overall, but many of them are
+// unsat, so it is often slower.
+//
+// Fixing a settled level with an equality rather than an inequality is what
+// makes the levels lexicographic. Later levels can then be minimized freely,
+// because no choice they make can spend an earlier level's budget.
+//
+// On return the solver is satisfiable exactly when the program has an answer
+// set, and every answer set it still admits is an optimal one.
+absl::StatusOr<std::vector<std::int64_t>> optimize(
+    cvc5::TermManager& tm, cvc5::Solver& solver,
+    const std::vector<LevelCost>& level_costs,
+    SolveOptions::Optimizer optimizer) {
+  std::vector<std::int64_t> costs;
+  costs.reserve(level_costs.size());
+  for (const LevelCost& level : level_costs) {
+    ASSIGN_OR_RETURN(const std::optional<std::int64_t> least,
+                     minimize_level(tm, solver, level, optimizer));
+    // No cost at all means the program is unsat, which the caller finds out for
+    // itself when it looks for an answer set.
+    if (!least.has_value()) return std::vector<std::int64_t>();
+    costs.push_back(*least);
+    solver.assertFormula(
+        tm.mkTerm(cvc5::Kind::EQUAL, {level.cost, tm.mkInteger(*least)}));
+  }
+  return costs;
+}
+
 }  // namespace
 
 absl::StatusOr<std::vector<AnswerSet>> solve(const aspif::Program& prog,
@@ -395,6 +578,13 @@ absl::StatusOr<std::vector<AnswerSet>> solve(const aspif::Program& prog,
     solver.assertFormula(literal_term(tm, atom_var, lit));
   }
 
+  // The cost every answer set below will have, optimizing having pinned each
+  // level to its least value. A program with no minimize statements has no
+  // levels, so it comes back with no cost and no solver call made.
+  ASSIGN_OR_RETURN(const std::vector<std::int64_t> costs,
+                   optimize(tm, solver, collect_level_costs(tm, prog, atom_var),
+                            options.optimizer));
+
   // What to block an answer set on: the atoms alone, never the level variables.
   // One answer set admits many level rankings, so blocking a whole model would
   // keep handing the same answer set back under a different ranking.
@@ -409,13 +599,10 @@ absl::StatusOr<std::vector<AnswerSet>> solve(const aspif::Program& prog,
          answer_sets.size() < static_cast<size_t>(options.max_answer_sets)) {
     const cvc5::Result result = solver.checkSat();
     if (result.isUnsat()) break;
-    if (!result.isSat()) {
-      return absl::InternalError(
-          absl::StrCat("cvc5 returned '", result.toString(),
-                       "' rather than deciding the program"));
-    }
+    if (!result.isSat()) return undecided(result);
 
     AnswerSet answer_set;
+    answer_set.costs = costs;
     for (aspif::Atom atom = 1; atom < prog.next_atom; ++atom) {
       if (solver.getValue(atom_var[atom]).getBooleanValue()) {
         answer_set.atoms.push_back(atom);

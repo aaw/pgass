@@ -10,6 +10,7 @@
 
 #include "absl/container/flat_hash_set.h"
 #include "absl/status/statusor.h"
+#include "absl/strings/str_cat.h"
 #include "absl/strings/str_join.h"
 #include "aspif.h"
 #include "ground.h"
@@ -24,23 +25,17 @@ using ::testing::UnorderedElementsAre;
 
 namespace {
 
-// Parses, normalizes, grounds, and solves `source`, returning one string per
-// answer set: the names that answer set makes true, sorted and separated by
-// spaces, so that a test can state what it expects literally. The empty answer
-// set renders as the empty string.
+// One string per answer set: the names that answer set makes true, sorted and
+// separated by spaces, so that a test can state what it expects literally. The
+// empty answer set renders as the empty string. An answer set with a cost,
+// which only a program with weak constraints has, ends with '| cost' and the
+// cost of each priority level, most important level first.
 //
 // Sorting matters because neither the order of the names within an answer set
 // nor the order cvc5 hands the answer sets back in is part of the contract, so
 // tests compare them as an unordered collection of sorted strings.
-absl::StatusOr<std::vector<std::string>> solve_source(const std::string& source,
-                                                      int max_answer_sets = 0) {
-  Parser parser(source);
-  ASSIGN_OR_RETURN(auto program, parser.parse_program());
-  RETURN_IF_ERROR(normalize(*program));
-  ASSIGN_OR_RETURN(aspif::Program grounded, ground(*program));
-
-  SolveOptions options;
-  options.max_answer_sets = max_answer_sets;
+absl::StatusOr<std::vector<std::string>> render_solutions(
+    const aspif::Program& grounded, const SolveOptions& options) {
   ASSIGN_OR_RETURN(std::vector<AnswerSet> answer_sets,
                    solve(grounded, options));
 
@@ -61,9 +56,51 @@ absl::StatusOr<std::vector<std::string>> solve_source(const std::string& source,
       if (holds) names.push_back(output.name);
     }
     std::sort(names.begin(), names.end());
-    rendered.push_back(absl::StrJoin(names, " "));
+    std::string line = absl::StrJoin(names, " ");
+    if (!answer_set.costs.empty()) {
+      if (!line.empty()) line += ' ';
+      absl::StrAppend(&line, "| cost ", absl::StrJoin(answer_set.costs, " "));
+    }
+    rendered.push_back(std::move(line));
   }
   return rendered;
+}
+
+// Parses, normalizes, grounds, and solves `source`, rendering the answer sets
+// as above.
+//
+// A program with weak constraints is solved twice, once under each optimizer,
+// and the two have to agree. An optimizer picks how to search for the cheapest
+// cost, not what the cheapest cost is. So every weak-constraint test below
+// covers both without saying so. The two are only comparable when all the
+// answer sets are asked for, because which of the equally cheap ones a limit
+// keeps is up to cvc5.
+absl::StatusOr<std::vector<std::string>> solve_source(const std::string& source,
+                                                      int max_answer_sets = 0) {
+  Parser parser(source);
+  ASSIGN_OR_RETURN(auto program, parser.parse_program());
+  RETURN_IF_ERROR(normalize(*program));
+  ASSIGN_OR_RETURN(aspif::Program grounded, ground(*program));
+
+  SolveOptions options;
+  options.max_answer_sets = max_answer_sets;
+  options.optimizer = SolveOptions::Optimizer::kLinear;
+  ASSIGN_OR_RETURN(std::vector<std::string> linear,
+                   render_solutions(grounded, options));
+  if (grounded.minimize.empty() || max_answer_sets != 0) return linear;
+
+  options.optimizer = SolveOptions::Optimizer::kBisect;
+  ASSIGN_OR_RETURN(std::vector<std::string> bisected,
+                   render_solutions(grounded, options));
+
+  std::sort(linear.begin(), linear.end());
+  std::sort(bisected.begin(), bisected.end());
+  if (linear != bisected) {
+    return absl::InternalError(absl::StrCat(
+        "the optimizers disagree. linear found {", absl::StrJoin(linear, "; "),
+        "} and bisect found {", absl::StrJoin(bisected, "; "), "}"));
+  }
+  return linear;
 }
 
 // A positive cycle holds only where something outside it offers support. Under
@@ -359,16 +396,145 @@ TEST(SolveTest, NegativeMaxAnswerSetsIsAnError) {
               HasSubstr("cannot be negative"));
 }
 
-// Optimization needs a branch-and-bound loop cvc5 cannot do for us, so a weak
-// constraint is rejected rather than silently ignored.
-TEST(SolveTest, WeakConstraintIsRejected) {
+// A weak constraint costs one unit per node picked, so the cheapest answer set
+// picks only the node the integrity constraint forces. The answer sets that
+// pick more are optimal for nothing and never come back.
+TEST(SolveTest, WeakConstraintMinimizesHowManyAtomsHold) {
   auto out = solve_source(R"(
-    p(1). p(2).
-    q(X) :- p(X).
-    :~ q(X). [1@1, X]
+    n(1). n(2). n(3).
+    in(X) :- n(X), not out(X).
+    out(X) :- n(X), not in(X).
+    :- not in(1).
+    :~ in(X). [1@0, X]
   )");
-  ASSERT_FALSE(out.ok());
-  EXPECT_THAT(std::string(out.status().message()), HasSubstr("optimization"));
+  ASSERT_TRUE(out.ok()) << out.status();
+  EXPECT_THAT(*out, UnorderedElementsAre(
+                        "in(1) n(1) n(2) n(3) out(2) out(3) | cost 1"));
+}
+
+// A weight other than 1 makes the cost a sum rather than a count, so picking
+// the two cheapest nodes beats picking any other pair.
+TEST(SolveTest, WeakConstraintMinimizesASumOfWeights) {
+  auto out = solve_source(R"(
+    n(1). n(2). n(3).
+    in(X) :- n(X), not out(X).
+    out(X) :- n(X), not in(X).
+    :- #count{ X : in(X) } < 2.
+    :~ in(X). [X@0, X]
+  )");
+  ASSERT_TRUE(out.ok()) << out.status();
+  EXPECT_THAT(
+      *out, UnorderedElementsAre("in(1) in(2) n(1) n(2) n(3) out(3) | cost 3"));
+}
+
+// Levels are settled one at a time from the most important down, not added
+// together. Level 1 is worth less here in raw weight, but paying 5 at level 0
+// to save 1 at level 1 is still the right trade.
+TEST(SolveTest, PriorityLevelsAreSettledMostImportantFirst) {
+  auto out = solve_source(R"(
+    p :- not q.
+    q :- not p.
+    :~ p. [1@1]
+    :~ q. [5@0]
+  )");
+  ASSERT_TRUE(out.ok()) << out.status();
+  EXPECT_THAT(*out, UnorderedElementsAre("q | cost 0 5"));
+}
+
+// Every answer set of the optimal cost comes back, not just one of them.
+// Covering node 1 and covering node 2 both cost 1.
+TEST(SolveTest, AllOptimalAnswerSetsAreEnumerated) {
+  auto out = solve_source(R"(
+    n(1). n(2).
+    in(X) :- n(X), not out(X).
+    out(X) :- n(X), not in(X).
+    :- out(1), out(2).
+    :~ in(X). [1@0, X]
+  )");
+  ASSERT_TRUE(out.ok()) << out.status();
+  EXPECT_THAT(*out, UnorderedElementsAre("in(1) n(1) n(2) out(2) | cost 1",
+                                         "in(2) n(1) n(2) out(1) | cost 1"));
+}
+
+// Two weak constraints whose violations share a weight, level, and terms are
+// one violation, so holding both costs 1 rather than 2.
+TEST(SolveTest, WeakConstraintsWithTheSameTupleCostOnce) {
+  auto out = solve_source(R"(
+    a. b.
+    :~ a. [1@0, 1]
+    :~ b. [1@0, 1]
+  )");
+  ASSERT_TRUE(out.ok()) << out.status();
+  EXPECT_THAT(*out, UnorderedElementsAre("a b | cost 1"));
+}
+
+// A program with no answer sets still has none once weak constraints are added,
+// and reports that rather than an optimal answer set of some cost.
+TEST(SolveTest, WeakConstraintOnAnUnsatisfiableProgram) {
+  auto out = solve_source(R"(
+    p :- not q.
+    q :- not p.
+    :- p.
+    :- q.
+    :~ p. [1@0]
+  )");
+  ASSERT_TRUE(out.ok()) << out.status();
+  EXPECT_THAT(*out, IsEmpty());
+}
+
+// A weak constraint no answer set can violate leaves a cost of zero. That is
+// still a cost, because the program has a level to report on.
+TEST(SolveTest, UnviolatedWeakConstraintCostsZero) {
+  auto out = solve_source(R"(
+    p.
+    :~ q. [1@0]
+    q :- p, not p.
+  )");
+  ASSERT_TRUE(out.ok()) << out.status();
+  EXPECT_THAT(*out, UnorderedElementsAre("p | cost 0"));
+}
+
+// A negative weight makes violating a weak constraint a reward, so the cheapest
+// answer set is the one that violates it. This is the case where bisecting
+// cannot start its range at zero.
+TEST(SolveTest, NegativeWeightIsWorthViolating) {
+  auto out = solve_source(R"(
+    p :- not q.
+    q :- not p.
+    :~ p. [-2@0]
+  )");
+  ASSERT_TRUE(out.ok()) << out.status();
+  EXPECT_THAT(*out, UnorderedElementsAre("p | cost -2"));
+}
+
+// Weights of both signs at one level, where the cheapest cost is neither the
+// most nor the least violated. Taking the -3 and leaving the 2 pays -3.
+TEST(SolveTest, MixedSignWeightsAtOneLevel) {
+  auto out = solve_source(R"(
+    n(1). n(2).
+    in(X) :- n(X), not out(X).
+    out(X) :- n(X), not in(X).
+    :~ in(1). [-3@0]
+    :~ in(2). [2@0]
+  )");
+  ASSERT_TRUE(out.ok()) << out.status();
+  EXPECT_THAT(*out, UnorderedElementsAre("in(1) n(1) n(2) out(2) | cost -3"));
+}
+
+// Optimizing has to respect the level ranking like everything else. The cycle
+// 'a :- b. b :- a.' cannot support itself, so the cheapest answer set is the
+// one where neither holds even though nothing forbids them.
+TEST(SolveTest, OptimizationOverAPositiveCycle) {
+  auto out = solve_source(R"(
+    p :- not q.
+    q :- not p.
+    a :- p.
+    a :- b.
+    b :- a.
+    :~ a. [1@0]
+  )");
+  ASSERT_TRUE(out.ok()) << out.status();
+  EXPECT_THAT(*out, UnorderedElementsAre("q | cost 0"));
 }
 
 }  // namespace

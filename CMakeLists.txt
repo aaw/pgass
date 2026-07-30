@@ -150,6 +150,7 @@ target_link_libraries(solve_lib
     aspif_lib
     absl::statusor
   PRIVATE
+    absl::btree
     absl::check
     absl::strings
     cvc5::cvc5

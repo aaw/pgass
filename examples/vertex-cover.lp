@@ -3,10 +3,8 @@
 % rejects any pick that leaves an edge uncovered, and the weak constraint
 % charges 1 per picked node, so the cheapest answer set is a minimum cover.
 %
-% pgass grounds the weak constraint but cannot yet solve one: cvc5 has no
-% optimization API, so finding the cheapest answer set needs a branch-and-bound
-% loop pgass does not have. clasp does the optimizing here.
-% Try: pgass --ground vertex-cover.lp | clasp --opt-mode=opt
+% This graph has four minimum covers, all of size 3.
+% Try: pgass --models 0 vertex-cover.lp
 
 node(1). node(2). node(3). node(4). node(5).
 

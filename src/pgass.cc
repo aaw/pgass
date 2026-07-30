@@ -2,7 +2,9 @@
 #include <cstdlib>
 #include <fstream>
 #include <iostream>
+#include <optional>
 #include <string>
+#include <string_view>
 #include <vector>
 
 #include "absl/container/flat_hash_set.h"
@@ -23,8 +25,19 @@ ABSL_FLAG(bool, ground, false,
           "Ground the program, print it as aspif text, and exit");
 ABSL_FLAG(int, models, 1,
           "How many answer sets to look for; 0 means all of them");
+ABSL_FLAG(
+    std::string, optimizer, "linear",
+    "How to minimize weak constraints: 'linear' asks for a cheaper answer "
+    "set until there is none, 'bisect' halves the range the cheapest cost "
+    "lies in. Both find the same cost");
 
 namespace {
+
+std::optional<SolveOptions::Optimizer> parse_optimizer(std::string_view name) {
+  if (name == "linear") return SolveOptions::Optimizer::kLinear;
+  if (name == "bisect") return SolveOptions::Optimizer::kBisect;
+  return std::nullopt;
+}
 
 // Prints one answer set the way clingo does: the names of the Output
 // statements whose condition holds, separated by spaces.
@@ -64,6 +77,15 @@ int main(int argc, char** argv) {
 
   if (absl::GetFlag(FLAGS_format) && absl::GetFlag(FLAGS_ground)) {
     std::cerr << "pgass: --format and --ground cannot be combined\n";
+    return 1;
+  }
+
+  const std::optional<SolveOptions::Optimizer> optimizer =
+      parse_optimizer(absl::GetFlag(FLAGS_optimizer));
+  if (!optimizer.has_value()) {
+    std::cerr << "pgass: unknown --optimizer '"
+              << absl::GetFlag(FLAGS_optimizer)
+              << "'; expected 'linear' or 'bisect'\n";
     return 1;
   }
 
@@ -122,6 +144,7 @@ int main(int argc, char** argv) {
 
   SolveOptions options;
   options.max_answer_sets = absl::GetFlag(FLAGS_models);
+  options.optimizer = *optimizer;
   auto answer_sets = solve(*grounded, options);
   if (!answer_sets.ok()) {
     std::cerr << "pgass: solve error: " << answer_sets.status().message()

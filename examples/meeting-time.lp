@@ -4,10 +4,9 @@
 % minimizes the people who cannot attend at all, and only then breaks ties by
 % minimizing the people who merely dislike the slot.
 %
-% pgass grounds both weak constraints but cannot yet solve them: cvc5 has no
-% optimization API, so finding the cheapest answer set needs a branch-and-bound
-% loop pgass does not have. clasp does the optimizing here.
-% Try: pgass --ground meeting-time.lp | clasp --opt-mode=opt
+% Noon wins: everyone can make it, at the cost of the one person who dislikes
+% it, so the cost printed is 0 at level 1 and 1 at level 0.
+% Try: pgass meeting-time.lp
 
 slot(morning). slot(noon). slot(evening).
 person(ana). person(bo). person(cy).
