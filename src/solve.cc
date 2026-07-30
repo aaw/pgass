@@ -504,6 +504,7 @@ LeastCost minimize_level(cvc5::TermManager& tm, cvc5::Solver& solver,
     case SolveOptions::Optimizer::kBisect:
       return minimize_by_bisecting(tm, solver, level);
   }
+  return std::nullopt;  // unreachable
 }
 
 // Settles every level in turn and leaves `solver` asserting that each level's
