@@ -57,6 +57,15 @@ struct PredGraph {
   };
   std::vector<AggEdge> agg_edges;
 
+  // One entry per rule whose head is a disjunction of two or more literals: the
+  // ids of the predicates that head mentions. Grounding puts each group into one
+  // strongly connected component, since one instance of such a rule derives an
+  // atom for every predicate in its head.
+  //
+  // They are kept out of pos_succ, which carries positive dependency alone.
+  // 'p | q.' makes neither of p and q depend on the other.
+  std::vector<std::vector<int>> head_groups;
+
   // Returns the id for `key`, allocating a fresh node (and empty adjacency rows)
   // the first time it is seen.
   int intern(const PredKey& key);
@@ -67,7 +76,8 @@ struct PredGraph {
 // aggregate makes all of its atoms negative dependencies. Builtin comparisons
 // carry no predicate and are ignored. Also populates agg_edges: one entry per
 // un-negated predicate occurring inside an aggregate element, pointing at each
-// head predicate of the rule containing it.
+// head predicate of the rule containing it; and head_groups: one entry per
+// multi-literal disjunctive head.
 PredGraph build_pred_graph(const Program& prog);
 
 // Returns, for each of the n = succ.size() nodes, the id of its strongly

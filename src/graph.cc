@@ -81,6 +81,12 @@ PredGraph build_pred_graph(const Program& const_prog) {
       for_each_head_pred(*statement->head, graph,
                          [&](int id) { heads.push_back(id); });
     }
+    // Normalization gives each choice element a rule of its own, so only a
+    // disjunction ties head predicates together.
+    if (statement->head &&
+        statement->head->kind == Head::DisjunctionKind && heads.size() > 1) {
+      graph.head_groups.push_back(heads);
+    }
 
     auto add_edge = [&](int body_id, bool negated) {
       for (int head_id : heads) {

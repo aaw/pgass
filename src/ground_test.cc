@@ -58,12 +58,12 @@ TEST(GroundTest, NotOverAnonymousVariableNegatesEveryMatchingAtom) {
       "{ r(1, 2) }. { r(3, 2) }. { r(4, 5) }.\n"
       "q :- not r(_, 2).\n");
   ASSERT_TRUE(out.ok()) << out.status();
-  // The output statements below number r(1,2), r(3,2) and r(4,5) as atoms 5, 6
-  // and 7, so q rests on 'not 5' and 'not 6'. r(4,5) does not match.
-  EXPECT_THAT(*out, HasSubstr("1 0 1 1 0 2 -5 -6\n"));
-  EXPECT_THAT(*out, HasSubstr("4 6 r(1,2) 1 5\n"));
-  EXPECT_THAT(*out, HasSubstr("4 6 r(3,2) 1 6\n"));
-  EXPECT_THAT(*out, HasSubstr("4 6 r(4,5) 1 7\n"));
+  // The output statements below number r(1,2), r(3,2) and r(4,5) as atoms 2, 4
+  // and 6, so q rests on 'not 2' and 'not 4'. r(4,5) does not match.
+  EXPECT_THAT(*out, HasSubstr("1 0 1 1 0 2 -2 -4\n"));
+  EXPECT_THAT(*out, HasSubstr("4 6 r(1,2) 1 2\n"));
+  EXPECT_THAT(*out, HasSubstr("4 6 r(3,2) 1 4\n"));
+  EXPECT_THAT(*out, HasSubstr("4 6 r(4,5) 1 6\n"));
 }
 
 TEST(GroundTest, NotOverAnonymousVariableHoldsWhenNothingMatches) {
@@ -87,8 +87,8 @@ TEST(GroundTest, NotOverAnonymousVariableIsPerBinding) {
       "{ r(1, a) }. p(1). p(2).\n"
       "q(X) :- p(X), not r(X, _).\n");
   ASSERT_TRUE(out.ok()) << out.status();
-  EXPECT_THAT(*out, HasSubstr("4 6 r(1,a) 1 6\n"));
-  EXPECT_THAT(*out, HasSubstr("1 0 1 3 0 1 -6\n"));  // q(1) :- not r(1,a)
+  EXPECT_THAT(*out, HasSubstr("4 6 r(1,a) 1 5\n"));
+  EXPECT_THAT(*out, HasSubstr("1 0 1 3 0 1 -5\n"));  // q(1) :- not r(1,a)
   EXPECT_THAT(*out, HasSubstr("1 0 1 4 0 0\n"));     // q(2), a fact itself
 }
 
@@ -151,23 +151,79 @@ TEST(GroundTest, VariableRuleGroundsOncePerMatch) {
             "0\n");
 }
 
+// A disjunctive head grounds to one aspif rule per instance, holding an atom per
+// disjunct.
+TEST(GroundTest, DisjunctiveHeadKeepsEveryDisjunct) {
+  auto out = ground_source(
+      "v(1). v(2).\n"
+      "red(X) | blue(X) :- v(X).");
+  ASSERT_TRUE(out.ok()) << out.status();
+  // The v facts drop out of the bodies, leaving the two disjunctions on their
+  // own: red(1)=3 or blue(1)=4, and red(2)=5 or blue(2)=6.
+  EXPECT_EQ(*out,
+            "asp 1 0 0\n"
+            "1 0 1 1 0 0\n"
+            "1 0 1 2 0 0\n"
+            "1 0 2 3 4 0 0\n"
+            "1 0 2 5 6 0 0\n"
+            "4 4 v(1) 1 1\n"
+            "4 4 v(2) 1 2\n"
+            "4 6 red(1) 1 3\n"
+            "4 6 red(2) 1 5\n"
+            "4 7 blue(1) 1 4\n"
+            "4 7 blue(2) 1 6\n"
+            "0\n");
+}
+
+// A disjunction derives no fact, however solid its body: one of a and b has to
+// hold, and neither of them holds in every answer set. So p keeps the rule
+// deriving it from a rather than becoming a fact.
+TEST(GroundTest, FactnessDoesNotPassThroughADisjunction) {
+  auto out = ground_source("d. a | b :- d. p :- a.");
+  ASSERT_TRUE(out.ok()) << out.status();
+  EXPECT_EQ(*out,
+            "asp 1 0 0\n"
+            "1 0 1 1 0 0\n"
+            "1 0 2 2 3 0 0\n"
+            "1 0 1 4 0 1 2\n"
+            "4 1 d 1 1\n"
+            "4 1 a 1 2\n"
+            "4 1 b 1 3\n"
+            "4 1 p 1 4\n"
+            "0\n");
+}
+
+// A fact among the head atoms satisfies the rule outright, so the instance is
+// dropped: b is named but nothing can derive it.
+TEST(GroundTest, ADisjunctionSatisfiedByAFactIsDropped) {
+  auto out = ground_source("a. a | b :- c. c.");
+  ASSERT_TRUE(out.ok()) << out.status();
+  EXPECT_EQ(*out,
+            "asp 1 0 0\n"
+            "1 0 1 1 0 0\n"
+            "1 0 1 2 0 0\n"
+            "4 1 c 1 1\n"
+            "4 1 a 1 2\n"
+            "4 1 b 1 3\n"
+            "0\n");
+}
+
 // A rule that keeps its own place still loses the fact literals in its body:
 // they hold in every answer set, so requiring them says nothing.
 TEST(GroundTest, FactBodyLiteralsDropOutOfARuleThatStays) {
   auto out = ground_source("{ a }. r. p :- a. s :- r, p.");
   ASSERT_TRUE(out.ok()) << out.status();
-  // r=1, then the choice's pair _cr0=2 and a=3, then p=4 and s=5. a is only
-  // possible, not a fact, so p and s are not facts either, but 's :- r, p.'
-  // comes out as 's :- p.' with the fact r gone.
+  // r=1, then the choice's disjunction 'a | _cr0.' over a=2 and _cr0=3, then
+  // p=4 and s=5. a is only possible, not a fact, so p and s are not facts
+  // either, but 's :- r, p.' comes out as 's :- p.' with the fact r gone.
   EXPECT_EQ(*out,
             "asp 1 0 0\n"
             "1 0 1 1 0 0\n"
-            "1 0 1 2 0 1 -3\n"
-            "1 0 1 3 0 1 -2\n"
-            "1 0 1 4 0 1 3\n"
+            "1 0 2 2 3 0 0\n"
+            "1 0 1 4 0 1 2\n"
             "1 0 1 5 0 1 4\n"
             "4 1 r 1 1\n"
-            "4 1 a 1 3\n"
+            "4 1 a 1 2\n"
             "4 1 p 1 4\n"
             "4 1 s 1 5\n"
             "0\n");
@@ -228,14 +284,13 @@ TEST(GroundTest, AnAggregateIsGroundOncePerWayOfReadingIt) {
   // drop out of their bodies, leaving the aggregate as the whole of each.
   EXPECT_EQ(*out,
             "asp 1 0 0\n"
-            "1 0 1 1 0 1 -2\n"
-            "1 0 1 2 0 1 -1\n"
+            "1 0 2 1 2 0 0\n"
             "1 0 1 3 0 0\n"
             "1 0 1 4 0 0\n"
-            "1 0 1 7 1 1 1 2 1\n"
+            "1 0 1 7 1 1 1 1 1\n"
             "1 0 1 5 0 1 7\n"
             "1 0 1 6 0 1 7\n"
-            "4 4 r(9) 1 2\n"
+            "4 4 r(9) 1 1\n"
             "4 6 dom(1) 1 3\n"
             "4 6 dom(2) 1 4\n"
             "4 4 p(1) 1 5\n"
@@ -251,9 +306,9 @@ TEST(GroundTest, AnAggregateOverARuleVariableIsGroundPerValue) {
       "dom(1). dom(2). { r(1) }. { r(2) }.\n"
       "p(X) :- dom(X), #count{ Y : r(Y), Y = X } >= 1.");
   ASSERT_TRUE(out.ok()) << out.status();
-  EXPECT_THAT(*out, HasSubstr("1 0 1 9 1 1 1 3 1\n"));
+  EXPECT_THAT(*out, HasSubstr("1 0 1 9 1 1 1 1 1\n"));
   EXPECT_THAT(*out, HasSubstr("1 0 1 7 0 1 9\n"));
-  EXPECT_THAT(*out, HasSubstr("1 0 1 10 1 1 1 4 1\n"));
+  EXPECT_THAT(*out, HasSubstr("1 0 1 10 1 1 1 3 1\n"));
   EXPECT_THAT(*out, HasSubstr("1 0 1 8 0 1 10\n"));
 }
 
@@ -288,11 +343,11 @@ TEST(GroundTest, AggregateWithNoElementsCountsZero) {
 TEST(GroundTest, AnAggregateOverAChoiceIsLeftToTheSolver) {
   auto out = ground_source("{ p(1) }. p(2). q :- #count{ X : p(X) } >= 1.");
   ASSERT_TRUE(out.ok()) << out.status();
-  // p(1)=2 is the choice's atom and p(2)=3 a fact. p(1) is counted through
+  // p(1)=1 is the choice's atom and p(2)=3 a fact. p(1) is counted through
   // its own atom; p(2)'s tuple rests on a fact, so its support is empty and
   // it needs an atom of its own (5) to be counted at all.
   EXPECT_THAT(*out, HasSubstr("1 0 1 5 0 0\n"));
-  EXPECT_THAT(*out, HasSubstr("1 0 1 6 1 1 2 2 1 5 1\n"));
+  EXPECT_THAT(*out, HasSubstr("1 0 1 6 1 1 2 1 1 5 1\n"));
   EXPECT_THAT(*out, HasSubstr("1 0 1 4 0 1 6\n"));
 }
 
@@ -488,23 +543,22 @@ TEST(GroundTest, NegationOverAFactKillsTheRuleOverAnUnderivableAtomGoesAway) {
 TEST(GroundTest, NegationKeptOverAnAtomThatIsOnlyPossible) {
   auto out = ground_source("{ q(1) }. p(1). p(2). s(X) :- p(X), not q(X).");
   ASSERT_TRUE(out.ok()) << out.status();
-  // p(1)=1, p(2)=2, s(1)=3, s(2)=4, and the choice's own pair of atoms
-  // _cr0=5 and q(1)=6, each derived from the other's absence. 's(1) :- p(1),
-  // not q(1).' keeps the negation and loses the fact p(1); s(2) has nothing
-  // to rule out, since q(2) is underivable, so it is a fact.
+  // p(1)=1, p(2)=2, s(1)=3, s(2)=4, and the choice's disjunction
+  // 'q(1) | _cr0.' over q(1)=5 and _cr0=6, one of which has to hold.
+  // 's(1) :- p(1), not q(1).' keeps the negation and loses the fact p(1); s(2)
+  // has nothing to rule out, since q(2) is underivable, so it is a fact.
   EXPECT_EQ(*out,
             "asp 1 0 0\n"
             "1 0 1 1 0 0\n"
             "1 0 1 2 0 0\n"
-            "1 0 1 3 0 1 -6\n"
+            "1 0 1 3 0 1 -5\n"
             "1 0 1 4 0 0\n"
-            "1 0 1 5 0 1 -6\n"
-            "1 0 1 6 0 1 -5\n"
+            "1 0 2 5 6 0 0\n"
             "4 4 p(1) 1 1\n"
             "4 4 p(2) 1 2\n"
             "4 4 s(1) 1 3\n"
             "4 4 s(2) 1 4\n"
-            "4 4 q(1) 1 6\n"
+            "4 4 q(1) 1 5\n"
             "0\n");
 }
 
@@ -571,24 +625,23 @@ TEST(GroundTest, ZeroArityAtoms) {
 }
 
 TEST(GroundTest, CountAggregateLowerBound) {
-  // p is left to a choice so the count stays open: p=2, q=3. The element's one
+  // p is left to a choice so the count stays open: p=1, q=3. The element's one
   // tuple rests on p alone, so the weight body counts p itself, and only the
   // '>= 1' bound-check atom (4) has to be invented.
   auto out = ground_source("{ p }. q :- #count{ 1 : p } > 0.");
   ASSERT_TRUE(out.ok()) << out.status();
   EXPECT_EQ(*out,
             "asp 1 0 0\n"
-            "1 0 1 1 0 1 -2\n"
-            "1 0 1 2 0 1 -1\n"
-            "1 0 1 4 1 1 1 2 1\n"
+            "1 0 2 1 2 0 0\n"
+            "1 0 1 4 1 1 1 1 1\n"
             "1 0 1 3 0 1 4\n"
-            "4 1 p 1 2\n"
+            "4 1 p 1 1\n"
             "4 1 q 1 3\n"
             "0\n");
 }
 
 TEST(GroundTest, SumAggregateWeighsByFirstTerm) {
-  // w(1,3)=3, w(2,5)=4, q=5. The element's first term (the weight) is V, not
+  // w(1,3)=1, w(2,5)=3, q=5. The element's first term (the weight) is V, not
   // I: the weight body holds the two w atoms weighing 3 and 5, rather than
   // counting them.
   auto out =
@@ -596,14 +649,12 @@ TEST(GroundTest, SumAggregateWeighsByFirstTerm) {
   ASSERT_TRUE(out.ok()) << out.status();
   EXPECT_EQ(*out,
             "asp 1 0 0\n"
-            "1 0 1 1 0 1 -4\n"
-            "1 0 1 2 0 1 -3\n"
-            "1 0 1 3 0 1 -2\n"
-            "1 0 1 4 0 1 -1\n"
-            "1 0 1 6 1 4 2 3 3 4 5\n"
+            "1 0 2 1 2 0 0\n"
+            "1 0 2 3 4 0 0\n"
+            "1 0 1 6 1 4 2 1 3 3 5\n"
             "1 0 1 5 0 1 6\n"
-            "4 6 w(1,3) 1 3\n"
-            "4 6 w(2,5) 1 4\n"
+            "4 6 w(1,3) 1 1\n"
+            "4 6 w(2,5) 1 3\n"
             "4 1 q 1 5\n"
             "0\n");
 }
@@ -617,18 +668,15 @@ TEST(GroundTest, CountAggregateCombinedLowerAndUpperBound) {
   ASSERT_TRUE(out.ok()) << out.status();
   EXPECT_EQ(*out,
             "asp 1 0 0\n"
-            "1 0 1 1 0 1 -6\n"
-            "1 0 1 2 0 1 -5\n"
-            "1 0 1 3 0 1 -4\n"
-            "1 0 1 4 0 1 -3\n"
-            "1 0 1 5 0 1 -2\n"
-            "1 0 1 6 0 1 -1\n"
-            "1 0 1 8 1 1 3 4 1 5 1 6 1\n"
-            "1 0 1 9 1 3 3 4 1 5 1 6 1\n"
+            "1 0 2 1 2 0 0\n"
+            "1 0 2 3 4 0 0\n"
+            "1 0 2 5 6 0 0\n"
+            "1 0 1 8 1 1 3 1 1 3 1 5 1\n"
+            "1 0 1 9 1 3 3 1 1 3 1 5 1\n"
             "1 0 1 7 0 2 8 -9\n"
-            "4 4 p(1) 1 4\n"
-            "4 4 p(2) 1 5\n"
-            "4 4 p(3) 1 6\n"
+            "4 4 p(1) 1 1\n"
+            "4 4 p(2) 1 3\n"
+            "4 4 p(3) 1 5\n"
             "4 1 q 1 7\n"
             "0\n");
 }
@@ -643,16 +691,14 @@ TEST(GroundTest, NegatedAggregateNegatesTheWholeBoundConjunction) {
   ASSERT_TRUE(out.ok()) << out.status();
   EXPECT_EQ(*out,
             "asp 1 0 0\n"
-            "1 0 1 1 0 1 -4\n"
-            "1 0 1 2 0 1 -3\n"
-            "1 0 1 3 0 1 -2\n"
-            "1 0 1 4 0 1 -1\n"
-            "1 0 1 5 1 1 2 3 1 4 1\n"
-            "1 0 1 6 1 3 2 3 1 4 1\n"
+            "1 0 2 1 2 0 0\n"
+            "1 0 2 3 4 0 0\n"
+            "1 0 1 5 1 1 2 1 1 3 1\n"
+            "1 0 1 6 1 3 2 1 1 3 1\n"
             "1 0 1 7 0 2 5 -6\n"
             "1 0 0 0 1 -7\n"
-            "4 4 p(1) 1 3\n"
-            "4 4 p(2) 1 4\n"
+            "4 4 p(1) 1 1\n"
+            "4 4 p(2) 1 3\n"
             "0\n");
 }
 
@@ -664,15 +710,13 @@ TEST(GroundTest, CountAggregateEqualityUsesLowAndHighAuxAtoms) {
   ASSERT_TRUE(out.ok()) << out.status();
   EXPECT_EQ(*out,
             "asp 1 0 0\n"
-            "1 0 1 1 0 1 -4\n"
-            "1 0 1 2 0 1 -3\n"
-            "1 0 1 3 0 1 -2\n"
-            "1 0 1 4 0 1 -1\n"
-            "1 0 1 6 1 2 2 3 1 4 1\n"
-            "1 0 1 7 1 3 2 3 1 4 1\n"
+            "1 0 2 1 2 0 0\n"
+            "1 0 2 3 4 0 0\n"
+            "1 0 1 6 1 2 2 1 1 3 1\n"
+            "1 0 1 7 1 3 2 1 1 3 1\n"
             "1 0 1 5 0 2 6 -7\n"
-            "4 4 p(1) 1 3\n"
-            "4 4 p(2) 1 4\n"
+            "4 4 p(1) 1 1\n"
+            "4 4 p(2) 1 3\n"
             "4 1 q 1 5\n"
             "0\n");
 }
@@ -689,16 +733,14 @@ TEST(GroundTest, AggregateDedupesEqualTuplesAcrossElements) {
   ASSERT_TRUE(out.ok()) << out.status();
   EXPECT_EQ(*out,
             "asp 1 0 0\n"
-            "1 0 1 1 0 1 -2\n"
-            "1 0 1 2 0 1 -1\n"
-            "1 0 1 3 0 1 -4\n"
-            "1 0 1 4 0 1 -3\n"
-            "1 0 1 6 0 1 4\n"
-            "1 0 1 6 0 1 2\n"
+            "1 0 2 1 2 0 0\n"
+            "1 0 2 3 4 0 0\n"
+            "1 0 1 6 0 1 3\n"
+            "1 0 1 6 0 1 1\n"
             "1 0 1 7 1 2 1 6 1\n"
             "1 0 1 5 0 1 7\n"
-            "4 4 r(1) 1 2\n"
-            "4 4 p(1) 1 4\n"
+            "4 4 r(1) 1 1\n"
+            "4 4 p(1) 1 3\n"
             "4 1 q 1 5\n"
             "0\n");
 }
@@ -794,7 +836,7 @@ TEST(GroundTest, SumIgnoresTuplesWithoutAnIntegerFirstTerm) {
   auto out = ground_source(
       "{ p(1) }. { q(a) }. r :- #sum{ X : p(X); Y : q(Y) } >= 1.");
   ASSERT_TRUE(out.ok()) << out.status();
-  EXPECT_THAT(*out, HasSubstr("1 0 1 6 1 1 1 4 1\n"));
+  EXPECT_THAT(*out, HasSubstr("1 0 1 6 1 1 1 3 1\n"));
 }
 
 TEST(GroundTest, CountIncludesTuplesWithoutAnIntegerFirstTerm) {
@@ -803,7 +845,7 @@ TEST(GroundTest, CountIncludesTuplesWithoutAnIntegerFirstTerm) {
   auto out = ground_source(
       "{ p(1) }. { q(a) }. r :- #count{ X : p(X); Y : q(Y) } >= 2.");
   ASSERT_TRUE(out.ok()) << out.status();
-  EXPECT_THAT(*out, HasSubstr("1 0 1 6 1 2 2 4 1 2 1\n"));
+  EXPECT_THAT(*out, HasSubstr("1 0 1 6 1 2 2 3 1 1 1\n"));
 }
 
 TEST(GroundTest, NegativeSumWeightFlipsTheLiteral) {
@@ -814,11 +856,10 @@ TEST(GroundTest, NegativeSumWeightFlipsTheLiteral) {
   ASSERT_TRUE(out.ok()) << out.status();
   EXPECT_EQ(*out,
             "asp 1 0 0\n"
-            "1 0 1 1 0 1 -2\n"
-            "1 0 1 2 0 1 -1\n"
-            "1 0 1 4 1 1 1 -2 1\n"
+            "1 0 2 1 2 0 0\n"
+            "1 0 1 4 1 1 1 -1 1\n"
             "1 0 1 3 0 1 4\n"
-            "4 1 p 1 2\n"
+            "4 1 p 1 1\n"
             "4 1 q 1 3\n"
             "0\n");
 }
@@ -830,11 +871,10 @@ TEST(GroundTest, BoundNoPositiveWeightCanMissBecomesAFact) {
   ASSERT_TRUE(out.ok()) << out.status();
   EXPECT_EQ(*out,
             "asp 1 0 0\n"
-            "1 0 1 1 0 1 -2\n"
-            "1 0 1 2 0 1 -1\n"
+            "1 0 2 1 2 0 0\n"
             "1 0 1 4 0 0\n"
             "1 0 1 3 0 1 4\n"
-            "4 1 p 1 2\n"
+            "4 1 p 1 1\n"
             "4 1 q 1 3\n"
             "0\n");
 }
@@ -844,7 +884,7 @@ TEST(GroundTest, MixedSumWeightsFlipOnlyTheNegativeOnes) {
   // holds exactly when p is true and q is false.
   auto out = ground_source("{p}. {q}. r :- #sum{ 2 : p; -1 : q } >= 2.");
   ASSERT_TRUE(out.ok()) << out.status();
-  EXPECT_THAT(*out, HasSubstr("1 0 1 6 1 3 2 4 2 -2 1\n"));
+  EXPECT_THAT(*out, HasSubstr("1 0 1 6 1 3 2 3 2 -1 1\n"));
 }
 
 TEST(GroundTest, ZeroSumWeightIsLeftOutOfTheWeightBody) {
@@ -859,6 +899,56 @@ TEST(GroundTest, MinMaxAggregatesRejected) {
   auto out = ground_source("p(1). q :- #max{ X : p(X) } >= 1.");
   ASSERT_FALSE(out.ok());
   EXPECT_THAT(std::string(out.status().message()), HasSubstr("#max"));
+}
+
+/* One instance of a disjunctive rule derives an atom for every predicate in its
+   head, so grounding puts those predicates in one component. An aggregate over
+   one of them, in a rule heading another, then reads a predicate its own
+   component is still deriving.
+
+   Such a rule derives no fact. Settling the count below while q/1 has no atoms
+   would settle it at 0, make a fact of p, and lose the answer set holding q(1)
+   instead. So p keeps a rule resting on the aggregate and the solver decides
+   it. */
+TEST(GroundTest, AnAggregateOverADisjunctiveHeadPartnerDerivesNoFact) {
+  auto out = ground_source(
+      "r.\n"
+      "p :- #count{ X : q(X) } <= 0.\n"
+      "p | q(1) :- r.");
+  ASSERT_TRUE(out.ok()) << out.status();
+  // r=1, p=2, q(1)=3, and the 'count >= 1' atom (4) the '<= 0' bound negates.
+  // p rests on 'not 4' rather than being emitted as the fact '1 0 1 2 0 0'.
+  EXPECT_THAT(*out, HasSubstr("1 0 1 2 0 1 -4\n"));
+  EXPECT_THAT(*out, HasSubstr("1 0 2 2 3 0 0\n"));
+  EXPECT_THAT(*out, Not(HasSubstr("1 0 1 2 0 0\n")));
+}
+
+// The same shape with the disjunction heading q/2 alongside p. The count over
+// q/1 would otherwise settle on the fact q(1) and make p a fact. p=3 keeps the
+// weight body (6) instead.
+TEST(GroundTest, ADisjunctionOverAnAggregatesPredicateStopsItSettling) {
+  auto out = ground_source(
+      "r.\n"
+      "q(1).\n"
+      "p | q(2) :- r.\n"
+      "p :- #count{ X : q(X) } >= 1.");
+  ASSERT_TRUE(out.ok()) << out.status();
+  EXPECT_THAT(*out, HasSubstr("1 0 1 3 0 1 6\n"));
+  EXPECT_THAT(*out, Not(HasSubstr("1 0 1 3 0 0\n")));
+}
+
+// The same aggregate settles as it always did where the disjunction is nowhere
+// near it: q(1) is a fact, so the count is one whatever the solver does, and p
+// is a fact in turn.
+TEST(GroundTest, AnAggregateAwayFromTheDisjunctionStillSettles) {
+  auto out = ground_source(
+      "r.\n"
+      "s | t :- r.\n"
+      "q(1).\n"
+      "p :- #count{ X : q(X) } >= 1.");
+  ASSERT_TRUE(out.ok()) << out.status();
+  EXPECT_THAT(*out, HasSubstr("1 0 1 2 0 0\n"));
+  EXPECT_THAT(*out, HasSubstr("4 1 p 1 2\n"));
 }
 
 TEST(GroundTest, ArithmeticInHeadTerm) {
@@ -1152,21 +1242,20 @@ TEST(GroundTest, AssignmentBoundVariableUsedByALaterLiteral) {
   ASSERT_TRUE(out.ok()) << out.status();
   // X = 1 gives Y = 2, and the choice leaves r(2) open, so q(1) keeps 'not
   // r(2)' in its body. X = 2 gives Y = 3, which r/1 never derived, so q(2) is
-  // a fact. p(1)=1, p(2)=2, q(1)=3, q(2)=4, and the choice's own pair of atoms
-  // _cr0=5 and r(2)=6.
+  // a fact. p(1)=1, p(2)=2, q(1)=3, q(2)=4, and the choice's disjunction
+  // 'r(2) | _cr0.' over r(2)=5 and _cr0=6.
   EXPECT_EQ(*out,
             "asp 1 0 0\n"
             "1 0 1 1 0 0\n"
             "1 0 1 2 0 0\n"
-            "1 0 1 3 0 1 -6\n"
+            "1 0 1 3 0 1 -5\n"
             "1 0 1 4 0 0\n"
-            "1 0 1 5 0 1 -6\n"
-            "1 0 1 6 0 1 -5\n"
+            "1 0 2 5 6 0 0\n"
             "4 4 p(1) 1 1\n"
             "4 4 p(2) 1 2\n"
             "4 4 q(1) 1 3\n"
             "4 4 q(2) 1 4\n"
-            "4 4 r(2) 1 6\n"
+            "4 4 r(2) 1 5\n"
             "0\n");
 }
 
@@ -1191,15 +1280,14 @@ TEST(GroundTest, CountAggregateValueBindsAVariable) {
   // A solver keeps whichever matches its choice of p.
   EXPECT_EQ(*out,
             "asp 1 0 0\n"
-            "1 0 1 1 0 1 -2\n"
-            "1 0 1 2 0 1 -1\n"
+            "1 0 2 1 2 0 0\n"
             "1 0 1 5 0 0\n"
-            "1 0 1 6 1 1 1 2 1\n"
+            "1 0 1 6 1 1 1 1 1\n"
             "1 0 1 3 0 2 5 -6\n"
-            "1 0 1 7 1 1 1 2 1\n"
-            "1 0 1 8 1 2 1 2 1\n"
+            "1 0 1 7 1 1 1 1 1\n"
+            "1 0 1 8 1 2 1 1 1\n"
             "1 0 1 4 0 2 7 -8\n"
-            "4 1 p 1 2\n"
+            "4 1 p 1 1\n"
             "4 4 q(0) 1 3\n"
             "4 4 q(1) 1 4\n"
             "0\n");

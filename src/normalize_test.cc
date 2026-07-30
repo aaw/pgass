@@ -94,12 +94,9 @@ TEST_F(NormalizeTest, TestNormalizeChoiceRuleSimple) {
   ASSERT_TRUE(normalize(**prog).ok());
 
   EXPECT_THAT(**prog, EquivalentToSource(R"(
-    p1 :- q1, not _cr0.
-    _cr0 :- q1, not p1.
-    p2 :- q1, not _cr1.
-    _cr1 :- q1, not p2.
-    p3 :- q1, not _cr2.
-    _cr2 :- q1, not p3.
+    p1 | _cr0 :- q1.
+    p2 | _cr1 :- q1.
+    p3 | _cr2 :- q1.
   )"));
 }
 
@@ -114,16 +111,11 @@ TEST_F(NormalizeTest, TestNormalizeChoiceRuleComplex) {
   ASSERT_TRUE(normalize(**prog).ok());
 
   EXPECT_THAT(**prog, EquivalentToSource(R"(
-    a :- a1, a2, x, y, not z, not _cr0.
-    _cr0 :- a1, a2, x, y, not z, not a.
-    b :- x, y, not z, not _cr1.
-    _cr1 :- x, y, not z, not b.
-    c :- c1, c2, x, y, not z, not _cr2.
-    _cr2 :- c1, c2, x, y, not z, not c.
-    d :- x, y, not z, not _cr3.
-    _cr3 :- x, y, not z, not d.
-    e :- x, y, not z, not _cr4.
-    _cr4 :- x, y, not z, not e.
+    a | _cr0 :- a1, a2, x, y, not z.
+    b | _cr1 :- x, y, not z.
+    c | _cr2 :- c1, c2, x, y, not z.
+    d | _cr3 :- x, y, not z.
+    e | _cr4 :- x, y, not z.
     :- x, y, not z, not 1 < #count{ _cr0: a, a1, a2, _cr1: b, _cr2: c, c1, c2, _cr3: d, _cr4: e } <= 4.
   )"));
 }
@@ -140,14 +132,10 @@ TEST_F(NormalizeTest, TestNormalizeMultipleChoiceRules) {
   ASSERT_TRUE(normalize(**prog).ok());
 
   EXPECT_THAT(**prog, EquivalentToSource(R"(
-    p1 :- q1, not _cr0.
-    _cr0 :- q1, not p1.
-    p2 :- q1, not _cr1.
-    _cr1 :- q1, not p2.
-    r1 :- s1, not _cr2.
-    _cr2 :- s1, not r1.
-    r2 :- s1, not _cr3.
-    _cr3 :- s1, not r2.
+    p1 | _cr0 :- q1.
+    p2 | _cr1 :- q1.
+    r1 | _cr2 :- s1.
+    r2 | _cr3 :- s1.
   )"));
 }
 
@@ -162,8 +150,7 @@ TEST_F(NormalizeTest, TestNormalizeChoiceWithVars) {
   ASSERT_TRUE(normalize(**prog).ok());
 
   EXPECT_THAT(**prog, EquivalentToSource(R"(
-    p(X, Y) :- q(X), r(Y), not _cr0(X, Y).
-    _cr0(X, Y) :- q(X), r(Y), not p(X, Y).
+    p(X, Y) | _cr0(X, Y) :- q(X), r(Y).
     :- r(Y), not #count{ _cr0(X, Y): p(X, Y), q(X) } <= 1.
   )"));
 }
@@ -256,72 +243,18 @@ TEST_F(NormalizeTest, TestRemoveClassicalNegationOneConstraintPerPredicate) {
   )"));
 }
 
-TEST_F(NormalizeTest, TestSplitHeadDisjunctionSimple) {
+/* A disjunctive head is left as it stands, head cycle or not. Rewriting it into
+   normal rules by shifting the other disjuncts into the body,
+
+     a | b :- body.   becomes   a :- body, not b.   and   b :- body, not a.
+
+   only preserves answer sets while no two head atoms lie on a common positive
+   cycle, and which ground atoms do is not known until grounding, so solve.cc
+   both asks the question and does the shift. */
+TEST_F(NormalizeTest, TestDisjunctiveHeadIsLeftAlone) {
   std::string program = R"(
     a | b | c :- d, e, not f.
-  )";
-
-  Parser parser(program);
-  auto prog = parser.parse_program();
-  ASSERT_TRUE(prog.ok()) << prog.status();
-  ASSERT_TRUE(normalize(**prog).ok());
-
-  EXPECT_THAT(**prog, EquivalentToSource(R"(
-    a :- d, e, not f, not b, not c.
-    b :- d, e, not f, not a, not c.
-    c :- d, e, not f, not a, not b.
-  )"));
-}
-
-TEST_F(NormalizeTest, TestSplitHeadDisjunctionNoBody) {
-  std::string program = R"(
-    a | b.
-  )";
-
-  Parser parser(program);
-  auto prog = parser.parse_program();
-  ASSERT_TRUE(prog.ok()) << prog.status();
-  ASSERT_TRUE(normalize(**prog).ok());
-
-  EXPECT_THAT(**prog, EquivalentToSource(R"(
-    a :- not b.
-    b :- not a.
-  )"));
-}
-
-TEST_F(NormalizeTest, TestSplitHeadDisjunctionSingleAtomUnchanged) {
-  std::string program = R"(
-    a :- b.
-  )";
-
-  Parser parser(program);
-  auto prog = parser.parse_program();
-  ASSERT_TRUE(prog.ok()) << prog.status();
-  ASSERT_TRUE(normalize(**prog).ok());
-
-  EXPECT_THAT(**prog, EquivalentToSource(R"(
-    a :- b.
-  )"));
-}
-
-/* A positive head cycle (a and b are mutually reachable through 'a :- b' and
-   'b :- a') makes the split unsound, so normalization must reject it. Example:
-
-  a | b.
-  a :- b.
-  b :- a.
-
-  has an answer set of {a,b}. but the normalized version:
-
-  a :- not b.
-  b :- not a.
-  a :- b.
-  b :- a.
-
-  has no answer sets.
-*/
-TEST_F(NormalizeTest, TestSplitHeadDisjunctionRejectsHeadCycle) {
-  std::string program = R"(
+    p(X) | p(Y) :- q(X, Y).
     a | b.
     a :- b.
     b :- a.
@@ -330,27 +263,15 @@ TEST_F(NormalizeTest, TestSplitHeadDisjunctionRejectsHeadCycle) {
   Parser parser(program);
   auto prog = parser.parse_program();
   ASSERT_TRUE(prog.ok()) << prog.status();
+  ASSERT_TRUE(normalize(**prog).ok());
 
-  absl::Status status = normalize(**prog);
-  EXPECT_FALSE(status.ok());
-  EXPECT_THAT(std::string(status.message()), HasSubstr("head-cycle"));
-}
-
-/* The head-cycle check is at predicate granularity, so a disjunctive rule that
-   repeats the same predicate in its head is always rejected, even with no other
-   rules defining p. This exercises that conservative (but sound) behavior. */
-TEST_F(NormalizeTest, TestSplitHeadDisjunctionRejectsRepeatedHeadPredicate) {
-  std::string program = R"(
+  EXPECT_THAT(**prog, EquivalentToSource(R"(
+    a | b | c :- d, e, not f.
     p(X) | p(Y) :- q(X, Y).
-  )";
-
-  Parser parser(program);
-  auto prog = parser.parse_program();
-  ASSERT_TRUE(prog.ok()) << prog.status();
-
-  absl::Status status = normalize(**prog);
-  EXPECT_FALSE(status.ok());
-  EXPECT_THAT(std::string(status.message()), HasSubstr("head-cycle"));
+    a | b.
+    a :- b.
+    b :- a.
+  )"));
 }
 
 TEST_F(NormalizeTest, TestRewriteWeakConstraintSimple) {

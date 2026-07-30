@@ -9,6 +9,7 @@
 #include <vector>
 
 #include "absl/container/btree_map.h"
+#include "absl/container/flat_hash_set.h"
 #include "absl/log/check.h"
 #include "absl/status/status.h"
 #include "absl/status/statusor.h"
@@ -40,30 +41,6 @@ const char* logic_for(const aspif::Program& prog) {
     if (rule.body_type == aspif::Rule::BodyType::kWeight) return "QF_LIA";
   }
   return "QF_IDL";
-}
-
-// Rejects the parts of aspif that solve() does not handle, so that such a
-// program gets an error rather than a wrong answer.
-absl::Status check_supported(const aspif::Program& prog) {
-  for (const aspif::Rule& rule : prog.rules) {
-    // A choice head leaves its atoms free rather than deriving them, so the
-    // completion below would have to stop forcing them. Nothing produces one:
-    // normalization rewrites choice rules away.
-    if (rule.head_type == aspif::Rule::HeadType::kChoice) {
-      return absl::UnimplementedError("choice rule heads are not supported");
-    }
-    // Deciding a disjunctive program is complete for the second level of the
-    // polynomial hierarchy, while one QF_IDL or QF_LIA query only decides an NP
-    // problem, so no translation like the one below can exist unless that
-    // hierarchy collapses. Disjunction needs a different shape of solving: a
-    // saturation encoding, or a second solver checking each candidate answer
-    // set for minimality.
-    if (rule.head.size() > 1) {
-      return absl::UnimplementedError(
-          "disjunctive rule heads are not supported");
-    }
-  }
-  return absl::OkStatus();
 }
 
 // The un-negated body atoms of `rule`, whichever body form it uses. These are
@@ -112,6 +89,14 @@ struct Ranking {
   // variable. False for every atom of a stratified program, which leaves the
   // translation as plain completion.
   std::vector<bool> needs_level;
+  // Whether each component, indexed by component id, holds two head atoms of one
+  // rule. Nothing in such a component is ranked. A ranking would throw away
+  // answer sets like the {a, b} of 'a | b. a :- b. b :- a.', where a and b
+  // support each other around the cycle and neither is above the other. The
+  // minimality check decides those atoms instead.
+  std::vector<bool> head_cyclic;
+  // Whether any component is head-cyclic, which is what turns that check on.
+  bool any_head_cycle = false;
 };
 
 Ranking build_ranking(const aspif::Program& prog) {
@@ -120,11 +105,23 @@ Ranking build_ranking(const aspif::Program& prog) {
   Ranking ranking;
   ranking.component = strongly_connected_components(succ);
   ranking.needs_level.assign(prog.next_atom, false);
+  ranking.head_cyclic.assign(ranking.component.size(), false);
 
   std::vector<int> component_size(ranking.component.size(), 0);
   for (int component : ranking.component) ++component_size[component];
 
+  // Two head atoms of one rule in one component are a head cycle.
+  for (const aspif::Rule& rule : prog.rules) {
+    absl::flat_hash_set<int> seen;
+    for (aspif::Atom head : rule.head) {
+      if (seen.insert(ranking.component[head]).second) continue;
+      ranking.head_cyclic[ranking.component[head]] = true;
+      ranking.any_head_cycle = true;
+    }
+  }
+
   for (aspif::Atom atom = 1; atom < prog.next_atom; ++atom) {
+    if (ranking.head_cyclic[ranking.component[atom]]) continue;
     if (component_size[ranking.component[atom]] > 1) {
       ranking.needs_level[atom] = true;
       continue;
@@ -139,6 +136,20 @@ Ranking build_ranking(const aspif::Program& prog) {
     }
   }
   return ranking;
+}
+
+// Rejects the parts of aspif that solve() does not handle, so that such a
+// program gets an error rather than a wrong answer.
+absl::Status check_supported(const aspif::Program& prog) {
+  for (const aspif::Rule& rule : prog.rules) {
+    // A choice head leaves its atoms free rather than deriving them, so the
+    // completion below would have to stop forcing them. Nothing produces one:
+    // normalization rewrites choice rules away.
+    if (rule.head_type == aspif::Rule::HeadType::kChoice) {
+      return absl::UnimplementedError("choice rule heads are not supported");
+    }
+  }
+  return absl::OkStatus();
 }
 
 // cvc5 rejects AND, OR, and ADD with fewer than two arguments, and every empty
@@ -244,7 +255,11 @@ cvc5::Term body_term(cvc5::TermManager& tm,
 
 // One rule deriving one atom.
 struct Support {
-  // The formula for the rule's body.
+  // The formula for the rule's body, and for a disjunctive head every other head
+  // atom being false. One rule supports one head atom at a time. 'a | b.'
+  // supports a where a holds alone, and b where b holds alone, and neither where
+  // both hold, holding both being more than the rule asks for. This is the shift
+  // of Ben-Eliyahu & Dechter, taken per ground atom.
   cvc5::Term body;
   // The un-negated body atoms sharing the head's component, which the level
   // ranking has to order strictly below the head. A positive dependency that
@@ -274,56 +289,70 @@ std::vector<aspif::Atom> ranked_body_atoms(const aspif::Rule& rule,
   return ranked_below;
 }
 
-// Groups the rules by the atom they derive. Rules with an empty head derive
-// nothing and are left out; assert_constraints handles those.
+// Groups the rules by the atoms they derive. Rules with an empty head derive
+// nothing and are left out; assert_rules handles those.
 std::vector<std::vector<Support>> collect_supports(
     cvc5::TermManager& tm, const aspif::Program& prog,
     const std::vector<cvc5::Term>& atom_var, const Ranking& ranking) {
   std::vector<std::vector<Support>> supports(prog.next_atom);
   for (const aspif::Rule& rule : prog.rules) {
     if (rule.head.empty()) continue;
-    cvc5::Term body = body_term(tm, atom_var, rule);
+    const cvc5::Term body = body_term(tm, atom_var, rule);
     for (aspif::Atom head : rule.head) {
+      std::vector<cvc5::Term> conjuncts = {body};
+      for (aspif::Atom other : rule.head) {
+        if (other == head) continue;
+        conjuncts.push_back(tm.mkTerm(cvc5::Kind::NOT, {atom_var[other]}));
+      }
       supports[head].push_back(
-          Support{.body = body,
+          Support{.body = conjunction(tm, conjuncts),
                   .ranked_below = ranked_body_atoms(rule, head, ranking)});
     }
   }
   return supports;
 }
 
-// Forbids the body of every integrity constraint, an aspif rule with an empty
-// head, from holding.
-void assert_constraints(cvc5::TermManager& tm, cvc5::Solver& solver,
-                        const aspif::Program& prog,
-                        const std::vector<cvc5::Term>& atom_var) {
+// Asserts that every rule is satisfied: where its body holds, one of its head
+// atoms holds. An integrity constraint is the same statement about a rule with
+// no head, whose empty disjunction is false, so it says the body cannot hold.
+void assert_rules(cvc5::TermManager& tm, cvc5::Solver& solver,
+                  const aspif::Program& prog,
+                  const std::vector<cvc5::Term>& atom_var) {
   for (const aspif::Rule& rule : prog.rules) {
-    if (!rule.head.empty()) continue;
+    std::vector<cvc5::Term> heads;
+    heads.reserve(rule.head.size());
+    for (aspif::Atom head : rule.head) heads.push_back(atom_var[head]);
     solver.assertFormula(
-        tm.mkTerm(cvc5::Kind::NOT, {body_term(tm, atom_var, rule)}));
+        tm.mkTerm(cvc5::Kind::IMPLIES,
+                  {body_term(tm, atom_var, rule), disjunction(tm, heads)}));
   }
 }
 
-// Asserts the Clark completion: an atom holds exactly when one of the bodies
-// deriving it holds. An atom no rule derives has no bodies, so its completion
-// says it is false since nothing can ever derive it.
+// Asserts that every atom that holds is supported: some rule deriving it has a
+// support that holds. An atom no rule derives has no supports at all, so this
+// makes it false.
 //
-// The rank conditions of the level ranking stay out of these formulas. The
-// completion has to say "this body holds, therefore its head holds" without
-// qualification; the ranking is a separate restriction on which supports count.
-// Folding the two together would let the solver choose levels that falsify a
-// support and so drop an atom the rules force to hold.
-void assert_completion(cvc5::TermManager& tm, cvc5::Solver& solver,
-                       const aspif::Program& prog,
-                       const std::vector<cvc5::Term>& atom_var,
-                       const std::vector<std::vector<Support>>& supports) {
+// For single-atom heads this and assert_rules are the two halves of the Clark
+// completion, an atom holding exactly when one of the bodies deriving it holds.
+// Disjunction splits them. 'a | b.' forces one of a and b without saying which,
+// so the two directions stop sharing a formula.
+//
+// The rank conditions of the level ranking stay out of these formulas. Rule
+// satisfaction and support hold without qualification. The ranking is a separate
+// restriction on which supports count. Folding the two together would let the
+// solver choose levels that falsify a support and drop an atom the rules force
+// to hold.
+void assert_supportedness(cvc5::TermManager& tm, cvc5::Solver& solver,
+                          const aspif::Program& prog,
+                          const std::vector<cvc5::Term>& atom_var,
+                          const std::vector<std::vector<Support>>& supports) {
   for (aspif::Atom atom = 1; atom < prog.next_atom; ++atom) {
     std::vector<cvc5::Term> bodies;
     bodies.reserve(supports[atom].size());
     for (const Support& support : supports[atom]) {
       bodies.push_back(support.body);
     }
-    solver.assertFormula(tm.mkTerm(cvc5::Kind::EQUAL,
+    solver.assertFormula(tm.mkTerm(cvc5::Kind::IMPLIES,
                                    {atom_var[atom], disjunction(tm, bodies)}));
   }
 }
@@ -407,6 +436,108 @@ std::vector<LevelCost> collect_level_costs(
   return level_costs;
 }
 
+absl::Status undecided(const cvc5::Result& result) {
+  return absl::InternalError(
+      absl::StrCat("cvc5 returned '", result.toString(),
+                   "' rather than deciding the program"));
+}
+
+// One rule of the reduct, as a formula over `subset_var`. A null Term means the
+// rule is not in the reduct at all, because no subset of the candidate can
+// satisfy its body.
+//
+// A normal body drops its default-negated literals, which the candidate has
+// already settled. 'not q' where the candidate holds q is false, and takes the
+// rule with it. 'not q' where it does not hold q stays true however small the
+// subset, so it says nothing and goes. A positive atom outside the candidate is
+// false in every subset, and takes the rule too.
+//
+// A weight body keeps its shape, since which literals hold decides whether it
+// reaches its bound. Weights are positive, so an atom outside the subset only
+// lowers the sum. A default-negated literal contributes the constant weight the
+// candidate gives it.
+cvc5::Term reduct_body(cvc5::TermManager& tm, const aspif::Rule& rule,
+                       const absl::flat_hash_set<aspif::Atom>& candidate,
+                       const std::vector<cvc5::Term>& subset_var) {
+  if (rule.body_type == aspif::Rule::BodyType::kNormal) {
+    std::vector<cvc5::Term> conjuncts;
+    conjuncts.reserve(rule.body.size());
+    for (aspif::Lit lit : rule.body) {
+      if (lit < 0 && candidate.contains(-lit)) return cvc5::Term();
+      if (lit > 0 && !candidate.contains(lit)) return cvc5::Term();
+      if (lit > 0) conjuncts.push_back(subset_var[lit]);
+    }
+    return conjunction(tm, conjuncts);
+  }
+
+  const cvc5::Term zero = tm.mkInteger(0);
+  std::vector<cvc5::Term> addends;
+  addends.reserve(rule.weighted_body.size());
+  for (const aspif::WeightedLit& weighted : rule.weighted_body) {
+    const cvc5::Term weight = tm.mkInteger(weighted.weight);
+    if (weighted.lit < 0 && !candidate.contains(-weighted.lit)) {
+      addends.push_back(weight);
+    } else if (weighted.lit > 0 && candidate.contains(weighted.lit)) {
+      addends.push_back(
+          tm.mkTerm(cvc5::Kind::ITE, {subset_var[weighted.lit], weight, zero}));
+    }
+  }
+  return tm.mkTerm(cvc5::Kind::GEQ,
+                   {sum(tm, addends), tm.mkInteger(rule.lower_bound)});
+}
+
+// Whether some proper subset of `candidate` models the reduct of `prog` with
+// respect to `candidate`. That is how a candidate model fails to be an answer
+// set. ASP-Core-2 defines an answer set the same way: a model I of P such that
+// no proper subset of I models the reduct of P with respect to I.
+//
+// One Boolean per candidate atom stands for that subset. Atoms outside the
+// candidate are false in every subset of it, so they need no variable.
+//
+// This is the second query a head cycle costs. It asks for the absence of a
+// smaller model, which no search for a model can answer on its own.
+absl::StatusOr<bool> subset_models_reduct(
+    cvc5::TermManager& tm, const aspif::Program& prog, const char* logic,
+    const absl::flat_hash_set<aspif::Atom>& candidate) {
+  // The empty candidate has no proper subset.
+  if (candidate.empty()) return false;
+
+  cvc5::Solver checker(tm);
+  checker.setLogic(logic);
+
+  std::vector<cvc5::Term> subset_var(prog.next_atom);
+  const cvc5::Sort bool_sort = tm.getBooleanSort();
+  std::vector<cvc5::Term> dropped;
+  dropped.reserve(candidate.size());
+  for (aspif::Atom atom = 1; atom < prog.next_atom; ++atom) {
+    if (!candidate.contains(atom)) continue;
+    subset_var[atom] = tm.mkConst(bool_sort, absl::StrCat("s", atom));
+    dropped.push_back(tm.mkTerm(cvc5::Kind::NOT, {subset_var[atom]}));
+  }
+  // Proper: the subset leaves at least one candidate atom out.
+  checker.assertFormula(disjunction(tm, dropped));
+
+  for (const aspif::Rule& rule : prog.rules) {
+    const cvc5::Term body = reduct_body(tm, rule, candidate, subset_var);
+    if (body.isNull()) continue;
+    // Only head atoms the candidate holds can satisfy the rule, a subset of it
+    // holding no others. An empty head leaves an integrity constraint, which
+    // rules no subset out: its body is false under the candidate, which is a
+    // model, and stays false under anything smaller.
+    std::vector<cvc5::Term> heads;
+    for (aspif::Atom head : rule.head) {
+      if (candidate.contains(head)) heads.push_back(subset_var[head]);
+    }
+    checker.assertFormula(
+        tm.mkTerm(cvc5::Kind::IMPLIES, {body, disjunction(tm, heads)}));
+  }
+
+  const cvc5::Result result = checker.checkSat();
+  if (result.isSat()) return true;
+  if (result.isUnsat()) return false;
+  return undecided(result);
+}
+
 // Reads an integer the solver assigned. cvc5 works in unbounded integers, so a
 // program whose weights add up past 2^63 has a cost no std::int64_t can hold.
 // Better to say so than to report a wrapped-around number.
@@ -418,10 +549,113 @@ absl::StatusOr<std::int64_t> int64_value(const cvc5::Term& value) {
   return value.getInt64Value();
 }
 
-absl::Status undecided(const cvc5::Result& result) {
-  return absl::InternalError(
-      absl::StrCat("cvc5 returned '", result.toString(),
-                   "' rather than deciding the program"));
+// The solver, and what looking for answer sets rather than models takes.
+//
+// Every query goes through find(). Where a component is head-cyclic, a model of
+// the assertions can fail to be an answer set. find() checks each model it is
+// handed and rules out the ones that fail, until it holds an answer set or the
+// solver runs out of models. Where no component is head-cyclic, the assertions
+// describe the answer sets exactly and find() is one checkSat().
+struct Search {
+  cvc5::TermManager& tm;
+  cvc5::Solver& solver;
+  const aspif::Program& prog;
+  const std::vector<cvc5::Term>& atom_var;
+  // Whether a model has to pass the minimality check to count as an answer set.
+  bool check_reduct = false;
+  // The logic to check the reduct in, which is the one the program is solved in.
+  const char* logic = nullptr;
+
+  // Clauses ruling out the models already handed back, the answer sets and the
+  // failed candidates alike. Both are permanent. A model that is not an answer
+  // set never becomes one, and an answer set is reported once. pop() drops what
+  // its scope asserted, so they are kept here and asserted again on the way out.
+  std::vector<cvc5::Term> blocked;
+  // Where in `blocked` each open push() scope began.
+  std::vector<size_t> scopes;
+
+  // Whether the solver holds an answer set. `assumption`, where given, holds for
+  // this search alone.
+  absl::StatusOr<bool> find(
+      const std::optional<cvc5::Term>& assumption = std::nullopt);
+
+  // The atoms true in the model the solver holds.
+  std::vector<aspif::Atom> model_atoms() const;
+
+  // Rules a model out of every later query.
+  void block(const std::vector<aspif::Atom>& atoms);
+
+  void push();
+  void pop();
+};
+
+std::vector<aspif::Atom> Search::model_atoms() const {
+  std::vector<aspif::Atom> atoms;
+  for (aspif::Atom atom = 1; atom < prog.next_atom; ++atom) {
+    if (solver.getValue(atom_var[atom]).getBooleanValue()) {
+      atoms.push_back(atom);
+    }
+  }
+  return atoms;
+}
+
+void Search::block(const std::vector<aspif::Atom>& atoms) {
+  // A program with no atoms has one model, the empty one, and no clause can say
+  // anything about it. Callers stop before asking for a second.
+  if (prog.next_atom <= 1) return;
+
+  const absl::flat_hash_set<aspif::Atom> is_true(atoms.begin(), atoms.end());
+  // The clause asks for some atom to differ from this model. Only the atoms are
+  // named, never the level variables: one answer set admits many rankings, so
+  // blocking a whole model would keep handing the same answer set back under a
+  // different ranking.
+  std::vector<cvc5::Term> literals;
+  literals.reserve(prog.next_atom - 1);
+  for (aspif::Atom atom = 1; atom < prog.next_atom; ++atom) {
+    literals.push_back(is_true.contains(atom)
+                           ? tm.mkTerm(cvc5::Kind::NOT, {atom_var[atom]})
+                           : atom_var[atom]);
+  }
+  const cvc5::Term clause = disjunction(tm, literals);
+  blocked.push_back(clause);
+  solver.assertFormula(clause);
+}
+
+void Search::push() {
+  scopes.push_back(blocked.size());
+  solver.push();
+}
+
+void Search::pop() {
+  solver.pop();
+  // The scope took the clauses asserted inside it with it, so they go back in.
+  for (size_t i = scopes.back(); i < blocked.size(); ++i) {
+    solver.assertFormula(blocked[i]);
+  }
+  scopes.pop_back();
+}
+
+absl::StatusOr<bool> Search::find(
+    const std::optional<cvc5::Term>& assumption) {
+  while (true) {
+    const cvc5::Result result = assumption.has_value()
+                                    ? solver.checkSatAssuming(*assumption)
+                                    : solver.checkSat();
+    if (result.isUnsat()) return false;
+    if (!result.isSat()) return undecided(result);
+    if (!check_reduct) return true;
+
+    const std::vector<aspif::Atom> atoms = model_atoms();
+    ASSIGN_OR_RETURN(
+        const bool smaller,
+        subset_models_reduct(
+            tm, prog, logic,
+            absl::flat_hash_set<aspif::Atom>(atoms.begin(), atoms.end())));
+    if (!smaller) return true;
+    // A model of the rules that a smaller model of its reduct undercuts is no
+    // answer set, whatever cost bound it was found under, so it is out for good.
+    block(atoms);
+  }
 }
 
 // The least cost a level can take, or nullopt when the program has no answer
@@ -436,19 +670,18 @@ using LeastCost = absl::StatusOr<std::optional<std::int64_t>>;
 // The bounds only ever shrink, so each one can be asserted on top of the last
 // with no bookkeeping. They all go in one push() scope. The final bound is
 // unsatisfiable by construction, so it has to be popped before any later query.
-LeastCost minimize_by_stepping_down(cvc5::TermManager& tm, cvc5::Solver& solver,
-                                    const LevelCost& level) {
+LeastCost minimize_by_stepping_down(Search& search, const LevelCost& level) {
+  cvc5::TermManager& tm = search.tm;
   std::optional<std::int64_t> best;
-  solver.push();
+  search.push();
   while (true) {
-    const cvc5::Result result = solver.checkSat();
-    if (result.isUnsat()) break;
-    if (!result.isSat()) return undecided(result);
-    ASSIGN_OR_RETURN(best, int64_value(solver.getValue(level.cost)));
-    solver.assertFormula(
+    ASSIGN_OR_RETURN(const bool found, search.find());
+    if (!found) break;
+    ASSIGN_OR_RETURN(best, int64_value(search.solver.getValue(level.cost)));
+    search.solver.assertFormula(
         tm.mkTerm(cvc5::Kind::LT, {level.cost, tm.mkInteger(*best)}));
   }
-  solver.pop();
+  search.pop();
   return best;
 }
 
@@ -460,15 +693,15 @@ LeastCost minimize_by_stepping_down(cvc5::TermManager& tm, cvc5::Solver& solver,
 // lifts `low` past the bound it refuted. Both of those are permanent. The
 // probed bound itself is not, so it goes in as an assumption of the one query
 // rather than an assertion.
-LeastCost minimize_by_bisecting(cvc5::TermManager& tm, cvc5::Solver& solver,
-                                const LevelCost& level) {
+LeastCost minimize_by_bisecting(Search& search, const LevelCost& level) {
+  cvc5::TermManager& tm = search.tm;
   // One answer set to start the range off. Its absence is how an unsatisfiable
   // program shows up.
-  const cvc5::Result first = solver.checkSat();
-  if (first.isUnsat()) return std::nullopt;
-  if (!first.isSat()) return undecided(first);
-  ASSIGN_OR_RETURN(std::int64_t high, int64_value(solver.getValue(level.cost)));
-  solver.assertFormula(
+  ASSIGN_OR_RETURN(const bool found, search.find());
+  if (!found) return std::nullopt;
+  ASSIGN_OR_RETURN(std::int64_t high,
+                   int64_value(search.solver.getValue(level.cost)));
+  search.solver.assertFormula(
       tm.mkTerm(cvc5::Kind::LEQ, {level.cost, tm.mkInteger(high)}));
 
   std::int64_t low = level.lower_bound;
@@ -476,33 +709,32 @@ LeastCost minimize_by_bisecting(cvc5::TermManager& tm, cvc5::Solver& solver,
     // Rounds down, so the midpoint stays below `high` and the range really
     // shrinks.
     const std::int64_t middle = low + (high - low) / 2;
-    const cvc5::Result probe = solver.checkSatAssuming(
-        tm.mkTerm(cvc5::Kind::LEQ, {level.cost, tm.mkInteger(middle)}));
-    if (probe.isSat()) {
+    ASSIGN_OR_RETURN(
+        const bool under_bound,
+        search.find(tm.mkTerm(cvc5::Kind::LEQ,
+                              {level.cost, tm.mkInteger(middle)})));
+    if (under_bound) {
       // The answer set found may cost well under what the probe asked for, so
       // take its cost rather than the midpoint.
-      ASSIGN_OR_RETURN(high, int64_value(solver.getValue(level.cost)));
-      solver.assertFormula(
+      ASSIGN_OR_RETURN(high, int64_value(search.solver.getValue(level.cost)));
+      search.solver.assertFormula(
           tm.mkTerm(cvc5::Kind::LEQ, {level.cost, tm.mkInteger(high)}));
-    } else if (probe.isUnsat()) {
-      low = middle + 1;
-      solver.assertFormula(
-          tm.mkTerm(cvc5::Kind::GEQ, {level.cost, tm.mkInteger(low)}));
     } else {
-      return undecided(probe);
+      low = middle + 1;
+      search.solver.assertFormula(
+          tm.mkTerm(cvc5::Kind::GEQ, {level.cost, tm.mkInteger(low)}));
     }
   }
   return high;
 }
 
-LeastCost minimize_level(cvc5::TermManager& tm, cvc5::Solver& solver,
-                         const LevelCost& level,
+LeastCost minimize_level(Search& search, const LevelCost& level,
                          SolveOptions::Optimizer optimizer) {
   switch (optimizer) {
     case SolveOptions::Optimizer::kLinear:
-      return minimize_by_stepping_down(tm, solver, level);
+      return minimize_by_stepping_down(search, level);
     case SolveOptions::Optimizer::kBisect:
-      return minimize_by_bisecting(tm, solver, level);
+      return minimize_by_bisecting(search, level);
   }
   return std::nullopt;  // unreachable
 }
@@ -525,20 +757,19 @@ LeastCost minimize_level(cvc5::TermManager& tm, cvc5::Solver& solver,
 // On return the solver is satisfiable exactly when the program has an answer
 // set, and every answer set it still admits is an optimal one.
 absl::StatusOr<std::vector<std::int64_t>> optimize(
-    cvc5::TermManager& tm, cvc5::Solver& solver,
-    const std::vector<LevelCost>& level_costs,
+    Search& search, const std::vector<LevelCost>& level_costs,
     SolveOptions::Optimizer optimizer) {
   std::vector<std::int64_t> costs;
   costs.reserve(level_costs.size());
   for (const LevelCost& level : level_costs) {
     ASSIGN_OR_RETURN(const std::optional<std::int64_t> least,
-                     minimize_level(tm, solver, level, optimizer));
+                     minimize_level(search, level, optimizer));
     // No cost at all means the program is unsat, which the caller finds out for
     // itself when it looks for an answer set.
     if (!least.has_value()) return std::vector<std::int64_t>();
     costs.push_back(*least);
-    solver.assertFormula(
-        tm.mkTerm(cvc5::Kind::EQUAL, {level.cost, tm.mkInteger(*least)}));
+    search.solver.assertFormula(search.tm.mkTerm(
+        cvc5::Kind::EQUAL, {level.cost, search.tm.mkInteger(*least)}));
   }
   return costs;
 }
@@ -547,19 +778,19 @@ absl::StatusOr<std::vector<std::int64_t>> optimize(
 
 absl::StatusOr<std::vector<AnswerSet>> solve(const aspif::Program& prog,
                                              const SolveOptions& options) {
-  if (absl::Status supported = check_supported(prog); !supported.ok()) {
-    return supported;
-  }
   if (options.max_answer_sets < 0) {
     return absl::InvalidArgumentError(
         "max_answer_sets cannot be negative; 0 asks for all answer sets");
   }
 
+  RETURN_IF_ERROR(check_supported(prog));
+
   const Ranking ranking = build_ranking(prog);
+  const char* logic = logic_for(prog);
 
   cvc5::TermManager tm;
   cvc5::Solver solver(tm);
-  solver.setLogic(logic_for(prog));
+  solver.setLogic(logic);
   solver.setOption("produce-models", "true");
   solver.setOption("incremental", "true");
 
@@ -568,8 +799,8 @@ absl::StatusOr<std::vector<AnswerSet>> solve(const aspif::Program& prog,
   const std::vector<std::vector<Support>> supports =
       collect_supports(tm, prog, atom_var, ranking);
 
-  assert_constraints(tm, solver, prog, atom_var);
-  assert_completion(tm, solver, prog, atom_var, supports);
+  assert_rules(tm, solver, prog, atom_var);
+  assert_supportedness(tm, solver, prog, atom_var, supports);
   assert_ranking(tm, solver, prog, atom_var, level_var, supports);
 
   // The ground query: literals every answer set has to satisfy. Asserted
@@ -579,42 +810,38 @@ absl::StatusOr<std::vector<AnswerSet>> solve(const aspif::Program& prog,
     solver.assertFormula(literal_term(tm, atom_var, lit));
   }
 
+  // The assertions above settle everything but a head cycle, which is what turns
+  // the minimality check on.
+  Search search{.tm = tm,
+                .solver = solver,
+                .prog = prog,
+                .atom_var = atom_var,
+                .check_reduct = ranking.any_head_cycle,
+                .logic = logic};
+
   // The cost every answer set below will have, optimizing having pinned each
   // level to its least value. A program with no minimize statements has no
   // levels, so it comes back with no cost and no solver call made.
-  ASSIGN_OR_RETURN(const std::vector<std::int64_t> costs,
-                   optimize(tm, solver, collect_level_costs(tm, prog, atom_var),
-                            options.optimizer));
-
-  // What to block an answer set on: the atoms alone, never the level variables.
-  // One answer set admits many level rankings, so blocking a whole model would
-  // keep handing the same answer set back under a different ranking.
-  std::vector<cvc5::Term> atoms_only;
-  atoms_only.reserve(prog.next_atom - 1);
-  for (aspif::Atom atom = 1; atom < prog.next_atom; ++atom) {
-    atoms_only.push_back(atom_var[atom]);
-  }
+  ASSIGN_OR_RETURN(
+      const std::vector<std::int64_t> costs,
+      optimize(search, collect_level_costs(tm, prog, atom_var),
+               options.optimizer));
 
   std::vector<AnswerSet> answer_sets;
   while (options.max_answer_sets == 0 ||
          answer_sets.size() < static_cast<size_t>(options.max_answer_sets)) {
-    const cvc5::Result result = solver.checkSat();
-    if (result.isUnsat()) break;
-    if (!result.isSat()) return undecided(result);
+    ASSIGN_OR_RETURN(const bool found, search.find());
+    if (!found) break;
 
     AnswerSet answer_set;
     answer_set.costs = costs;
-    for (aspif::Atom atom = 1; atom < prog.next_atom; ++atom) {
-      if (solver.getValue(atom_var[atom]).getBooleanValue()) {
-        answer_set.atoms.push_back(atom);
-      }
-    }
+    answer_set.atoms = search.model_atoms();
+    search.block(answer_set.atoms);
     answer_sets.push_back(std::move(answer_set));
 
-    // A program with no atoms has the empty answer set and no other, and
-    // blockModelValues() rejects an empty term list, so stop here.
-    if (atoms_only.empty()) break;
-    solver.blockModelValues(atoms_only);
+    // A program with no atoms has the empty answer set and no other, and there
+    // is no clause to block it with, so stop before asking again.
+    if (prog.next_atom <= 1) break;
   }
   return answer_sets;
 }

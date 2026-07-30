@@ -521,6 +521,153 @@ TEST(SolveTest, MixedSignWeightsAtOneLevel) {
   EXPECT_THAT(*out, UnorderedElementsAre("in(1) n(1) n(2) out(2) | cost -3"));
 }
 
+// A disjunction holds by holding one of its atoms. Holding both satisfies it
+// too, but not minimally, so {a, b} is no answer set.
+TEST(SolveTest, DisjunctionHoldsOneAtomAtATime) {
+  auto out = solve_source("a | b.");
+  ASSERT_TRUE(out.ok()) << out.status();
+  EXPECT_THAT(*out, UnorderedElementsAre("a", "b"));
+}
+
+// Two atoms of one predicate are still two atoms, and neither lies on a
+// positive cycle.
+TEST(SolveTest, DisjunctionOverOnePredicate) {
+  auto out = solve_source("p(1) | p(2).");
+  ASSERT_TRUE(out.ok()) << out.status();
+  EXPECT_THAT(*out, UnorderedElementsAre("p(1)", "p(2)"));
+}
+
+// Overlapping disjunctions are where minimality earns its keep. All of {b},
+// {a, c} and {a, b} satisfy both rules, but {a, b} holds a without needing it:
+// dropping a leaves {b}, which satisfies them both.
+TEST(SolveTest, OverlappingDisjunctionsKeepOnlyMinimalModels) {
+  auto out = solve_source("a | b. b | c.");
+  ASSERT_TRUE(out.ok()) << out.status();
+  EXPECT_THAT(*out, UnorderedElementsAre("b", "a c"));
+}
+
+TEST(SolveTest, ConstraintRulesOutADisjunct) {
+  auto out = solve_source("a | b. :- a.");
+  ASSERT_TRUE(out.ok()) << out.status();
+  EXPECT_THAT(*out, UnorderedElementsAre("b"));
+}
+
+// A fact among the head atoms satisfies the rule by itself, so the disjunction
+// asks nothing of the other atoms and b is never derived.
+TEST(SolveTest, DisjunctionSatisfiedByAFactDerivesNothing) {
+  auto out = solve_source("a. a | b.");
+  ASSERT_TRUE(out.ok()) << out.status();
+  EXPECT_THAT(*out, UnorderedElementsAre("a"));
+}
+
+// One disjunctive rule per node, grounded from the rule's body.
+TEST(SolveTest, DisjunctionGroundedOverABody) {
+  auto out = solve_source(R"(
+    v(1). v(2).
+    red(X) | blue(X) :- v(X).
+  )");
+  ASSERT_TRUE(out.ok()) << out.status();
+  EXPECT_THAT(*out, UnorderedElementsAre(
+                        "blue(1) blue(2) v(1) v(2)", "blue(2) red(1) v(1) v(2)",
+                        "blue(1) red(2) v(1) v(2)", "red(1) red(2) v(1) v(2)"));
+}
+
+// A disjunction feeding a positive cycle: the cycle holds where the disjunction
+// reaches it and not otherwise, so both the shift and the level ranking have to
+// hold at once.
+TEST(SolveTest, DisjunctionFeedingAPositiveCycle) {
+  auto out = solve_source(R"(
+    a | b.
+    p :- a.
+    p :- q.
+    q :- p.
+  )");
+  ASSERT_TRUE(out.ok()) << out.status();
+  EXPECT_THAT(*out, UnorderedElementsAre("a p q", "b"));
+}
+
+TEST(SolveTest, DisjunctionUnderAWeakConstraint) {
+  auto out = solve_source(R"(
+    a | b.
+    :~ a. [1@0]
+  )");
+  ASSERT_TRUE(out.ok()) << out.status();
+  EXPECT_THAT(*out, UnorderedElementsAre("b | cost 0"));
+}
+
+/* A head cycle: a and b head one rule and lie on a common positive cycle. The
+   one answer set is {a, b}, where each of the two rests on the other.
+
+   No single query finds it. Shifting the disjunction gives 'a :- not b.' and
+   'b :- not a.', which with the cycle has no answer set at all, and no ranking
+   puts a below b and b below a at once. The minimality check is what finds it.
+   No proper subset of {a, b} models the reduct, since dropping either atom
+   leaves the other unsupported. */
+TEST(SolveTest, HeadCycleIsDecidedByMinimality) {
+  auto out = solve_source(R"(
+    a | b.
+    a :- b.
+    b :- a.
+  )");
+  ASSERT_TRUE(out.ok()) << out.status();
+  EXPECT_THAT(*out, UnorderedElementsAre("a b"));
+}
+
+// A head cycle that a constraint rules out. {a, b} is the only answer set of
+// the rules and it is forbidden, so nothing is left. Every candidate the solver
+// offers has to fail the check before the program comes back unsatisfiable.
+TEST(SolveTest, HeadCycleWithNoAnswerSet) {
+  auto out = solve_source(R"(
+    a | b.
+    a :- b.
+    b :- a.
+    :- a.
+  )");
+  ASSERT_TRUE(out.ok()) << out.status();
+  EXPECT_THAT(*out, IsEmpty());
+}
+
+// Both {a, b} and {c} satisfy the rules. The cycle holds together, or c holds
+// on its own. Neither contains the other, so both are answer sets and the check
+// accepts as well as rejects.
+TEST(SolveTest, HeadCycleBesideAnotherDisjunct) {
+  auto out = solve_source(R"(
+    a | b | c.
+    a :- b.
+    b :- a.
+  )");
+  ASSERT_TRUE(out.ok()) << out.status();
+  EXPECT_THAT(*out, UnorderedElementsAre("a b", "c"));
+}
+
+// The minimality check runs inside optimization too, so a cost is always the
+// cost of a real answer set. {a, b} costs 2 and {c} costs 0.
+TEST(SolveTest, HeadCycleUnderAWeakConstraint) {
+  auto out = solve_source(R"(
+    a | b | c.
+    a :- b.
+    b :- a.
+    :~ a. [1@0]
+    :~ b. [1@0]
+  )");
+  ASSERT_TRUE(out.ok()) << out.status();
+  EXPECT_THAT(*out, UnorderedElementsAre("c | cost 0"));
+}
+
+// A head cycle over a predicate, grounded per instance, with a rule that only
+// the two-atom answer set can fire.
+TEST(SolveTest, HeadCycleOverAPredicate) {
+  auto out = solve_source(R"(
+    n(1). n(2).
+    p(1) | p(2).
+    p(1) :- p(2).
+    p(2) :- p(1).
+    q :- p(1), p(2).
+  )");
+  ASSERT_TRUE(out.ok()) << out.status();
+  EXPECT_THAT(*out, UnorderedElementsAre("n(1) n(2) p(1) p(2) q"));
+}
+
 // Optimizing has to respect the level ranking like everything else. The cycle
 // 'a :- b. b :- a.' cannot support itself, so the cheapest answer set is the
 // one where neither holds even though nothing forbids them.

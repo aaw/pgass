@@ -88,11 +88,7 @@ target_link_libraries(normalize_lib
     parse_lib
   PRIVATE
     absl::btree
-    absl::check
-    absl::flat_hash_map
-    absl::flat_hash_set
     collect_lib
-    graph_lib
 )
 
 add_library(aspif_lib STATIC src/aspif.cc)
@@ -123,6 +119,7 @@ target_link_libraries(ground_lib
     absl::statusor
   PRIVATE
     absl::btree
+    absl::check
     absl::flat_hash_map
     absl::flat_hash_set
     absl::inlined_vector
@@ -152,6 +149,7 @@ target_link_libraries(solve_lib
   PRIVATE
     absl::btree
     absl::check
+    absl::flat_hash_set
     absl::strings
     cvc5::cvc5
     graph_lib

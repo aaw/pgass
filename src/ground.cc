@@ -15,6 +15,7 @@
 #include "absl/container/flat_hash_set.h"
 #include "absl/container/inlined_vector.h"
 #include "absl/functional/function_ref.h"
+#include "absl/log/check.h"
 #include "absl/status/status.h"
 #include "absl/status/statusor.h"
 #include "absl/strings/str_cat.h"
@@ -482,13 +483,21 @@ BodyParts split_body(const Body* body) {
   return parts;
 }
 
-// A normalized rule as the grounder works with it: the single head literal
-// (null for a constraint) and the body split into its parts, e.g. head =
-// 'reachable(X, Z)' and parts.positive = {'reachable(X, Y)', 'edge(Y, Z)'}
-// for "reachable(X, Z) :- reachable(X, Y), edge(Y, Z)."
+// A normalized rule as the grounder works with it: the literals of its head and
+// the body split into its parts, e.g. head = {'reachable(X, Z)'} and
+// parts.positive = {'reachable(X, Y)', 'edge(Y, Z)'} for
+// "reachable(X, Z) :- reachable(X, Y), edge(Y, Z)."
 struct RuleView {
-  const ClassicalLiteral* head = nullptr;
+  // One literal for an ordinary rule, several for a disjunctive one, none for a
+  // constraint.
+  std::vector<const ClassicalLiteral*> head;
   BodyParts parts;
+  // Whether one of the rule's aggregates reads a predicate from the rule's own
+  // component, which only a disjunctive head can bring about; see
+  // mark_aggregates_in_own_component(). Such a rule derives no facts, because
+  // settling an aggregate needs a store that is complete for what the aggregate
+  // reads, and its own component is by definition still being derived.
+  bool aggregate_in_own_component = false;
   // Numbers every variable the rule mentions, head and body alike, including
   // the ones inside its aggregates. A rule's bindings all index by these.
   VarSlots slots;
@@ -503,7 +512,8 @@ VarSlots make_var_slots(const RuleView& rule) {
   absl::flat_hash_map<std::string_view, size_t> by_name;
   auto record = [&](const Variable& var) { slots.add(var, by_name); };
 
-  if (rule.head != nullptr) collect::for_each_variable(*rule.head, record);
+  for (const ClassicalLiteral* literal : rule.head)
+    collect::for_each_variable(*literal, record);
   for (const ClassicalLiteral* literal : rule.parts.positive)
     collect::for_each_variable(*literal, record);
   for (const ClassicalLiteral* literal : rule.parts.negative)
@@ -528,15 +538,14 @@ absl::StatusOr<std::vector<RuleView>> make_rule_views(const Program& prog) {
     }
     RuleView rule;
     if (statement->head != nullptr) {
-      absl::Status not_normalized = absl::InvalidArgumentError(
-          "ground() expects a normalized program, but found a choice or "
-          "disjunctive head");
       if (statement->head->kind != Head::DisjunctionKind) {
-        return not_normalized;
+        return absl::InvalidArgumentError(
+            "ground() expects a normalized program, but found a choice head");
       }
       const auto& head = static_cast<const Disjunction&>(*statement->head);
-      if (head.literals.size() != 1) return not_normalized;
-      rule.head = head.literals[0].get();
+      for (const auto& literal : head.literals) {
+        rule.head.push_back(literal.get());
+      }
     }
     rule.parts = split_body(statement->body.get());
     rule.slots = make_var_slots(rule);
@@ -545,9 +554,91 @@ absl::StatusOr<std::vector<RuleView>> make_rule_views(const Program& prog) {
   return rules;
 }
 
+// The positive predicate dependency graph with the predicates of each
+// disjunctive head joined into a cycle, so that they all land in one strongly
+// connected component.
+//
+// Deriving runs one component at a time, in order, and one instance of
+// 'p(X) | q(X) :- dom(X).' derives an atom for p and one for q. Were p and q in
+// different components, the rule would run in the later one and add atoms to a
+// component already finished. The rules reading those atoms would never see
+// them.
+std::vector<std::vector<int>> derivation_succ(const PredGraph& graph) {
+  std::vector<std::vector<int>> succ = graph.pos_succ;
+  for (const std::vector<int>& group : graph.head_groups) {
+    for (size_t i = 0; i < group.size(); ++i) {
+      succ[group[i]].push_back(group[(i + 1) % group.size()]);
+    }
+  }
+  return succ;
+}
+
+// Whether any predicate `aggregate` reads sits in `component_id`.
+bool reads_component(const Aggregate& aggregate, const PredGraph& graph,
+                     const std::vector<int>& component, int component_id) {
+  if (aggregate.elements == nullptr) return false;
+  bool reads = false;
+  for (const auto& element : *aggregate.elements) {
+    if (element->literals == nullptr) continue;
+    collect::for_each_classical_literal(
+        *element->literals, /*negated_context=*/false,
+        [&](ClassicalLiteral& literal, bool) {
+          const auto it = graph.id_of.find(pred_key(literal));
+          if (it != graph.id_of.end() && component[it->second] == component_id) {
+            reads = true;
+          }
+        });
+  }
+  return reads;
+}
+
+// Marks the rules whose aggregates read a predicate from the rule's own
+// component, which stops those rules from deriving facts.
+//
+// verify_safe() enforces the ASP-Core-2 rule that no predicate inside an
+// aggregate shares a positive component with the head of the rule holding that
+// aggregate. It asks about pos_succ, where 'p | q(1).' leaves p and q/1 apart.
+// Joining them for derivation can put an aggregate's predicate in its own rule's
+// component after all:
+//
+//   r.
+//   p :- #count{ X : q(X) } <= 0.
+//   p | q(1) :- r.
+//
+// Deriving facts is what that breaks. settled_agg_value() takes an aggregate's
+// value from the store as it stands, to decide whether the atom the aggregate
+// feeds holds in every answer set. A predicate with no atoms derived yet has no
+// tuples, so the count above settles at 0 while q(1) does not exist. That would
+// make a fact of p and lose the answer set {r, q(1)}.
+//
+// The rest of the rule needs nothing. Its head atoms are derived with the
+// aggregate ignored, as every rule's are, and the aggregate reaches the solver
+// through emit_rules(), which runs once every component has been derived and so
+// reads a complete store.
+void mark_aggregates_in_own_component(const PredGraph& graph,
+                                      const std::vector<int>& component,
+                                      std::vector<RuleView>& rules) {
+  for (RuleView& rule : rules) {
+    if (rule.head.empty()) continue;
+    const int head_component =
+        component[graph.id_of.at(pred_key(*rule.head[0]))];
+    for (const Aggregate* aggregate : rule.parts.aggregates) {
+      if (!reads_component(*aggregate, graph, component, head_component)) {
+        continue;
+      }
+      rule.aggregate_in_own_component = true;
+      break;
+    }
+  }
+}
+
 // Buckets rules by component[id_of[head predicate]], with the constraints,
 // which have no head and so no component, in one extra bucket at the end.
 // `rules` owns the RuleViews and must outlive the buckets.
+//
+// `component` has to come from derivation_succ(), which is what puts every
+// predicate of a disjunctive head in the one component this picks by the head's
+// first literal.
 std::vector<std::vector<const RuleView*>> bucket_rule_views(
     const PredGraph& graph, const std::vector<int>& component,
     const std::vector<RuleView>& rules) {
@@ -560,11 +651,15 @@ std::vector<std::vector<const RuleView*>> bucket_rule_views(
   std::vector<std::vector<const RuleView*>> bucket(num_components + 1);
   std::vector<const RuleView*>& constraints = bucket.back();
   for (const RuleView& rv : rules) {
-    if (rv.head == nullptr) {
+    if (rv.head.empty()) {
       constraints.push_back(&rv);
       continue;
     }
-    bucket[component[graph.id_of.at(pred_key(*rv.head))]].push_back(&rv);
+    const int head_component = component[graph.id_of.at(pred_key(*rv.head[0]))];
+    for (const ClassicalLiteral* literal : rv.head) {
+      DCHECK_EQ(component[graph.id_of.at(pred_key(*literal))], head_component);
+    }
+    bucket[head_component].push_back(&rv);
   }
   return bucket;
 }
@@ -1713,6 +1808,11 @@ class AggCache {
   // here too. It stays true for the whole of grounding: safety.cc keeps an
   // aggregate's predicates in components that are complete before any rule
   // reading them is ground, so what its elements produce cannot change.
+  //
+  // A disjunctive head can join an aggregate's predicate to the component of the
+  // rule reading it, which would leave that store incomplete. The rules this
+  // happens to never ask, so no answer taken from a partial store is cached
+  // here; see mark_aggregates_in_own_component().
   absl::StatusOr<std::optional<bool>> settle(const Aggregate& agg,
                                              const Binding& binding,
                                              const Store& store,
@@ -1817,7 +1917,7 @@ absl::StatusOr<bool> aggregates_settle_true(
   return true;
 }
 
-// Runs one rule against the store and adds the head atom of every instance it
+// Runs one rule against the store and adds the head atoms of every instance it
 // finds, recording in `changes` what that did. `delta_position` picks the
 // positive literal to read the previous pass's atoms from (see
 // find_instances), or nullopt to read the whole store.
@@ -1830,6 +1930,14 @@ absl::StatusOr<bool> aggregates_settle_true(
 // An aggregate is one only sometimes, so AggCache::settle() is asked about it,
 // last, once the cheap reasons not to bother have been ruled out.
 //
+// A disjunctive head derives no fact either, however solid its body: 'a | b.'
+// says one of a and b holds, and neither of them holds in every answer set. Its
+// atoms are only possible ones, which is exactly what this phase collects.
+//
+// Nor does a rule whose aggregate reads its own component. Settling such an
+// aggregate would read a store still being filled. See
+// mark_aggregates_in_own_component().
+//
 // This is where 'p(1).' becomes a fact, and where a rule over facts alone, like
 // the second rule of "edge(a, b). reachable(X, Y) :- edge(X, Y).", passes
 // factness on.
@@ -1837,7 +1945,9 @@ absl::Status derive_from_rule(const RuleView& rule,
                               std::optional<size_t> delta_position,
                               Store& store, Symbols& syms, AggCache& agg_cache,
                               aspif::Program& aspif_prog, Changes& changes) {
-  const bool derives_facts = rule.parts.negative.empty();
+  const bool derives_facts = rule.parts.negative.empty() &&
+                             rule.head.size() == 1 &&
+                             !rule.aggregate_in_own_component;
   return find_instances(
       rule.parts, store, syms, Binding(rule.slots),
       [&](const Instance& instance) -> absl::Status {
@@ -1845,22 +1955,37 @@ absl::Status derive_from_rule(const RuleView& rule,
             bool well_formed,
             ignored_parts_are_well_formed(rule.parts, instance.binding, syms));
         if (!well_formed) return absl::OkStatus();
-        ASSIGN_OR_RETURN(std::optional<Tuple> tuple,
-                         eval_terms(rule.head->args, instance.binding, syms));
-        if (!tuple.has_value()) return absl::OkStatus();
-        const Inserted head =
-            store.insert(pred_key(*rule.head), *std::move(tuple), aspif_prog);
-        if (head.is_new) changes.atoms = true;
+
+        // An ill-formed head term means this instance has no ground rule at all,
+        // so none of its head atoms is derived. emit_rules() drops the same
+        // instances.
+        std::vector<Tuple> tuples;
+        tuples.reserve(rule.head.size());
+        for (const ClassicalLiteral* literal : rule.head) {
+          ASSIGN_OR_RETURN(std::optional<Tuple> tuple,
+                           eval_terms(literal->args, instance.binding, syms));
+          if (!tuple.has_value()) return absl::OkStatus();
+          tuples.push_back(*std::move(tuple));
+        }
+
+        std::vector<Inserted> heads;
+        heads.reserve(rule.head.size());
+        for (size_t i = 0; i < rule.head.size(); ++i) {
+          heads.push_back(store.insert(pred_key(*rule.head[i]),
+                                       std::move(tuples[i]), aspif_prog));
+          if (heads.back().is_new) changes.atoms = true;
+        }
+
         if (derives_facts && matched_all_facts(instance.matched, store)) {
           ASSIGN_OR_RETURN(
               bool aggregates_hold,
               aggregates_settle_true(rule.parts.aggregates, instance.binding,
                                      store, syms, agg_cache));
           if (!aggregates_hold) return absl::OkStatus();
-          const bool newly_fact = store.mark_fact(head.atom);
+          const bool newly_fact = store.mark_fact(heads.front().atom);
           // Marking an atom the store already held is the one change a delta
           // pass cannot carry; see derive_atoms().
-          if (newly_fact && !head.is_new) changes.facts = true;
+          if (newly_fact && !heads.front().is_new) changes.facts = true;
         }
         return absl::OkStatus();
       },
@@ -1919,7 +2044,7 @@ absl::Status derive_atoms(const std::vector<const RuleView*>& rules,
     changes = Changes{};
     store.begin_pass();
     for (const RuleView* rule : rules) {
-      if (rule->head == nullptr) continue;
+      if (rule->head.empty()) continue;
       if (full_scan) {
         RETURN_IF_ERROR(derive_from_rule(*rule, std::nullopt, store, syms,
                                          agg_cache, aspif_prog, changes));
@@ -1947,6 +2072,11 @@ absl::Status derive_atoms(const std::vector<const RuleView*>& rules,
 // one. A transitive closure over a graph of facts is entirely facts this way,
 // and reaches the solver with no rules at all.
 //
+// One fact among the atoms of a disjunctive head drops that instance too. The
+// disjunction already holds, so it asks nothing of the other head atoms: they
+// only draw support from a rule whose every other head atom is false, which this
+// one's fact never is.
+//
 // A body literal for a fact goes the same way, dropped from the rules that do
 // get emitted, since a body holds exactly when it holds without it.
 absl::Status emit_rules(const std::vector<const RuleView*>& rules,
@@ -1958,27 +2088,39 @@ absl::Status emit_rules(const std::vector<const RuleView*>& rules,
     RETURN_IF_ERROR(find_instances(
         rule.parts, store, syms, Binding(rule.slots),
         [&](const Instance& instance) -> absl::Status {
-          // The head atom is looked up here, but an instance that has none is
-          // only an error further down, once every reason to drop the instance
-          // has been ruled out: derive_atoms() dropped the same instances, so a
-          // head atom looked up for one of them would be missing from the
-          // store.
-          std::optional<Tuple> head_tuple;
-          const GroundAtom* head = nullptr;
-          if (rule.head != nullptr) {
-            ASSIGN_OR_RETURN(
-                head_tuple,
-                eval_terms(rule.head->args, instance.binding, syms));
+          // The head atoms are looked up here. An instance missing one is only
+          // an error further down, once every reason to drop the instance has
+          // been ruled out. derive_atoms() dropped the same instances, so a head
+          // atom looked up for one of them would be missing from the store.
+          std::vector<Tuple> head_tuples;
+          std::vector<const GroundAtom*> heads;
+          head_tuples.reserve(rule.head.size());
+          heads.reserve(rule.head.size());
+          for (const ClassicalLiteral* literal : rule.head) {
+            ASSIGN_OR_RETURN(std::optional<Tuple> tuple,
+                             eval_terms(literal->args, instance.binding, syms));
             // An ill-formed head, e.g. the 'q(X / 0)' of "q(X / 0) :- p(X).",
             // means this instance has no ground rule. derive_atoms() skipped it
             // for the same reason, so nothing is missing from the store.
-            if (!head_tuple.has_value()) return absl::OkStatus();
-            const PredData* data = store.find(pred_key(*rule.head));
-            head = data == nullptr ? nullptr : data->find(*head_tuple);
+            if (!tuple.has_value()) return absl::OkStatus();
+            head_tuples.push_back(*std::move(tuple));
+            const PredData* data = store.find(pred_key(*literal));
+            heads.push_back(data == nullptr ? nullptr
+                                            : data->find(head_tuples.back()));
+          }
+          // One head atom, and it is a fact: the fact is all the solver needs,
+          // once, however many rules derive it.
+          if (heads.size() == 1 && heads[0] != nullptr &&
+              store.is_fact(heads[0]->id)) {
+            if (emitted_facts.insert(heads[0]->id).second) {
+              result.rules.push_back(aspif::Rule{.head = {heads[0]->id}});
+            }
+            return absl::OkStatus();
+          }
+          // A fact among the atoms of a disjunctive head satisfies the rule, so
+          // the instance says nothing and goes.
+          for (const GroundAtom* head : heads) {
             if (head != nullptr && store.is_fact(head->id)) {
-              if (emitted_facts.insert(head->id).second) {
-                result.rules.push_back(aspif::Rule{.head = {head->id}});
-              }
               return absl::OkStatus();
             }
           }
@@ -2001,16 +2143,16 @@ absl::Status emit_rules(const std::vector<const RuleView*>& rules,
                                    extra->end());
           }
 
-          if (rule.head != nullptr) {
+          for (size_t i = 0; i < heads.size(); ++i) {
             // derive_atoms() added every derivable head atom, so a miss means
             // the program never passed verify_safe().
-            if (head == nullptr) {
-              return absl::InternalError(
-                  absl::StrCat("grounding derived no atom for the head '",
-                               syms.printed_call(rule.head->id, *head_tuple),
-                               "'; was the program checked by verify_safe()?"));
+            if (heads[i] == nullptr) {
+              return absl::InternalError(absl::StrCat(
+                  "grounding derived no atom for the head '",
+                  syms.printed_call(rule.head[i]->id, head_tuples[i]),
+                  "'; was the program checked by verify_safe()?"));
             }
-            aspif_rule.head.push_back(head->id);
+            aspif_rule.head.push_back(heads[i]->id);
           }
           result.rules.push_back(std::move(aspif_rule));
           return absl::OkStatus();
@@ -2124,8 +2266,9 @@ absl::Status emit_query(const ClassicalLiteral& query, const Store& store,
 absl::StatusOr<aspif::Program> ground(const Program& prog) {
   const PredGraph graph = build_pred_graph(prog);
   const std::vector<int> component =
-      strongly_connected_components(graph.pos_succ);
+      strongly_connected_components(derivation_succ(graph));
   ASSIGN_OR_RETURN(std::vector<RuleView> rules, make_rule_views(prog));
+  mark_aggregates_in_own_component(graph, component, rules);
   std::vector<std::vector<const RuleView*>> rules_by_component =
       bucket_rule_views(graph, component, rules);
 
