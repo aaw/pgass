@@ -17,6 +17,7 @@
 #include "macros.h"
 #include "normalize.h"
 #include "parse.h"
+#include "test_macros.h"
 
 using ::testing::HasSubstr;
 using ::testing::IsEmpty;
@@ -114,7 +115,7 @@ TEST(SolveTest, PositiveCycleHoldsOnlyWhenSupportedFromOutside) {
     a :- b.
     b :- a.
   )");
-  ASSERT_TRUE(out.ok()) << out.status();
+  ASSERT_OK(out);
   EXPECT_THAT(*out, UnorderedElementsAre("a b p", "q"));
 }
 
@@ -125,7 +126,7 @@ TEST(SolveTest, UnreachableCycleLeavesTheEmptyAnswerSet) {
     a :- b.
     b :- a.
   )");
-  ASSERT_TRUE(out.ok()) << out.status();
+  ASSERT_OK(out);
   EXPECT_THAT(*out, UnorderedElementsAre(""));
 }
 
@@ -139,7 +140,7 @@ TEST(SolveTest, SelfSupportingRuleCannotJustifyItsOwnHead) {
     a :- p.
     a :- a, p.
   )");
-  ASSERT_TRUE(out.ok()) << out.status();
+  ASSERT_OK(out);
   EXPECT_THAT(*out, UnorderedElementsAre("a p", "q"));
 }
 
@@ -152,7 +153,7 @@ TEST(SolveTest, ThreeAtomCycle) {
     c :- a.
     a :- p.
   )");
-  ASSERT_TRUE(out.ok()) << out.status();
+  ASSERT_OK(out);
   EXPECT_THAT(*out, UnorderedElementsAre("a b c p", "q"));
 }
 
@@ -167,7 +168,7 @@ TEST(SolveTest, FiveAtomCycle) {
     l4 :- l3.
     l5 :- l4.
   )");
-  ASSERT_TRUE(out.ok()) << out.status();
+  ASSERT_OK(out);
   EXPECT_THAT(*out, UnorderedElementsAre("l1 l2 l3 l4 l5 p", "q"));
 }
 
@@ -181,7 +182,7 @@ TEST(SolveTest, CycleReachedFromASeparateComponent) {
     c :- not d.
     d :- not c.
   )");
-  ASSERT_TRUE(out.ok()) << out.status();
+  ASSERT_OK(out);
   EXPECT_THAT(*out, UnorderedElementsAre("a b c", "d"));
 }
 
@@ -192,7 +193,7 @@ TEST(SolveTest, StratifiedProgram) {
     r :- p.
     s :- r.
   )");
-  ASSERT_TRUE(out.ok()) << out.status();
+  ASSERT_OK(out);
   EXPECT_THAT(*out, UnorderedElementsAre("p r s", "q"));
 }
 
@@ -202,7 +203,7 @@ TEST(SolveTest, IntegrityConstraint) {
     q :- not p.
     :- p.
   )");
-  ASSERT_TRUE(out.ok()) << out.status();
+  ASSERT_OK(out);
   EXPECT_THAT(*out, UnorderedElementsAre("q"));
 }
 
@@ -213,7 +214,7 @@ TEST(SolveTest, NoAnswerSets) {
     :- p.
     :- q.
   )");
-  ASSERT_TRUE(out.ok()) << out.status();
+  ASSERT_OK(out);
   EXPECT_THAT(*out, IsEmpty());
 }
 
@@ -228,7 +229,7 @@ TEST(SolveTest, RecursivePredicateOverAcyclicData) {
     reachable(X,Y) :- edge(X,Y).
     reachable(X,Z) :- reachable(X,Y), edge(Y,Z).
   )");
-  ASSERT_TRUE(out.ok()) << out.status();
+  ASSERT_OK(out);
   EXPECT_THAT(*out, UnorderedElementsAre(
                         "edge(1,2) edge(2,3) p reachable(1,2) reachable(1,3) "
                         "reachable(2,3)",
@@ -247,7 +248,7 @@ TEST(SolveTest, RecursivePredicateOverCyclicData) {
     reachable(X,Y) :- edge(X,Y).
     reachable(X,Z) :- reachable(X,Y), edge(Y,Z).
   )");
-  ASSERT_TRUE(out.ok()) << out.status();
+  ASSERT_OK(out);
   EXPECT_THAT(
       *out, UnorderedElementsAre("edge(1,2) edge(2,3) edge(3,1) p "
                                  "reachable(1,1) reachable(1,2) reachable(1,3) "
@@ -269,7 +270,7 @@ TEST(SolveTest, TransitiveClosureWithDataDependentCycle) {
     tc(X,Y) :- edge(X,Y).
     tc(X,Z) :- tc(X,Y), edge(Y,Z).
   )");
-  ASSERT_TRUE(out.ok()) << out.status();
+  ASSERT_OK(out);
   EXPECT_THAT(*out, UnorderedElementsAre(
                         "edge(1,2) edge(2,3) edge(3,1) p "
                         "tc(1,1) tc(1,2) tc(1,3) tc(2,1) tc(2,2) tc(2,3) "
@@ -288,7 +289,7 @@ TEST(SolveTest, GraphColoring) {
     :- e(X,Y), g(X), g(Y).
     :- e(X,Y), b(X), b(Y).
   )");
-  ASSERT_TRUE(out.ok()) << out.status();
+  ASSERT_OK(out);
   EXPECT_THAT(*out, UnorderedElementsAre(
                         "b(1) e(1,2) e(1,3) e(2,3) g(2) n(1) n(2) n(3) r(3)",
                         "b(1) e(1,2) e(1,3) e(2,3) g(3) n(1) n(2) n(3) r(2)",
@@ -307,7 +308,7 @@ TEST(SolveTest, CountAggregateOverUndeterminedAtoms) {
     r(X) :- p(X), not q(X).
     s :- #count{ X : q(X) } >= 2.
   )");
-  ASSERT_TRUE(out.ok()) << out.status();
+  ASSERT_OK(out);
   EXPECT_THAT(
       *out,
       UnorderedElementsAre(
@@ -328,7 +329,7 @@ TEST(SolveTest, SumAggregateWithWeights) {
     heavy :- #sum{ X : in(X) } >= 6.
     :- not heavy.
   )");
-  ASSERT_TRUE(out.ok()) << out.status();
+  ASSERT_OK(out);
   EXPECT_THAT(*out, UnorderedElementsAre(
                         "heavy in(1) in(2) in(3) in(4) n(1) n(2) n(3) n(4)",
                         "heavy in(1) in(2) in(3) n(1) n(2) n(3) n(4) out(4)",
@@ -351,7 +352,7 @@ TEST(SolveTest, ReachabilityConstraint) {
     r(Y) :- r(X), sel(X,Y).
     :- node(X), not r(X).
   )");
-  ASSERT_TRUE(out.ok()) << out.status();
+  ASSERT_OK(out);
   EXPECT_THAT(
       *out,
       UnorderedElementsAre(
@@ -366,7 +367,7 @@ TEST(SolveTest, QueryBecomesAnAssumption) {
     q :- not p.
     p?
   )");
-  ASSERT_TRUE(out.ok()) << out.status();
+  ASSERT_OK(out);
   EXPECT_THAT(*out, UnorderedElementsAre("p"));
 }
 
@@ -381,11 +382,11 @@ TEST(SolveTest, MaxAnswerSetsLimitsHowManyComeBack) {
     b :- a.
   )";
   auto all = solve_source(source, 0);
-  ASSERT_TRUE(all.ok()) << all.status();
+  ASSERT_OK(all);
   EXPECT_THAT(*all, SizeIs(2));
 
   auto one = solve_source(source, 1);
-  ASSERT_TRUE(one.ok()) << one.status();
+  ASSERT_OK(one);
   EXPECT_THAT(*one, SizeIs(1));
 }
 
@@ -407,7 +408,7 @@ TEST(SolveTest, WeakConstraintMinimizesHowManyAtomsHold) {
     :- not in(1).
     :~ in(X). [1@0, X]
   )");
-  ASSERT_TRUE(out.ok()) << out.status();
+  ASSERT_OK(out);
   EXPECT_THAT(*out, UnorderedElementsAre(
                         "in(1) n(1) n(2) n(3) out(2) out(3) | cost 1"));
 }
@@ -422,7 +423,7 @@ TEST(SolveTest, WeakConstraintMinimizesASumOfWeights) {
     :- #count{ X : in(X) } < 2.
     :~ in(X). [X@0, X]
   )");
-  ASSERT_TRUE(out.ok()) << out.status();
+  ASSERT_OK(out);
   EXPECT_THAT(
       *out, UnorderedElementsAre("in(1) in(2) n(1) n(2) n(3) out(3) | cost 3"));
 }
@@ -437,7 +438,7 @@ TEST(SolveTest, PriorityLevelsAreSettledMostImportantFirst) {
     :~ p. [1@1]
     :~ q. [5@0]
   )");
-  ASSERT_TRUE(out.ok()) << out.status();
+  ASSERT_OK(out);
   EXPECT_THAT(*out, UnorderedElementsAre("q | cost 0 5"));
 }
 
@@ -451,7 +452,7 @@ TEST(SolveTest, AllOptimalAnswerSetsAreEnumerated) {
     :- out(1), out(2).
     :~ in(X). [1@0, X]
   )");
-  ASSERT_TRUE(out.ok()) << out.status();
+  ASSERT_OK(out);
   EXPECT_THAT(*out, UnorderedElementsAre("in(1) n(1) n(2) out(2) | cost 1",
                                          "in(2) n(1) n(2) out(1) | cost 1"));
 }
@@ -464,7 +465,7 @@ TEST(SolveTest, WeakConstraintsWithTheSameTupleCostOnce) {
     :~ a. [1@0, 1]
     :~ b. [1@0, 1]
   )");
-  ASSERT_TRUE(out.ok()) << out.status();
+  ASSERT_OK(out);
   EXPECT_THAT(*out, UnorderedElementsAre("a b | cost 1"));
 }
 
@@ -478,7 +479,7 @@ TEST(SolveTest, WeakConstraintOnAnUnsatisfiableProgram) {
     :- q.
     :~ p. [1@0]
   )");
-  ASSERT_TRUE(out.ok()) << out.status();
+  ASSERT_OK(out);
   EXPECT_THAT(*out, IsEmpty());
 }
 
@@ -490,7 +491,7 @@ TEST(SolveTest, UnviolatedWeakConstraintCostsZero) {
     :~ q. [1@0]
     q :- p, not p.
   )");
-  ASSERT_TRUE(out.ok()) << out.status();
+  ASSERT_OK(out);
   EXPECT_THAT(*out, UnorderedElementsAre("p | cost 0"));
 }
 
@@ -503,7 +504,7 @@ TEST(SolveTest, NegativeWeightIsWorthViolating) {
     q :- not p.
     :~ p. [-2@0]
   )");
-  ASSERT_TRUE(out.ok()) << out.status();
+  ASSERT_OK(out);
   EXPECT_THAT(*out, UnorderedElementsAre("p | cost -2"));
 }
 
@@ -517,7 +518,7 @@ TEST(SolveTest, MixedSignWeightsAtOneLevel) {
     :~ in(1). [-3@0]
     :~ in(2). [2@0]
   )");
-  ASSERT_TRUE(out.ok()) << out.status();
+  ASSERT_OK(out);
   EXPECT_THAT(*out, UnorderedElementsAre("in(1) n(1) n(2) out(2) | cost -3"));
 }
 
@@ -525,7 +526,7 @@ TEST(SolveTest, MixedSignWeightsAtOneLevel) {
 // too, but not minimally, so {a, b} is no answer set.
 TEST(SolveTest, DisjunctionHoldsOneAtomAtATime) {
   auto out = solve_source("a | b.");
-  ASSERT_TRUE(out.ok()) << out.status();
+  ASSERT_OK(out);
   EXPECT_THAT(*out, UnorderedElementsAre("a", "b"));
 }
 
@@ -533,7 +534,7 @@ TEST(SolveTest, DisjunctionHoldsOneAtomAtATime) {
 // positive cycle.
 TEST(SolveTest, DisjunctionOverOnePredicate) {
   auto out = solve_source("p(1) | p(2).");
-  ASSERT_TRUE(out.ok()) << out.status();
+  ASSERT_OK(out);
   EXPECT_THAT(*out, UnorderedElementsAre("p(1)", "p(2)"));
 }
 
@@ -542,13 +543,13 @@ TEST(SolveTest, DisjunctionOverOnePredicate) {
 // dropping a leaves {b}, which satisfies them both.
 TEST(SolveTest, OverlappingDisjunctionsKeepOnlyMinimalModels) {
   auto out = solve_source("a | b. b | c.");
-  ASSERT_TRUE(out.ok()) << out.status();
+  ASSERT_OK(out);
   EXPECT_THAT(*out, UnorderedElementsAre("b", "a c"));
 }
 
 TEST(SolveTest, ConstraintRulesOutADisjunct) {
   auto out = solve_source("a | b. :- a.");
-  ASSERT_TRUE(out.ok()) << out.status();
+  ASSERT_OK(out);
   EXPECT_THAT(*out, UnorderedElementsAre("b"));
 }
 
@@ -556,7 +557,7 @@ TEST(SolveTest, ConstraintRulesOutADisjunct) {
 // asks nothing of the other atoms and b is never derived.
 TEST(SolveTest, DisjunctionSatisfiedByAFactDerivesNothing) {
   auto out = solve_source("a. a | b.");
-  ASSERT_TRUE(out.ok()) << out.status();
+  ASSERT_OK(out);
   EXPECT_THAT(*out, UnorderedElementsAre("a"));
 }
 
@@ -566,7 +567,7 @@ TEST(SolveTest, DisjunctionGroundedOverABody) {
     v(1). v(2).
     red(X) | blue(X) :- v(X).
   )");
-  ASSERT_TRUE(out.ok()) << out.status();
+  ASSERT_OK(out);
   EXPECT_THAT(*out, UnorderedElementsAre(
                         "blue(1) blue(2) v(1) v(2)", "blue(2) red(1) v(1) v(2)",
                         "blue(1) red(2) v(1) v(2)", "red(1) red(2) v(1) v(2)"));
@@ -582,7 +583,7 @@ TEST(SolveTest, DisjunctionFeedingAPositiveCycle) {
     p :- q.
     q :- p.
   )");
-  ASSERT_TRUE(out.ok()) << out.status();
+  ASSERT_OK(out);
   EXPECT_THAT(*out, UnorderedElementsAre("a p q", "b"));
 }
 
@@ -591,7 +592,7 @@ TEST(SolveTest, DisjunctionUnderAWeakConstraint) {
     a | b.
     :~ a. [1@0]
   )");
-  ASSERT_TRUE(out.ok()) << out.status();
+  ASSERT_OK(out);
   EXPECT_THAT(*out, UnorderedElementsAre("b | cost 0"));
 }
 
@@ -609,7 +610,7 @@ TEST(SolveTest, HeadCycleIsDecidedByMinimality) {
     a :- b.
     b :- a.
   )");
-  ASSERT_TRUE(out.ok()) << out.status();
+  ASSERT_OK(out);
   EXPECT_THAT(*out, UnorderedElementsAre("a b"));
 }
 
@@ -623,7 +624,7 @@ TEST(SolveTest, HeadCycleWithNoAnswerSet) {
     b :- a.
     :- a.
   )");
-  ASSERT_TRUE(out.ok()) << out.status();
+  ASSERT_OK(out);
   EXPECT_THAT(*out, IsEmpty());
 }
 
@@ -636,7 +637,7 @@ TEST(SolveTest, HeadCycleBesideAnotherDisjunct) {
     a :- b.
     b :- a.
   )");
-  ASSERT_TRUE(out.ok()) << out.status();
+  ASSERT_OK(out);
   EXPECT_THAT(*out, UnorderedElementsAre("a b", "c"));
 }
 
@@ -650,7 +651,7 @@ TEST(SolveTest, HeadCycleUnderAWeakConstraint) {
     :~ a. [1@0]
     :~ b. [1@0]
   )");
-  ASSERT_TRUE(out.ok()) << out.status();
+  ASSERT_OK(out);
   EXPECT_THAT(*out, UnorderedElementsAre("c | cost 0"));
 }
 
@@ -664,7 +665,7 @@ TEST(SolveTest, HeadCycleOverAPredicate) {
     p(2) :- p(1).
     q :- p(1), p(2).
   )");
-  ASSERT_TRUE(out.ok()) << out.status();
+  ASSERT_OK(out);
   EXPECT_THAT(*out, UnorderedElementsAre("n(1) n(2) p(1) p(2) q"));
 }
 
@@ -680,7 +681,7 @@ TEST(SolveTest, OptimizationOverAPositiveCycle) {
     b :- a.
     :~ a. [1@0]
   )");
-  ASSERT_TRUE(out.ok()) << out.status();
+  ASSERT_OK(out);
   EXPECT_THAT(*out, UnorderedElementsAre("q | cost 0"));
 }
 

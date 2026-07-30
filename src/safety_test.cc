@@ -5,6 +5,7 @@
 
 #include "absl/status/status_matchers.h"
 #include "parse.h"
+#include "test_macros.h"
 
 using namespace ::testing;
 using absl_testing::IsOk;
@@ -17,7 +18,7 @@ TEST_F(SafetyTest, TestSimpleMixedBinding) {
   std::string_view src = "p(X,Z) :- p(X,Y), p(Y,Z).";
   Parser parser(src);
   auto prog = parser.parse_program();
-  ASSERT_TRUE(prog.ok()) << prog.status();
+  ASSERT_OK(prog);
   EXPECT_THAT(verify_safe(**prog), IsOk());
 }
 
@@ -25,7 +26,7 @@ TEST_F(SafetyTest, TestNegationAsFailure) {
   std::string_view src = "p(X) :- not q(X).";
   Parser parser(src);
   auto prog = parser.parse_program();
-  ASSERT_TRUE(prog.ok()) << prog.status();
+  ASSERT_OK(prog);
   EXPECT_THAT(verify_safe(**prog), Not(IsOk()));
 }
 
@@ -33,7 +34,7 @@ TEST_F(SafetyTest, TestNegationAsFailureButBoundElsewhere) {
   std::string_view src = "p(X) :- not q(X), r(X).";
   Parser parser(src);
   auto prog = parser.parse_program();
-  ASSERT_TRUE(prog.ok()) << prog.status();
+  ASSERT_OK(prog);
   EXPECT_THAT(verify_safe(**prog), IsOk());
 }
 
@@ -41,7 +42,7 @@ TEST_F(SafetyTest, TestBoundByEquality) {
   std::string_view src = "p(X,Y) :- q(X), X = Y.";
   Parser parser(src);
   auto prog = parser.parse_program();
-  ASSERT_TRUE(prog.ok()) << prog.status();
+  ASSERT_OK(prog);
   EXPECT_THAT(verify_safe(**prog), IsOk());
 }
 
@@ -50,7 +51,7 @@ TEST_F(SafetyTest, TestNotBoundByLessThan) {
   std::string_view src = "p(X,Y) :- q(X), X < Y.";
   Parser parser(src);
   auto prog = parser.parse_program();
-  ASSERT_TRUE(prog.ok()) << prog.status();
+  ASSERT_OK(prog);
   EXPECT_THAT(verify_safe(**prog), Not(IsOk()));
 }
 
@@ -59,7 +60,7 @@ TEST_F(SafetyTest, TestFixedPointIterations) {
   std::string_view src = "q(1). p(X,Y,Z) :- Z = Y * 2, Y = X + 1, q(X).";
   Parser parser(src);
   auto prog = parser.parse_program();
-  ASSERT_TRUE(prog.ok()) << prog.status();
+  ASSERT_OK(prog);
   EXPECT_THAT(verify_safe(**prog), IsOk());
 }
 
@@ -67,7 +68,7 @@ TEST_F(SafetyTest, TestUnsafeCircularBind) {
   std::string_view src = "p(X,Y) :- q(Z), X = Y + 1, Y = X - 1.";
   Parser parser(src);
   auto prog = parser.parse_program();
-  ASSERT_TRUE(prog.ok()) << prog.status();
+  ASSERT_OK(prog);
   EXPECT_THAT(verify_safe(**prog), Not(IsOk()));
 }
 
@@ -77,7 +78,7 @@ TEST_F(SafetyTest, TestSafeAggregation) {
       "p(X,Y) :- q(X), #sum{S,X : r(T,X), S = (2 * T) - X} = Y.";
   Parser parser(src);
   auto prog = parser.parse_program();
-  ASSERT_TRUE(prog.ok()) << prog.status();
+  ASSERT_OK(prog);
   EXPECT_THAT(verify_safe(**prog), IsOk());
 }
 
@@ -87,7 +88,7 @@ TEST_F(SafetyTest, TestUnsafeAggregation) {
       "p(X,Y) :- q(X), #sum{S,X : r(T,X), S + X = (2 * T)} = Y.";
   Parser parser(src);
   auto prog = parser.parse_program();
-  ASSERT_TRUE(prog.ok()) << prog.status();
+  ASSERT_OK(prog);
   EXPECT_THAT(verify_safe(**prog), Not(IsOk()));
 }
 
@@ -102,7 +103,7 @@ TEST_F(SafetyTest, TestAggregationBoundPropagation) {
       "p(X,Y) :- q(X), Z = X + 2, #sum{S : S = Z + 3} = A, B = A + 1.";
   Parser parser(src);
   auto prog = parser.parse_program();
-  ASSERT_TRUE(prog.ok()) << prog.status();
+  ASSERT_OK(prog);
   EXPECT_THAT(verify_safe(**prog), IsOk());
 }
 
@@ -114,7 +115,7 @@ TEST_F(SafetyTest, TestAggregationBoundAlmostPropagation) {
       "p(X,Y) :- q(X), Z = X + 2, #sum{S : S = Z + C + 3} = A, B = A + 1.";
   Parser parser(src);
   auto prog = parser.parse_program();
-  ASSERT_TRUE(prog.ok()) << prog.status();
+  ASSERT_OK(prog);
   EXPECT_THAT(verify_safe(**prog), Not(IsOk()));
 }
 
@@ -124,7 +125,7 @@ TEST_F(SafetyTest, TestAggregationLocalScopeDoesNotLeak) {
   std::string_view src = "p(X) :- q(X), #sum{S : S = X + 1}, B = S + X.";
   Parser parser(src);
   auto prog = parser.parse_program();
-  ASSERT_TRUE(prog.ok()) << prog.status();
+  ASSERT_OK(prog);
   EXPECT_THAT(verify_safe(**prog), Not(IsOk()));
 }
 
@@ -134,7 +135,7 @@ TEST_F(SafetyTest, TestNafAggregateDoesNotBind) {
   std::string_view src = "p(X) :- not #sum{S : r(S)} = X.";
   Parser parser(src);
   auto prog = parser.parse_program();
-  ASSERT_TRUE(prog.ok()) << prog.status();
+  ASSERT_OK(prog);
   EXPECT_THAT(verify_safe(**prog), Not(IsOk()));
 }
 
@@ -142,7 +143,7 @@ TEST_F(SafetyTest, TestGlobalsDoNotLeakAcrossStatements) {
   std::string_view src = "p(X, Y) :- q(X), Y = X. r(X, Y) :- q(X), Y + 1 = X.";
   Parser parser(src);
   auto prog = parser.parse_program();
-  ASSERT_TRUE(prog.ok()) << prog.status();
+  ASSERT_OK(prog);
   EXPECT_THAT(verify_safe(**prog), Not(IsOk()));
 }
 
@@ -152,7 +153,7 @@ TEST_F(SafetyTest, ErrorMessageSingleUnsafeVariable) {
   std::string_view src = "p(X) :- not q(X).";
   Parser parser(src);
   auto prog = parser.parse_program();
-  ASSERT_TRUE(prog.ok()) << prog.status();
+  ASSERT_OK(prog);
   auto status = verify_safe(**prog);
   ASSERT_THAT(status, Not(IsOk()));
   EXPECT_EQ(status.message(),
@@ -164,7 +165,7 @@ TEST_F(SafetyTest, ErrorMessageMultipleUnsafeVariables) {
   std::string_view src = "p(X,Y) :- q(Z), X = Y + 1, Y = X - 1.";
   Parser parser(src);
   auto prog = parser.parse_program();
-  ASSERT_TRUE(prog.ok()) << prog.status();
+  ASSERT_OK(prog);
   auto status = verify_safe(**prog);
   ASSERT_THAT(status, Not(IsOk()));
   EXPECT_EQ(status.message(),
@@ -176,7 +177,7 @@ TEST_F(SafetyTest, ErrorMessageCorrectLineNumber) {
   std::string_view src = "p(X) :- q(X).\nr(X, Y) :- q(X), Y + 1 = X.";
   Parser parser(src);
   auto prog = parser.parse_program();
-  ASSERT_TRUE(prog.ok()) << prog.status();
+  ASSERT_OK(prog);
   auto status = verify_safe(**prog);
   ASSERT_THAT(status, Not(IsOk()));
   EXPECT_EQ(status.message(),
@@ -190,7 +191,7 @@ TEST_F(SafetyTest, ErrorMessageUnsafeAggregate) {
   std::string_view src = "p(X) :- q(X), #sum{S : not r(S)}.";
   Parser parser(src);
   auto prog = parser.parse_program();
-  ASSERT_TRUE(prog.ok()) << prog.status();
+  ASSERT_OK(prog);
   auto status = verify_safe(**prog);
   ASSERT_THAT(status, Not(IsOk()));
   EXPECT_EQ(status.message(),
@@ -203,7 +204,7 @@ TEST_F(SafetyTest, TestRecursiveAggregateRejected) {
   std::string_view src = "p(X) :- dom(X), #count{ Y : p(Y) } >= X.";
   Parser parser(src);
   auto prog = parser.parse_program();
-  ASSERT_TRUE(prog.ok()) << prog.status();
+  ASSERT_OK(prog);
   EXPECT_THAT(verify_safe(**prog), Not(IsOk()));
 }
 
@@ -215,7 +216,7 @@ TEST_F(SafetyTest, TestAggregateOverUnrelatedRecursivePredicateAllowed) {
       "big :- #count{ X, Y : reach(X, Y) } >= 3.";
   Parser parser(src);
   auto prog = parser.parse_program();
-  ASSERT_TRUE(prog.ok()) << prog.status();
+  ASSERT_OK(prog);
   EXPECT_THAT(verify_safe(**prog), IsOk());
 }
 
@@ -227,7 +228,7 @@ TEST_F(SafetyTest, TestRecursiveAggregateThroughMultipleRulesRejected) {
       "q(X) :- dom(X), #count{ Y : p(Y) } >= X.";
   Parser parser(src);
   auto prog = parser.parse_program();
-  ASSERT_TRUE(prog.ok()) << prog.status();
+  ASSERT_OK(prog);
   EXPECT_THAT(verify_safe(**prog), Not(IsOk()));
 }
 
@@ -238,7 +239,7 @@ TEST_F(SafetyTest, TestNegatedLiteralInAggregateDoesNotCountAsRecursive) {
   std::string_view src = "p(X) :- dom(X), #count{ Y : dom(Y), not p(Y) } >= X.";
   Parser parser(src);
   auto prog = parser.parse_program();
-  ASSERT_TRUE(prog.ok()) << prog.status();
+  ASSERT_OK(prog);
   EXPECT_THAT(verify_safe(**prog), IsOk());
 }
 
@@ -246,7 +247,7 @@ TEST_F(SafetyTest, ErrorMessageRecursiveAggregate) {
   std::string_view src = "p(X) :- dom(X), #count{ Y : p(Y) } >= X.";
   Parser parser(src);
   auto prog = parser.parse_program();
-  ASSERT_TRUE(prog.ok()) << prog.status();
+  ASSERT_OK(prog);
   auto status = verify_safe(**prog);
   ASSERT_THAT(status, Not(IsOk()));
   EXPECT_EQ(status.message(),
@@ -259,7 +260,7 @@ TEST_F(SafetyTest, TestWeakConstraintSafe) {
   std::string_view src = ":~ p(X). [1@0, X]";
   Parser parser(src);
   auto prog = parser.parse_program();
-  ASSERT_TRUE(prog.ok()) << prog.status();
+  ASSERT_OK(prog);
   EXPECT_THAT(verify_safe(**prog), IsOk());
 }
 
@@ -268,7 +269,7 @@ TEST_F(SafetyTest, TestWeakConstraintUnsafeDistinctnessTerm) {
   std::string_view src = ":~ p(X). [1@0, Y]";
   Parser parser(src);
   auto prog = parser.parse_program();
-  ASSERT_TRUE(prog.ok()) << prog.status();
+  ASSERT_OK(prog);
   EXPECT_THAT(verify_safe(**prog), Not(IsOk()));
 }
 
@@ -277,7 +278,7 @@ TEST_F(SafetyTest, TestWeakConstraintUnsafeWeightAndLevel) {
   std::string_view src = ":~ p(X). [W@L, X]";
   Parser parser(src);
   auto prog = parser.parse_program();
-  ASSERT_TRUE(prog.ok()) << prog.status();
+  ASSERT_OK(prog);
   EXPECT_THAT(verify_safe(**prog), Not(IsOk()));
 }
 
@@ -288,7 +289,7 @@ TEST_F(SafetyTest, TestAggregateElementWithNoCondition) {
   std::string_view src = "q :- #count{ 1 } >= 1.";
   Parser parser(src);
   auto prog = parser.parse_program();
-  ASSERT_TRUE(prog.ok()) << prog.status();
+  ASSERT_OK(prog);
   EXPECT_THAT(verify_safe(**prog), IsOk());
 }
 
@@ -296,7 +297,7 @@ TEST_F(SafetyTest, TestAggregateWithNoElements) {
   std::string_view src = "q :- #count{ } >= 0.";
   Parser parser(src);
   auto prog = parser.parse_program();
-  ASSERT_TRUE(prog.ok()) << prog.status();
+  ASSERT_OK(prog);
   EXPECT_THAT(verify_safe(**prog), IsOk());
 }
 
@@ -304,7 +305,7 @@ TEST_F(SafetyTest, ErrorMessageUnsafeWeakConstraint) {
   std::string_view src = ":~ p(X). [1@0, Y]";
   Parser parser(src);
   auto prog = parser.parse_program();
-  ASSERT_TRUE(prog.ok()) << prog.status();
+  ASSERT_OK(prog);
   auto status = verify_safe(**prog);
   ASSERT_THAT(status, Not(IsOk()));
   EXPECT_EQ(status.message(),

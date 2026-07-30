@@ -6,6 +6,7 @@
 #include <algorithm>
 
 #include "parse.h"
+#include "test_macros.h"
 
 using namespace ::testing;
 
@@ -15,7 +16,7 @@ namespace {
 std::unique_ptr<Term> ParseTerm(std::string_view source) {
   Parser parser(source);
   auto term = parser.parse_term();
-  EXPECT_TRUE(term.ok()) << term.status();
+  EXPECT_OK(term);
   return std::move(*term);
 }
 
@@ -24,7 +25,7 @@ std::unique_ptr<Term> ParseTerm(std::string_view source) {
 std::unique_ptr<Literal> ParseLiteral(std::string_view source) {
   Parser parser(source);
   auto naf = parser.parse_naf_literal();
-  EXPECT_TRUE(naf.ok()) << naf.status();
+  EXPECT_OK(naf);
   return std::move((*naf)->literal);
 }
 
@@ -73,7 +74,7 @@ TEST(CollectTest, BuiltinAtomVariablesSpanBothSides) {
 TEST(CollectTest, AggregateVariablesSpanBoundsTermsAndConditions) {
   Parser parser("N < #count{ X : e(X, Y), Y > L }");
   auto aggregate = parser.parse_aggregate();
-  ASSERT_TRUE(aggregate.ok()) << aggregate.status();
+  ASSERT_OK(aggregate);
   std::vector<std::string> vars;
   collect::for_each_variable(**aggregate, [&](const Variable& var) {
     if (std::find(vars.begin(), vars.end(), var.name) == vars.end()) {

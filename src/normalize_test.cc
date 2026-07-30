@@ -5,6 +5,7 @@
 
 #include "format.h"
 #include "parse.h"
+#include "test_macros.h"
 
 using namespace ::testing;
 
@@ -59,8 +60,8 @@ TEST_F(NormalizeTest, TestNoNormalization) {
 
   Parser parser(program);
   auto prog = parser.parse_program();
-  ASSERT_TRUE(prog.ok()) << prog.status();
-  ASSERT_TRUE(normalize(**prog).ok());
+  ASSERT_OK(prog);
+  ASSERT_OK(normalize(**prog));
 
   EXPECT_THAT(**prog, EquivalentToSource(program));
 }
@@ -77,8 +78,8 @@ TEST_F(NormalizeTest, TestArithmeticKeepsOnlyTheParenthesesItNeeds) {
 
   Parser parser(program);
   auto prog = parser.parse_program();
-  ASSERT_TRUE(prog.ok()) << prog.status();
-  ASSERT_TRUE(normalize(**prog).ok());
+  ASSERT_OK(prog);
+  ASSERT_OK(normalize(**prog));
 
   EXPECT_THAT(**prog, EquivalentToSource(expected));
 }
@@ -90,8 +91,8 @@ TEST_F(NormalizeTest, TestNormalizeChoiceRuleSimple) {
 
   Parser parser(program);
   auto prog = parser.parse_program();
-  ASSERT_TRUE(prog.ok()) << prog.status();
-  ASSERT_TRUE(normalize(**prog).ok());
+  ASSERT_OK(prog);
+  ASSERT_OK(normalize(**prog));
 
   EXPECT_THAT(**prog, EquivalentToSource(R"(
     p1 | _cr0 :- q1.
@@ -107,8 +108,8 @@ TEST_F(NormalizeTest, TestNormalizeChoiceRuleComplex) {
 
   Parser parser(program);
   auto prog = parser.parse_program();
-  ASSERT_TRUE(prog.ok()) << prog.status();
-  ASSERT_TRUE(normalize(**prog).ok());
+  ASSERT_OK(prog);
+  ASSERT_OK(normalize(**prog));
 
   EXPECT_THAT(**prog, EquivalentToSource(R"(
     a | _cr0 :- a1, a2, x, y, not z.
@@ -128,8 +129,8 @@ TEST_F(NormalizeTest, TestNormalizeMultipleChoiceRules) {
 
   Parser parser(program);
   auto prog = parser.parse_program();
-  ASSERT_TRUE(prog.ok()) << prog.status();
-  ASSERT_TRUE(normalize(**prog).ok());
+  ASSERT_OK(prog);
+  ASSERT_OK(normalize(**prog));
 
   EXPECT_THAT(**prog, EquivalentToSource(R"(
     p1 | _cr0 :- q1.
@@ -146,8 +147,8 @@ TEST_F(NormalizeTest, TestNormalizeChoiceWithVars) {
 
   Parser parser(program);
   auto prog = parser.parse_program();
-  ASSERT_TRUE(prog.ok()) << prog.status();
-  ASSERT_TRUE(normalize(**prog).ok());
+  ASSERT_OK(prog);
+  ASSERT_OK(normalize(**prog));
 
   EXPECT_THAT(**prog, EquivalentToSource(R"(
     p(X, Y) | _cr0(X, Y) :- q(X), r(Y).
@@ -162,8 +163,8 @@ TEST_F(NormalizeTest, TestRemoveClassicalNegationSimple) {
 
   Parser parser(program);
   auto prog = parser.parse_program();
-  ASSERT_TRUE(prog.ok()) << prog.status();
-  ASSERT_TRUE(normalize(**prog).ok());
+  ASSERT_OK(prog);
+  ASSERT_OK(normalize(**prog));
 
   EXPECT_THAT(**prog, EquivalentToSource(R"(
     _neg_p :- q.
@@ -178,8 +179,8 @@ TEST_F(NormalizeTest, TestRemoveClassicalNegationWithArgs) {
 
   Parser parser(program);
   auto prog = parser.parse_program();
-  ASSERT_TRUE(prog.ok()) << prog.status();
-  ASSERT_TRUE(normalize(**prog).ok());
+  ASSERT_OK(prog);
+  ASSERT_OK(normalize(**prog));
 
   EXPECT_THAT(**prog, EquivalentToSource(R"(
     _neg_p(X) :- q(X).
@@ -196,8 +197,8 @@ TEST_F(NormalizeTest,
 
   Parser parser(program);
   auto prog = parser.parse_program();
-  ASSERT_TRUE(prog.ok()) << prog.status();
-  ASSERT_TRUE(normalize(**prog).ok());
+  ASSERT_OK(prog);
+  ASSERT_OK(normalize(**prog));
 
   EXPECT_THAT(**prog, EquivalentToSource(R"(
     _neg_p(a, b).
@@ -214,8 +215,8 @@ TEST_F(NormalizeTest, TestRemoveClassicalNegationInBodyAndQuery) {
 
   Parser parser(program);
   auto prog = parser.parse_program();
-  ASSERT_TRUE(prog.ok()) << prog.status();
-  ASSERT_TRUE(normalize(**prog).ok());
+  ASSERT_OK(prog);
+  ASSERT_OK(normalize(**prog));
 
   EXPECT_THAT(**prog, EquivalentToSource(R"(
     r :- _neg_p, not _neg_q.
@@ -233,8 +234,8 @@ TEST_F(NormalizeTest, TestRemoveClassicalNegationOneConstraintPerPredicate) {
 
   Parser parser(program);
   auto prog = parser.parse_program();
-  ASSERT_TRUE(prog.ok()) << prog.status();
-  ASSERT_TRUE(normalize(**prog).ok());
+  ASSERT_OK(prog);
+  ASSERT_OK(normalize(**prog));
 
   EXPECT_THAT(**prog, EquivalentToSource(R"(
     _neg_p :- a.
@@ -262,8 +263,8 @@ TEST_F(NormalizeTest, TestDisjunctiveHeadIsLeftAlone) {
 
   Parser parser(program);
   auto prog = parser.parse_program();
-  ASSERT_TRUE(prog.ok()) << prog.status();
-  ASSERT_TRUE(normalize(**prog).ok());
+  ASSERT_OK(prog);
+  ASSERT_OK(normalize(**prog));
 
   EXPECT_THAT(**prog, EquivalentToSource(R"(
     a | b | c :- d, e, not f.
@@ -281,8 +282,8 @@ TEST_F(NormalizeTest, TestRewriteWeakConstraintSimple) {
 
   Parser parser(program);
   auto prog = parser.parse_program();
-  ASSERT_TRUE(prog.ok()) << prog.status();
-  ASSERT_TRUE(normalize(**prog).ok());
+  ASSERT_OK(prog);
+  ASSERT_OK(normalize(**prog));
 
   EXPECT_THAT(**prog, EquivalentToSource(R"(
     _viol(0, 1, X) :- node(X), color(X, red).
@@ -296,8 +297,8 @@ TEST_F(NormalizeTest, TestRewriteWeakConstraintDefaultLevel) {
 
   Parser parser(program);
   auto prog = parser.parse_program();
-  ASSERT_TRUE(prog.ok()) << prog.status();
-  ASSERT_TRUE(normalize(**prog).ok());
+  ASSERT_OK(prog);
+  ASSERT_OK(normalize(**prog));
 
   EXPECT_THAT(**prog, EquivalentToSource(R"(
     _viol(0, 1, X) :- q(X).
@@ -311,8 +312,8 @@ TEST_F(NormalizeTest, TestRewriteWeakConstraintNoTerms) {
 
   Parser parser(program);
   auto prog = parser.parse_program();
-  ASSERT_TRUE(prog.ok()) << prog.status();
-  ASSERT_TRUE(normalize(**prog).ok());
+  ASSERT_OK(prog);
+  ASSERT_OK(normalize(**prog));
 
   EXPECT_THAT(**prog, EquivalentToSource(R"(
     _viol(2, 1) :- q.
@@ -327,8 +328,8 @@ TEST_F(NormalizeTest, TestRewriteWeakConstraintMultiple) {
 
   Parser parser(program);
   auto prog = parser.parse_program();
-  ASSERT_TRUE(prog.ok()) << prog.status();
-  ASSERT_TRUE(normalize(**prog).ok());
+  ASSERT_OK(prog);
+  ASSERT_OK(normalize(**prog));
 
   EXPECT_THAT(**prog, EquivalentToSource(R"(
     _viol(0, 1, X) :- a(X).

@@ -7,6 +7,7 @@
 #include <string>
 
 #include "parse.h"
+#include "test_macros.h"
 
 using namespace ::testing;
 
@@ -30,7 +31,7 @@ bool HasEdge(const std::vector<std::vector<int>>& succ, int from, int to) {
 PredGraph GraphOf(const std::string& program) {
   Parser parser(program);
   auto prog = parser.parse_program();
-  EXPECT_TRUE(prog.ok()) << prog.status();
+  EXPECT_OK(prog);
   return build_pred_graph(**prog);
 }
 

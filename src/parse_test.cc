@@ -5,6 +5,7 @@
 
 #include "absl/status/statusor.h"
 #include "absl/strings/string_view.h"
+#include "test_macros.h"
 #include "tokenize.h"
 
 using namespace ::testing;
@@ -65,7 +66,7 @@ TEST_F(ParserTest, LexMultiCharIds) {
 TEST_F(ParserTest, ParseSingleTermId) {
   Parser parser("p");
   auto term_status = parser.parse_single_term();
-  ASSERT_TRUE(term_status.ok()) << term_status.status();
+  ASSERT_OK(term_status);
   auto term = std::move(*term_status);
   auto* atom = dynamic_cast<Atom*>(term.get());
   ASSERT_NE(atom, nullptr);
@@ -76,7 +77,7 @@ TEST_F(ParserTest, ParseSingleTermId) {
 TEST_F(ParserTest, ParseSingleTermNumber) {
   Parser parser("123");
   auto term_status = parser.parse_single_term();
-  ASSERT_TRUE(term_status.ok()) << term_status.status();
+  ASSERT_OK(term_status);
   auto term = std::move(*term_status);
   auto* num = dynamic_cast<Number*>(term.get());
   ASSERT_NE(num, nullptr);
@@ -86,7 +87,7 @@ TEST_F(ParserTest, ParseSingleTermNumber) {
 TEST_F(ParserTest, ParseTerms) {
   Parser parser("X, 456, \"hello\"");
   auto terms_status = parser.parse_terms();
-  ASSERT_TRUE(terms_status.ok()) << terms_status.status();
+  ASSERT_OK(terms_status);
   auto terms = std::move(*terms_status);
   ASSERT_EQ(terms->size(), 3);
 
@@ -104,7 +105,7 @@ TEST_F(ParserTest, ParseTermArithmeticLeftAssociative) {
   // 1-2-3 must parse as (1-2)-3, not 1-(2-3).
   Parser parser("1-2-3");
   auto term_status = parser.parse_term();
-  ASSERT_TRUE(term_status.ok()) << term_status.status();
+  ASSERT_OK(term_status);
   auto* outer = dynamic_cast<TermOperation*>(term_status->get());
   ASSERT_NE(outer, nullptr);
   EXPECT_EQ(outer->op, OperationType::kMINUS);
@@ -122,7 +123,7 @@ TEST_F(ParserTest, ParseTermMultiplicationBindsTighterThanAddition) {
   // 1+2*3 must parse as 1+(2*3).
   Parser parser("1+2*3");
   auto term_status = parser.parse_term();
-  ASSERT_TRUE(term_status.ok()) << term_status.status();
+  ASSERT_OK(term_status);
   auto* outer = dynamic_cast<TermOperation*>(term_status->get());
   ASSERT_NE(outer, nullptr);
   EXPECT_EQ(outer->op, OperationType::kPLUS);
@@ -139,7 +140,7 @@ TEST_F(ParserTest, ParseTermDivisionBindsTighterThanSubtraction) {
   // 6/3-1 must parse as (6/3)-1.
   Parser parser("6/3-1");
   auto term_status = parser.parse_term();
-  ASSERT_TRUE(term_status.ok()) << term_status.status();
+  ASSERT_OK(term_status);
   auto* outer = dynamic_cast<TermOperation*>(term_status->get());
   ASSERT_NE(outer, nullptr);
   EXPECT_EQ(outer->op, OperationType::kMINUS);
@@ -156,7 +157,7 @@ TEST_F(ParserTest, ParseTermMultiplicationLeftAssociative) {
   // 8/4*2 must parse as (8/4)*2, not 8/(4*2).
   Parser parser("8/4*2");
   auto term_status = parser.parse_term();
-  ASSERT_TRUE(term_status.ok()) << term_status.status();
+  ASSERT_OK(term_status);
   auto* outer = dynamic_cast<TermOperation*>(term_status->get());
   ASSERT_NE(outer, nullptr);
   EXPECT_EQ(outer->op, OperationType::kTIMES);
@@ -170,7 +171,7 @@ TEST_F(ParserTest, ParseTermParenthesesOverridePrecedence) {
   // (1+2)*3 must parse as (1+2)*3.
   Parser parser("(1+2)*3");
   auto term_status = parser.parse_term();
-  ASSERT_TRUE(term_status.ok()) << term_status.status();
+  ASSERT_OK(term_status);
   auto* outer = dynamic_cast<TermOperation*>(term_status->get());
   ASSERT_NE(outer, nullptr);
   EXPECT_EQ(outer->op, OperationType::kTIMES);
@@ -184,7 +185,7 @@ TEST_F(ParserTest, ParseTermsWithArithmetic) {
   // parse_terms() must use parse_term() so arithmetic expressions are accepted.
   Parser parser("1+2, X*3");
   auto terms_status = parser.parse_terms();
-  ASSERT_TRUE(terms_status.ok()) << terms_status.status();
+  ASSERT_OK(terms_status);
   auto terms = std::move(*terms_status);
   ASSERT_EQ(terms->size(), 2);
 
@@ -202,7 +203,7 @@ TEST_F(ParserTest, ParseTermsWithArithmetic) {
 TEST_F(ParserTest, ParseClassicalLiteral) {
   Parser parser("-p(X, 1)");
   auto lit_status = parser.parse_classical_literal();
-  ASSERT_TRUE(lit_status.ok()) << lit_status.status();
+  ASSERT_OK(lit_status);
   auto lit = std::move(*lit_status);
   EXPECT_TRUE(lit->negated);
   EXPECT_EQ(lit->id, "p");
@@ -216,7 +217,7 @@ TEST_F(ParserTest, ParseAggregateElement) {
   {
     Parser parser("X, 1 : p(X), not q");
     auto element_status = parser.parse_aggregate_element();
-    ASSERT_TRUE(element_status.ok()) << element_status.status();
+    ASSERT_OK(element_status);
     auto element = std::move(*element_status);
     ASSERT_NE(element->terms, nullptr);
     ASSERT_EQ(element->terms->size(), 2);
@@ -229,7 +230,7 @@ TEST_F(ParserTest, ParseAggregateElement) {
   {
     Parser parser("X");
     auto element_status = parser.parse_aggregate_element();
-    ASSERT_TRUE(element_status.ok()) << element_status.status();
+    ASSERT_OK(element_status);
     auto element = std::move(*element_status);
     ASSERT_NE(element->terms, nullptr);
     ASSERT_EQ(element->terms->size(), 1);
@@ -239,7 +240,7 @@ TEST_F(ParserTest, ParseAggregateElement) {
   {
     Parser parser(": p");
     auto element_status = parser.parse_aggregate_element();
-    ASSERT_TRUE(element_status.ok()) << element_status.status();
+    ASSERT_OK(element_status);
     auto element = std::move(*element_status);
     EXPECT_EQ(element->terms, nullptr);
     ASSERT_NE(element->literals, nullptr);
@@ -250,7 +251,7 @@ TEST_F(ParserTest, ParseAggregateElement) {
 TEST_F(ParserTest, ParseHeadDisjunction) {
   Parser parser("p(X) | -q(Y)");
   auto head_status = parser.parse_head();
-  ASSERT_TRUE(head_status.ok()) << head_status.status();
+  ASSERT_OK(head_status);
   auto head = std::move(*head_status);
   auto* disj = dynamic_cast<Disjunction*>(head.get());
   ASSERT_NE(disj, nullptr);
@@ -264,7 +265,7 @@ TEST_F(ParserTest, ParseHeadChoice) {
   {
     Parser parser("{ p(X) : q(X); r } <= 1");
     auto head_status = parser.parse_head();
-    ASSERT_TRUE(head_status.ok()) << head_status.status();
+    ASSERT_OK(head_status);
     auto head = std::move(*head_status);
     auto* choice = dynamic_cast<Choice*>(head.get());
     ASSERT_NE(choice, nullptr);
@@ -280,7 +281,7 @@ TEST_F(ParserTest, ParseHeadChoice) {
   {
     Parser parser("1 < { p }");
     auto head_status = parser.parse_head();
-    ASSERT_TRUE(head_status.ok()) << head_status.status();
+    ASSERT_OK(head_status);
     auto head = std::move(*head_status);
     auto* choice = dynamic_cast<Choice*>(head.get());
     ASSERT_NE(choice, nullptr);
@@ -293,7 +294,7 @@ TEST_F(ParserTest, ParseHeadChoice) {
 TEST_F(ParserTest, ParseBodyNafLiteral) {
   Parser parser(":- not p, q.");
   auto stmt_status = parser.parse_statement();
-  ASSERT_TRUE(stmt_status.ok()) << stmt_status.status();
+  ASSERT_OK(stmt_status);
   auto& body = (*stmt_status)->body;
   ASSERT_NE(body, nullptr);
   ASSERT_EQ(body->items->size(), 2);
@@ -312,7 +313,7 @@ TEST_F(ParserTest, ParseBodyNafLiteral) {
 TEST_F(ParserTest, ParseBodyNafAggregate) {
   Parser parser(":- not #count{} = 0, #sum{} > 1.");
   auto stmt_status = parser.parse_statement();
-  ASSERT_TRUE(stmt_status.ok()) << stmt_status.status();
+  ASSERT_OK(stmt_status);
   auto& body = (*stmt_status)->body;
   ASSERT_NE(body, nullptr);
   ASSERT_EQ(body->items->size(), 2);
@@ -331,7 +332,7 @@ TEST_F(ParserTest, ParseBodyNafAggregate) {
 TEST_F(ParserTest, ParseAggregateWithNoElements) {
   Parser parser("q :- #count{ } >= 0.");
   auto stmt_status = parser.parse_statement();
-  ASSERT_TRUE(stmt_status.ok()) << stmt_status.status();
+  ASSERT_OK(stmt_status);
   auto* agg =
       dynamic_cast<Aggregate*>((*stmt_status)->body->items->at(0).get());
   ASSERT_NE(agg, nullptr);
@@ -343,7 +344,7 @@ TEST_F(ParserTest, ParseAggregateWithNoElements) {
 TEST_F(ParserTest, ParseAggregateElementWithNoCondition) {
   Parser parser("q :- #count{ 1 } >= 1.");
   auto stmt_status = parser.parse_statement();
-  ASSERT_TRUE(stmt_status.ok()) << stmt_status.status();
+  ASSERT_OK(stmt_status);
   auto* agg =
       dynamic_cast<Aggregate*>((*stmt_status)->body->items->at(0).get());
   ASSERT_NE(agg, nullptr);
@@ -362,7 +363,7 @@ TEST_F(ParserTest, ParseProgramGraphColoring) {
     :- edge(X,Y), col(X,C), col(Y,C).
   )");
   auto prog = parser.parse_program();
-  ASSERT_TRUE(prog.ok()) << prog.status();
+  ASSERT_OK(prog);
 }
 
 TEST_F(ParserTest, ParseProgramNQueens) {
@@ -374,7 +375,7 @@ TEST_F(ParserTest, ParseProgramNQueens) {
     :- queen(R1,C1), queen(R2,C2), R1 <> R2, R1+C1 = R2+C2.
   )");
   auto prog = parser.parse_program();
-  ASSERT_TRUE(prog.ok()) << prog.status();
+  ASSERT_OK(prog);
 }
 
 TEST_F(ParserTest, ParseProgramReachability) {
@@ -386,14 +387,14 @@ TEST_F(ParserTest, ParseProgramReachability) {
     :- not connected.
   )");
   auto prog = parser.parse_program();
-  ASSERT_TRUE(prog.ok()) << prog.status();
+  ASSERT_OK(prog);
 }
 
 TEST_F(ParserTest, ParseProgramWithNoStatementsGivesAnEmptyList) {
   for (std::string_view source : {"", "   \n\t ", "% just a comment\n"}) {
     Parser parser(source);
     auto prog = parser.parse_program();
-    ASSERT_TRUE(prog.ok()) << prog.status();
+    ASSERT_OK(prog);
     ASSERT_NE((*prog)->statements, nullptr) << "source: " << source;
     EXPECT_TRUE((*prog)->statements->empty());
   }
