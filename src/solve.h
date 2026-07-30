@@ -35,21 +35,20 @@ struct SolveOptions {
   Optimizer optimizer = Optimizer::kLinear;
 };
 
-// Translates a ground program to QF_IDL along the lines of Niemelä, "Stable
-// models and difference logic", and hands it to cvc5.
+// Solves a ground program: builds the encoding of encode.h and hands it to
+// cvc5.
 //
 // Returns the answer sets in the order cvc5 produced them, so at most
 // options.max_answer_sets of them. A program with no answer sets returns an
-// empty vector; note that this is not the same as returning one AnswerSet whose
-// atoms are empty, which is what a program whose only answer set is the empty
-// one returns.
+// empty vector. That is not the same as one AnswerSet holding no atoms, which
+// is what a program whose only answer set is the empty one returns.
 //
 // Weak constraints are minimized level by level, most important level first,
 // before any answer set is returned. Every answer set returned is optimal.
 //
 // A disjunctive head costs a second query per candidate answer set, but only
 // where two of its atoms lie on a common positive cycle. Every other program,
-// normal or disjunctive, is decided by one translation. solve.cc says why.
+// normal or disjunctive, is decided by one translation. encode.cc says why.
 //
 // Choice rule heads return an UnimplementedError. Nothing produces one:
 // normalization rewrites choice rules into disjunctive ones.

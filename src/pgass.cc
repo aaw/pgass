@@ -13,6 +13,7 @@
 #include "absl/flags/usage.h"
 #include "absl/log/check.h"
 #include "absl/strings/str_cat.h"
+#include "encode.h"
 #include "format.h"
 #include "ground.h"
 #include "normalize.h"
@@ -25,6 +26,9 @@ ABSL_FLAG(bool, ground, false,
           "Ground the program, print it as aspif text, and exit");
 ABSL_FLAG(int, models, 1,
           "How many answer sets to look for; 0 means all of them");
+ABSL_FLAG(std::string, encode, "",
+          "Print the encoding of the grounded program and exit, in the given "
+          "format. Only 'smtlib' is supported");
 ABSL_FLAG(
     std::string, optimizer, "linear",
     "How to minimize weak constraints: 'linear' asks for a cheaper answer "
@@ -75,8 +79,23 @@ int main(int argc, char** argv) {
       "  Files are concatenated; reads from stdin if none are given.");
   std::vector<char*> positional = absl::ParseCommandLine(argc, argv);
 
-  if (absl::GetFlag(FLAGS_format) && absl::GetFlag(FLAGS_ground)) {
-    std::cerr << "pgass: --format and --ground cannot be combined\n";
+  const std::string encode = absl::GetFlag(FLAGS_encode);
+  if (encode == "sat") {
+    std::cerr << "pgass: --encode=sat is not implemented yet\n";
+    return 1;
+  }
+  if (!encode.empty() && encode != "smtlib") {
+    std::cerr << "pgass: unknown --encode '" << encode
+              << "'; expected 'smtlib'\n";
+    return 1;
+  }
+
+  // Each of these three prints something and stops, so at most one can be
+  // asked for.
+  const int printers = absl::GetFlag(FLAGS_format) +
+                       absl::GetFlag(FLAGS_ground) + !encode.empty();
+  if (printers > 1) {
+    std::cerr << "pgass: --format, --ground, and --encode cannot be combined\n";
     return 1;
   }
 
@@ -139,6 +158,16 @@ int main(int argc, char** argv) {
   }
   if (absl::GetFlag(FLAGS_ground)) {
     std::cout << to_aspif(*grounded);
+    return 0;
+  }
+
+  if (!encode.empty()) {
+    auto script = encode_smtlib(*grounded);
+    if (!script.ok()) {
+      std::cerr << "pgass: encode error: " << script.status().message() << "\n";
+      return 1;
+    }
+    std::cout << *script;
     return 0;
   }
 

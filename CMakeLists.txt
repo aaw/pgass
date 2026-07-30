@@ -136,15 +136,35 @@ target_link_libraries(format_lib
     parse_lib
 )
 
+# The translation of a ground program into SMT, which solve_lib searches and
+# encode_smtlib() prints.
+add_library(encode_lib STATIC src/encode.cc)
+target_compile_options(encode_lib PRIVATE ${PGASS_WARNINGS})
+target_include_directories(encode_lib PUBLIC src)
+# PUBLIC because cvc5's dependencies reach the final link line as bare names;
+# see cmake/cvc5.cmake.
+target_link_directories(encode_lib PUBLIC ${PGASS_CVC5_LIB_DIR})
+target_link_libraries(encode_lib
+  PUBLIC
+    aspif_lib
+    absl::statusor
+    # PUBLIC because encode.h holds cvc5 terms, so whoever includes it needs
+    # cvc5's headers.
+    cvc5::cvc5
+  PRIVATE
+    absl::check
+    absl::flat_hash_set
+    absl::strings
+    graph_lib
+)
+
 add_library(solve_lib STATIC src/solve.cc)
 target_compile_options(solve_lib PRIVATE ${PGASS_WARNINGS})
 target_include_directories(solve_lib PUBLIC src)
-# PUBLIC because cvc5's dependencies reach the final link line as bare names;
-# see cmake/cvc5.cmake.
-target_link_directories(solve_lib PUBLIC ${PGASS_CVC5_LIB_DIR})
 target_link_libraries(solve_lib
   PUBLIC
     aspif_lib
+    encode_lib
     absl::statusor
   PRIVATE
     absl::btree
@@ -152,13 +172,13 @@ target_link_libraries(solve_lib
     absl::flat_hash_set
     absl::strings
     cvc5::cvc5
-    graph_lib
 )
 
 add_executable(pgass src/pgass.cc)
 target_compile_options(pgass PRIVATE ${PGASS_WARNINGS})
 target_link_libraries(pgass
   PRIVATE
+    encode_lib
     format_lib
     ground_lib
     normalize_lib
@@ -238,6 +258,22 @@ target_link_libraries(solve_test
     GTest::gmock
 )
 
+# Links cvc5's parser to read the printed script back and check it is really
+# SMT-LIB. encode_lib publishes cvc5 itself, along with the link directory the
+# bare dependency names need.
+add_executable(encode_test src/encode_test.cc)
+target_compile_options(encode_test PRIVATE ${PGASS_WARNINGS})
+target_link_libraries(encode_test
+  PRIVATE
+    encode_lib
+    ground_lib
+    normalize_lib
+    absl::strings
+    cvc5::cvc5parser
+    GTest::gtest_main
+    GTest::gmock
+)
+
 add_executable(graph_test src/graph_test.cc)
 target_compile_options(graph_test PRIVATE ${PGASS_WARNINGS})
 target_link_libraries(graph_test
@@ -256,3 +292,4 @@ gtest_discover_tests(graph_test)
 gtest_discover_tests(aspif_test)
 gtest_discover_tests(ground_test)
 gtest_discover_tests(solve_test)
+gtest_discover_tests(encode_test)
