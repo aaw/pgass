@@ -111,10 +111,15 @@ absl::StatusOr<std::vector<std::string>> solve_source(const std::string& source,
   return linear;
 }
 
+// Grounds `source` and answers its query.
+absl::StatusOr<QueryResult> query_result(const std::string& source) {
+  ASSIGN_OR_RETURN(aspif::Program grounded, ground_source(source));
+  return answer_query(grounded, SolveOptions());
+}
+
 // Whether the query of `source` holds.
 absl::StatusOr<QueryAnswer> query_source(const std::string& source) {
-  ASSIGN_OR_RETURN(aspif::Program grounded, ground_source(source));
-  ASSIGN_OR_RETURN(QueryResult result, answer_query(grounded, SolveOptions()));
+  ASSIGN_OR_RETURN(QueryResult result, query_result(source));
   return result.answer;
 }
 
@@ -496,15 +501,18 @@ TEST(SolveTest, QueryMatchingNothingIsNo) {
   EXPECT_EQ(*out, QueryAnswer::kNo);
 }
 
-// A program with no answer set has nothing to ask about, which is neither a
-// yes nor a no.
-TEST(SolveTest, QueryAgainstAnIncoherentProgramHasNoAnswerSet) {
-  auto out = query_source(R"(
+// A program with no answer set holds every query, even one over a predicate it
+// never mentions. Every substitution answers it, and those are not the atoms
+// grounding matched, so none are reported.
+TEST(SolveTest, QueryAgainstAnIncoherentProgramHolds) {
+  auto out = query_result(R"(
     p :- not p.
-    p?
+    q?
   )");
   ASSERT_OK(out);
-  EXPECT_EQ(*out, QueryAnswer::kNoAnswerSet);
+  EXPECT_EQ(out->answer, QueryAnswer::kYes);
+  EXPECT_TRUE(out->no_answer_set);
+  EXPECT_THAT(out->holds, IsEmpty());
 }
 
 // The question is asked of the optimal answer sets only. Both {a} and {b} are

@@ -70,12 +70,21 @@ void print_answer_set(const aspif::Program& prog, const AnswerSet& answer_set) {
   }
 }
 
-// Prints the atoms a query holds under, one per substitution, separated by
-// spaces. Grounding names every atom of a user-visible predicate, so a query
-// atom's name is the Output whose condition is that atom on its own.
-void print_query_matches(const aspif::Program& prog,
-                         const std::vector<aspif::Lit>& holds) {
-  const absl::flat_hash_set<aspif::Lit> answers(holds.begin(), holds.end());
+// Prints what a query holds under: the atoms naming its substitutions,
+// separated by spaces. Grounding names every atom of a user-visible predicate,
+// so a query atom's name is the Output whose condition is that atom on its own.
+//
+// A program with no answer set holds every query under every substitution, and
+// there are too many of those to print, so it gets a sentence instead.
+void print_substitutions(const aspif::Program& prog, const QueryResult& answer) {
+  if (answer.no_answer_set) {
+    std::cout << "the program has no answer set. every substitution answers "
+                 "the query\n";
+    return;
+  }
+
+  const absl::flat_hash_set<aspif::Lit> answers(answer.holds.begin(),
+                                                answer.holds.end());
   bool first = true;
   for (const aspif::Output& output : prog.outputs) {
     if (output.condition.size() != 1) continue;
@@ -194,25 +203,19 @@ int main(int argc, char** argv) {
 
   // A query asks a yes or no question about all the answer sets at once, so a
   // program with one gets an answer instead of a list of answer sets. A yes is
-  // followed by the atoms it holds under.
+  // followed by the substitutions it holds under.
   if (grounded->query.has_value()) {
     auto answer = answer_query(*grounded, options);
     if (!answer.ok()) {
       std::cerr << "pgass: solve error: " << answer.status().message() << "\n";
       return 1;
     }
-    switch (answer->answer) {
-      case QueryAnswer::kYes:
-        std::cout << "yes\n";
-        print_query_matches(*grounded, answer->holds);
-        break;
-      case QueryAnswer::kNo:
-        std::cout << "no\n";
-        break;
-      case QueryAnswer::kNoAnswerSet:
-        std::cout << "UNSATISFIABLE\n";
-        break;
+    if (answer->answer == QueryAnswer::kNo) {
+      std::cout << "no\n";
+      return 0;
     }
+    std::cout << "yes\n";
+    print_substitutions(*grounded, *answer);
     return 0;
   }
 

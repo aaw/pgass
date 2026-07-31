@@ -489,11 +489,13 @@ absl::StatusOr<QueryResult> answer_query(const aspif::Program& prog,
   RETURN_IF_ERROR(session.start(prog, options));
   Search& search = *session.search;
 
-  // A program with no answer set is asked nothing at all. Looking for an answer
-  // set first is also what tells that case apart from a query that holds. Both
-  // leave the searches below with nothing to find.
+  // A program with no answer set holds every query. Looking for an answer set
+  // first is also what tells that case apart from a query that holds, since
+  // both leave the searches below with nothing to find.
   ASSIGN_OR_RETURN(const bool coherent, search.find());
-  if (!coherent) return QueryResult{.answer = QueryAnswer::kNoAnswerSet};
+  if (!coherent) {
+    return QueryResult{.answer = QueryAnswer::kYes, .no_answer_set = true};
+  }
 
   // An atom this answer set leaves out is already answered no, so only the ones
   // it holds are worth a search. That is what makes a query over a large

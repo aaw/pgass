@@ -61,12 +61,10 @@ absl::StatusOr<std::vector<AnswerSet>> solve(const aspif::Program& prog,
 
 // Whether a program's query holds.
 enum class QueryAnswer {
-  // One of the atoms the query matched holds in every answer set.
+  // Every answer set satisfies the query.
   kYes,
-  // Each of them is left out of some answer set.
+  // Some answer set leaves it unsatisfied.
   kNo,
-  // The program has no answer set, so there is nothing to ask about.
-  kNoAnswerSet,
 };
 
 // The answer to a program's query.
@@ -75,8 +73,13 @@ struct QueryResult {
   // The atoms of aspif::Program::query that hold in every answer set, in the
   // order grounding matched them. Each one stands for a substitution the query
   // holds under. 'p(1). p(2). p(X)?' lists p(1) and p(2), which is to say X of
-  // 1 and X of 2. Non-empty exactly when `answer` is kYes.
+  // 1 and X of 2. A kNo answer holds under nothing, so this is empty.
   std::vector<aspif::Lit> holds;
+  // Whether the program has no answer set, which is a kYes of its own kind:
+  // every substitution answers the query. Those range over the whole Herbrand
+  // universe, every integer included, so `holds` is empty rather than listing
+  // them.
+  bool no_answer_set = false;
 };
 
 // Answers the program's query, the atoms grounding left in
@@ -91,6 +94,9 @@ struct QueryResult {
 // a program whose answer sets are {p(1)} and {p(2)}. The answer is kNo. Each
 // answer set holds p of something, but neither p(1) nor p(2) holds in both. A
 // program with no query has no atom to hold, so it answers kNo as well.
+//
+// A program with no answer set answers kYes. ASP-Core-2 says every query of
+// such a program is true, there being no answer set left to fail it.
 //
 // Weak constraints leave only the optimal answer sets, the ones solve()
 // returns, and the query is asked of those.
