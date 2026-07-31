@@ -483,7 +483,7 @@ absl::StatusOr<std::vector<AnswerSet>> solve(const aspif::Program& prog,
   return answer_sets;
 }
 
-absl::StatusOr<QueryAnswer> answer_query(const aspif::Program& prog,
+absl::StatusOr<QueryResult> answer_query(const aspif::Program& prog,
                                          const SolveOptions& options) {
   Session session;
   RETURN_IF_ERROR(session.start(prog, options));
@@ -493,27 +493,35 @@ absl::StatusOr<QueryAnswer> answer_query(const aspif::Program& prog,
   // set first is also what tells that case apart from a query that holds. Both
   // leave the searches below with nothing to find.
   ASSIGN_OR_RETURN(const bool coherent, search.find());
-  if (!coherent) return QueryAnswer::kNoAnswerSet;
+  if (!coherent) return QueryResult{.answer = QueryAnswer::kNoAnswerSet};
 
   // An atom this answer set leaves out is already answered no, so only the ones
   // it holds are worth a search. That is what makes a query over a large
-  // predicate affordable, since one answer set usually leaves few standing.
-  std::vector<cvc5::Term> standing;
-  for (const cvc5::Term& atom : session.encoding.query) {
-    if (search.solver.getValue(atom).getBooleanValue()) {
-      standing.push_back(atom);
+  // predicate affordable, since one answer set usually leaves few standing. The
+  // formula and the atom it stands for are paired up here because the searches
+  // below take the formula and the answer names the atom. Encoding::query runs
+  // parallel to aspif::Program::query.
+  std::vector<std::pair<cvc5::Term, aspif::Lit>> standing;
+  for (size_t i = 0; i < session.encoding.query.size(); ++i) {
+    const cvc5::Term& formula = session.encoding.query[i];
+    if (search.solver.getValue(formula).getBooleanValue()) {
+      standing.emplace_back(formula, (*prog.query)[i]);
     }
   }
 
-  for (const cvc5::Term& atom : standing) {
+  QueryResult result;
+  for (const auto& [formula, atom] : standing) {
     // Asking about an atom means looking for an answer set without it. That
     // goes in a scope of its own rather than as an assumption, because find()
     // can make several solver calls and an assumption holds for one.
     search.push();
-    search.solver.assertFormula(session.tm.mkTerm(cvc5::Kind::NOT, {atom}));
+    search.solver.assertFormula(session.tm.mkTerm(cvc5::Kind::NOT, {formula}));
     ASSIGN_OR_RETURN(const bool refuted, search.find());
     search.pop();
-    if (!refuted) return QueryAnswer::kYes;
+    // Every atom that holds is an answer, so the search runs to the end rather
+    // than stopping at the first.
+    if (!refuted) result.holds.push_back(atom);
   }
-  return QueryAnswer::kNo;
+  result.answer = result.holds.empty() ? QueryAnswer::kNo : QueryAnswer::kYes;
+  return result;
 }

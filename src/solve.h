@@ -59,7 +59,7 @@ struct SolveOptions {
 absl::StatusOr<std::vector<AnswerSet>> solve(const aspif::Program& prog,
                                              const SolveOptions& options);
 
-// The answer to a program's query.
+// Whether a program's query holds.
 enum class QueryAnswer {
   // One of the atoms the query matched holds in every answer set.
   kYes,
@@ -69,6 +69,16 @@ enum class QueryAnswer {
   kNoAnswerSet,
 };
 
+// The answer to a program's query.
+struct QueryResult {
+  QueryAnswer answer = QueryAnswer::kNo;
+  // The atoms of aspif::Program::query that hold in every answer set, in the
+  // order grounding matched them. Each one stands for a substitution the query
+  // holds under. 'p(1). p(2). p(X)?' lists p(1) and p(2), which is to say X of
+  // 1 and X of 2. Non-empty exactly when `answer` is kYes.
+  std::vector<aspif::Lit> holds;
+};
+
 // Answers the program's query, the atoms grounding left in
 // aspif::Program::query.
 //
@@ -76,14 +86,15 @@ enum class QueryAnswer {
 // of them, not whether one of them holds a. So 'a | b. a?' answers kNo, because
 // b on its own is an answer set too.
 //
-// The atoms a non-ground query matched are asked about one at a time. Take
-// 'p(X)?' over a program whose answer sets are {p(1)} and {p(2)}. The answer is
-// kNo. Each answer set holds p of something, but neither p(1) nor p(2) holds in
-// both. A program with no query has no atom to hold, so it answers kNo as well.
+// The atoms a non-ground query matched are asked about one at a time, and every
+// one that holds throughout comes back in QueryResult::holds. Take 'p(X)?' over
+// a program whose answer sets are {p(1)} and {p(2)}. The answer is kNo. Each
+// answer set holds p of something, but neither p(1) nor p(2) holds in both. A
+// program with no query has no atom to hold, so it answers kNo as well.
 //
 // Weak constraints leave only the optimal answer sets, the ones solve()
 // returns, and the query is asked of those.
-absl::StatusOr<QueryAnswer> answer_query(const aspif::Program& prog,
+absl::StatusOr<QueryResult> answer_query(const aspif::Program& prog,
                                          const SolveOptions& options);
 
 #endif  // SOLVE_H_

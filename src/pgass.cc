@@ -70,6 +70,23 @@ void print_answer_set(const aspif::Program& prog, const AnswerSet& answer_set) {
   }
 }
 
+// Prints the atoms a query holds under, one per substitution, separated by
+// spaces. Grounding names every atom of a user-visible predicate, so a query
+// atom's name is the Output whose condition is that atom on its own.
+void print_query_matches(const aspif::Program& prog,
+                         const std::vector<aspif::Lit>& holds) {
+  const absl::flat_hash_set<aspif::Lit> answers(holds.begin(), holds.end());
+  bool first = true;
+  for (const aspif::Output& output : prog.outputs) {
+    if (output.condition.size() != 1) continue;
+    if (!answers.contains(output.condition.front())) continue;
+    if (!first) std::cout << ' ';
+    std::cout << output.name;
+    first = false;
+  }
+  std::cout << "\n";
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
@@ -176,16 +193,18 @@ int main(int argc, char** argv) {
   options.optimizer = *optimizer;
 
   // A query asks a yes or no question about all the answer sets at once, so a
-  // program with one gets an answer instead of a list of answer sets.
+  // program with one gets an answer instead of a list of answer sets. A yes is
+  // followed by the atoms it holds under.
   if (grounded->query.has_value()) {
     auto answer = answer_query(*grounded, options);
     if (!answer.ok()) {
       std::cerr << "pgass: solve error: " << answer.status().message() << "\n";
       return 1;
     }
-    switch (*answer) {
+    switch (answer->answer) {
       case QueryAnswer::kYes:
         std::cout << "yes\n";
+        print_query_matches(*grounded, answer->holds);
         break;
       case QueryAnswer::kNo:
         std::cout << "no\n";

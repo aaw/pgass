@@ -1,9 +1,10 @@
 ## Spec gaps
 
-* Report the substitutions a non-ground query holds under. `p(1). p(2). p(X)?`
-  answers yes, having found an instance that holds in every answer set, but
-  never says X is 1 and 2. solve.h already asks instance by instance, so the
-  answer is there to collect.
+* Answer a query yes against a program with no answer set. The spec says every
+  query is true there, and that its answer holds every substitution, since
+  there is no answer set to fail in. `p :- not p. p?` prints UNSATISFIABLE
+  instead. Printing every substitution is the hard part: the atoms are the ones
+  grounding matched, but a query with a variable ranges over the whole universe.
 
 ## Bugs
 

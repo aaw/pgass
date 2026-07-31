@@ -19,12 +19,22 @@
 #include "parse.h"
 #include "test_macros.h"
 
+using ::testing::ElementsAre;
 using ::testing::HasSubstr;
 using ::testing::IsEmpty;
 using ::testing::SizeIs;
 using ::testing::UnorderedElementsAre;
 
 namespace {
+
+// Parses, normalizes, and grounds `source`, the three steps every test here
+// takes before it solves anything.
+absl::StatusOr<aspif::Program> ground_source(const std::string& source) {
+  Parser parser(source);
+  ASSIGN_OR_RETURN(auto program, parser.parse_program());
+  RETURN_IF_ERROR(normalize(*program));
+  return ground(*program);
+}
 
 // One string per answer set: the names that answer set makes true, sorted and
 // separated by spaces, so that a test can state what it expects literally. The
@@ -78,10 +88,7 @@ absl::StatusOr<std::vector<std::string>> render_solutions(
 // keeps is up to cvc5.
 absl::StatusOr<std::vector<std::string>> solve_source(const std::string& source,
                                                       int max_answer_sets = 0) {
-  Parser parser(source);
-  ASSIGN_OR_RETURN(auto program, parser.parse_program());
-  RETURN_IF_ERROR(normalize(*program));
-  ASSIGN_OR_RETURN(aspif::Program grounded, ground(*program));
+  ASSIGN_OR_RETURN(aspif::Program grounded, ground_source(source));
 
   SolveOptions options;
   options.max_answer_sets = max_answer_sets;
@@ -104,15 +111,32 @@ absl::StatusOr<std::vector<std::string>> solve_source(const std::string& source,
   return linear;
 }
 
-// Parses, normalizes, grounds, and answers the query of `source`.
+// Whether the query of `source` holds.
 absl::StatusOr<QueryAnswer> query_source(const std::string& source) {
-  Parser parser(source);
-  ASSIGN_OR_RETURN(auto program, parser.parse_program());
-  RETURN_IF_ERROR(normalize(*program));
-  ASSIGN_OR_RETURN(aspif::Program grounded, ground(*program));
+  ASSIGN_OR_RETURN(aspif::Program grounded, ground_source(source));
+  ASSIGN_OR_RETURN(QueryResult result, answer_query(grounded, SolveOptions()));
+  return result.answer;
+}
 
-  SolveOptions options;
-  return answer_query(grounded, options);
+// The names of the atoms the query of `source` holds under, sorted, so that a
+// test can state them literally. The order answer_query reports them in follows
+// grounding, which is not part of the contract.
+absl::StatusOr<std::vector<std::string>> query_matches(
+    const std::string& source) {
+  ASSIGN_OR_RETURN(aspif::Program grounded, ground_source(source));
+  ASSIGN_OR_RETURN(QueryResult result, answer_query(grounded, SolveOptions()));
+
+  const absl::flat_hash_set<aspif::Lit> answers(result.holds.begin(),
+                                                result.holds.end());
+  std::vector<std::string> names;
+  for (const aspif::Output& output : grounded.outputs) {
+    if (output.condition.size() == 1 &&
+        answers.contains(output.condition.front())) {
+      names.push_back(output.name);
+    }
+  }
+  std::sort(names.begin(), names.end());
+  return names;
 }
 
 // A positive cycle holds only where something outside it offers support. Under
@@ -411,6 +435,46 @@ TEST(SolveTest, QueryWithAVariableAsksAboutEachMatch) {
   auto out = query_source("p(1). p(2). p(X)?");
   ASSERT_OK(out);
   EXPECT_EQ(*out, QueryAnswer::kYes);
+}
+
+// Every substitution the query holds under is reported, not just the first one
+// found. X of 1 and X of 2 both answer 'p(X)?' here.
+TEST(SolveTest, QueryReportsEverySubstitutionItHoldsUnder) {
+  auto out = query_matches("p(1). p(2). p(X)?");
+  ASSERT_OK(out);
+  EXPECT_THAT(*out, ElementsAre("p(1)", "p(2)"));
+}
+
+// A substitution that fails in some answer set is left out. Only p(1) is a
+// fact, so p(2) holds in one answer set and not the other.
+TEST(SolveTest, QueryLeavesOutASubstitutionThatFailsSomewhere) {
+  auto out = query_matches(R"(
+    p(1).
+    p(2) :- not q.
+    q :- not p(2).
+    p(X)?
+  )");
+  ASSERT_OK(out);
+  EXPECT_THAT(*out, ElementsAre("p(1)"));
+}
+
+// A query that holds under nothing reports nothing.
+TEST(SolveTest, QueryThatIsNoHoldsUnderNoSubstitution) {
+  auto out = query_matches(R"(
+    p(1) :- not p(2).
+    p(2) :- not p(1).
+    p(X)?
+  )");
+  ASSERT_OK(out);
+  EXPECT_THAT(*out, IsEmpty());
+}
+
+// A ground query holds under the empty substitution, which is the query atom
+// itself.
+TEST(SolveTest, GroundQueryReportsItsOwnAtom) {
+  auto out = query_matches("p(1). p(1)?");
+  ASSERT_OK(out);
+  EXPECT_THAT(*out, ElementsAre("p(1)"));
 }
 
 // Every answer set holds p of something, but neither p(1) nor p(2) holds in
