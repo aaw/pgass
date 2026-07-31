@@ -327,6 +327,55 @@ TEST_F(ParserTest, ParseBodyNafAggregate) {
   EXPECT_FALSE(agg1->naf);
 }
 
+// A left guard that starts with an identifier looks like a literal to the
+// body item parser, so it has to back up when a binop follows.
+TEST_F(ParserTest, ParseAggregateWithConstantLeftGuard) {
+  Parser parser("q :- a > #count{ X : p(X) } >= 1.");
+  auto stmt_status = parser.parse_statement();
+  ASSERT_OK(stmt_status);
+  auto& body = (*stmt_status)->body;
+  ASSERT_EQ(body->items->size(), 1);
+
+  auto* agg = dynamic_cast<Aggregate*>(body->items->at(0).get());
+  ASSERT_NE(agg, nullptr);
+  auto* lb = dynamic_cast<Atom*>(agg->lb_term.get());
+  ASSERT_NE(lb, nullptr);
+  EXPECT_EQ(lb->name, "a");
+  EXPECT_EQ(agg->lb_op, BinopType::kGREATER);
+  EXPECT_EQ(agg->ub_op, BinopType::kGREATER_OR_EQ);
+}
+
+TEST_F(ParserTest, ParseAggregateWithFunctionLeftGuard) {
+  Parser parser("q :- f(1) < #count{ X : p(X) }.");
+  auto stmt_status = parser.parse_statement();
+  ASSERT_OK(stmt_status);
+  auto& body = (*stmt_status)->body;
+  ASSERT_EQ(body->items->size(), 1);
+
+  auto* agg = dynamic_cast<Aggregate*>(body->items->at(0).get());
+  ASSERT_NE(agg, nullptr);
+  auto* lb = dynamic_cast<Atom*>(agg->lb_term.get());
+  ASSERT_NE(lb, nullptr);
+  EXPECT_EQ(lb->name, "f");
+  ASSERT_NE(lb->args, nullptr);
+  EXPECT_EQ(lb->args->size(), 1);
+  EXPECT_EQ(agg->lb_op, BinopType::kLESS);
+}
+
+// A comparison of two terms is still a builtin atom, not an aggregate with a
+// guard and a missing function.
+TEST_F(ParserTest, ParseBodyBuiltinAtomOverConstants) {
+  Parser parser("q :- a > b.");
+  auto stmt_status = parser.parse_statement();
+  ASSERT_OK(stmt_status);
+  auto& body = (*stmt_status)->body;
+  ASSERT_EQ(body->items->size(), 1);
+
+  auto* naf_lit = dynamic_cast<NafLiteral*>(body->items->at(0).get());
+  ASSERT_NE(naf_lit, nullptr);
+  EXPECT_NE(dynamic_cast<BuiltinAtom*>(naf_lit->literal.get()), nullptr);
+}
+
 // '#count{ }' is the empty set. The grammar lets an aggregate element be
 // empty, which would read '{ }' as a set holding one empty tuple and count it.
 TEST_F(ParserTest, ParseAggregateWithNoElements) {

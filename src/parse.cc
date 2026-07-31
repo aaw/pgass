@@ -381,9 +381,22 @@ absl::StatusOr<std::unique_ptr<Body>> Parser::parse_body() {
       LexerCheckpoint try_naf_literal(lexer_);
       auto naf_literal = parse_naf_literal();
       if (naf_literal.ok()) {
-        try_naf_literal.commit();
-        found_naf_literal = true;
-        body->items->push_back(std::move(*naf_literal));
+        /* A binop right after the literal means this item is really an
+           aggregate with a left guard, like "a > #count{ X : p(X) } >= 1".
+           A builtin atom swallows its own binop, so one left over here says
+           the literal parser stopped on a guard term. Back up and let the
+           aggregate parser read the whole item.
+        */
+        bool binop_follows;
+        {
+          LexerCheckpoint peek_binop(lexer_);
+          binop_follows = parse_binop().ok();
+        }
+        if (!binop_follows) {
+          try_naf_literal.commit();
+          found_naf_literal = true;
+          body->items->push_back(std::move(*naf_literal));
+        }
       }
     }
 
