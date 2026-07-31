@@ -91,6 +91,50 @@ void propagate_naf_literal(const NafLiteral* naf_lit,
   }
 }
 
+// Records in `vars` the head variables the body has to bind. A disjunction's
+// are all of them. A choice's are the ones in its bounds plus the ones its
+// elements leave unbound. An element's conditions bind its own locals, so the X
+// of '{ p(X) : d(X) }' asks nothing of the body.
+void collect_head_vars(const Head& head,
+                       const absl::flat_hash_set<std::string_view>& bound_vars,
+                       absl::flat_hash_set<std::string_view>& vars) {
+  switch (head.kind) {
+    case Head::DisjunctionKind: {
+      const auto& disjunction = static_cast<const Disjunction&>(head);
+      for (const auto& literal : disjunction.literals) {
+        collect::collect_variables(*literal, vars);
+      }
+      break;
+    }
+    case Head::ChoiceKind: {
+      const auto& choice = static_cast<const Choice&>(head);
+      if (choice.lb_term) collect::collect_variables(*choice.lb_term, vars);
+      if (choice.ub_term) collect::collect_variables(*choice.ub_term, vars);
+      if (choice.elements == nullptr) break;
+
+      for (const auto& element : *(choice.elements)) {
+        absl::flat_hash_set<std::string_view> elem_bound_vars = bound_vars;
+        absl::flat_hash_set<std::string_view> elem_vars;
+        std::size_t prev_num_elem_bound = 0;
+        do {
+          prev_num_elem_bound = elem_bound_vars.size();
+          // '{ p(1) }' has no condition to bind anything.
+          if (element->conditions == nullptr) break;
+          for (const auto& condition : *(element->conditions)) {
+            propagate_naf_literal(condition.get(), elem_bound_vars, elem_vars);
+          }
+        } while (prev_num_elem_bound < elem_bound_vars.size());
+
+        collect::collect_variables(*element->literal, elem_vars);
+        for (std::string_view v : elem_vars) {
+          if (!elem_bound_vars.contains(v)) vars.insert(v);
+        }
+      }
+      break;
+    }
+  }
+}
+
 // Returns "line N: <source line text>" for the line at byte offset pos.
 std::string format_source_line(std::string_view source, size_t pos) {
   size_t clamped = std::min(pos, source.size());
@@ -142,14 +186,14 @@ std::string head_description(const Statement& stmt) {
 absl::Status verify_safe(const Program& prog) {
   std::string_view source = prog.source;
   for (const auto& statement : *(prog.statements)) {
-    if (statement->body == nullptr) continue;
-
     absl::flat_hash_set<std::string_view> bound_vars, vars;
     absl::flat_hash_set<Aggregate*> bound_aggregates, aggregates;
 
     std::size_t prev_num_bound = 0;
     do {
       prev_num_bound = bound_vars.size();
+      // A fact has no body to bind anything, so only its head is left to check.
+      if (statement->body == nullptr) break;
       for (const auto& item : *(statement->body->items)) {
         switch (item->kind) {
           case BodyItem::NafLiteralKind: {
@@ -212,6 +256,13 @@ absl::Status verify_safe(const Program& prog) {
         }
       }
     } while (prev_num_bound < bound_vars.size());
+
+    // A head variable is safe only if the body binds it. 'p(X) :- q(1).' never
+    // says which X to derive. Grounding rejects that rule only once it reaches
+    // it, which it never does when the body cannot hold.
+    if (statement->head != nullptr) {
+      collect_head_vars(*statement->head, bound_vars, vars);
+    }
 
     // A weak constraint's weight, level, and distinctness terms must be bound
     // by the body, same as any other variable use: they're the "head" of a

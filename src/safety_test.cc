@@ -100,7 +100,7 @@ TEST_F(SafetyTest, TestAggregationBoundPropagation) {
   // *  A is bound by the #sum aggregation's binding.
   // *  Finally, B is bound by A's binding.
   std::string_view src =
-      "p(X,Y) :- q(X), Z = X + 2, #sum{S : S = Z + 3} = A, B = A + 1.";
+      "p(X,B) :- q(X), Z = X + 2, #sum{S : S = Z + 3} = A, B = A + 1.";
   Parser parser(src);
   auto prog = parser.parse_program();
   ASSERT_OK(prog);
@@ -112,7 +112,7 @@ TEST_F(SafetyTest, TestAggregationBoundAlmostPropagation) {
   // includes a reference to an unbound "C") so binding propagation to B never
   // happens.
   std::string_view src =
-      "p(X,Y) :- q(X), Z = X + 2, #sum{S : S = Z + C + 3} = A, B = A + 1.";
+      "p(X,B) :- q(X), Z = X + 2, #sum{S : S = Z + C + 3} = A, B = A + 1.";
   Parser parser(src);
   auto prog = parser.parse_program();
   ASSERT_OK(prog);
@@ -197,6 +197,78 @@ TEST_F(SafetyTest, ErrorMessageUnsafeAggregate) {
   EXPECT_EQ(status.message(),
             "line 1: p(X) :- q(X), #sum{S : not r(S)}.\n"
             "unsafe aggregate in rule 'p/1'");
+}
+
+TEST_F(SafetyTest, TestUnboundHeadVariable) {
+  // Nothing says which X to derive. No q(1) fact means grounding never reaches
+  // the rule, so this check is the only one that catches it.
+  std::string_view src = "p(X) :- q(1).";
+  Parser parser(src);
+  auto prog = parser.parse_program();
+  ASSERT_OK(prog);
+  auto status = verify_safe(**prog);
+  ASSERT_THAT(status, Not(IsOk()));
+  EXPECT_EQ(status.message(),
+            "line 1: p(X) :- q(1).\n"
+            "unsafe variable in rule 'p/1': X");
+}
+
+TEST_F(SafetyTest, TestUnboundHeadVariableInFact) {
+  std::string_view src = "p(X).";
+  Parser parser(src);
+  auto prog = parser.parse_program();
+  ASSERT_OK(prog);
+  EXPECT_THAT(verify_safe(**prog), Not(IsOk()));
+}
+
+TEST_F(SafetyTest, TestUnboundDisjunctionVariable) {
+  std::string_view src = "p(X) | r(Y) :- q(X).";
+  Parser parser(src);
+  auto prog = parser.parse_program();
+  ASSERT_OK(prog);
+  auto status = verify_safe(**prog);
+  ASSERT_THAT(status, Not(IsOk()));
+  EXPECT_EQ(status.message(),
+            "line 1: p(X) | r(Y) :- q(X).\n"
+            "unsafe variable in rule 'p/1 | r/1': Y");
+}
+
+TEST_F(SafetyTest, TestChoiceElementConditionBindsItsOwnVariable) {
+  // X is local to the element and d(X) binds it there, so the body owes it
+  // nothing.
+  std::string_view src = "d(1). { p(X) : d(X) }.";
+  Parser parser(src);
+  auto prog = parser.parse_program();
+  ASSERT_OK(prog);
+  EXPECT_THAT(verify_safe(**prog), IsOk());
+}
+
+TEST_F(SafetyTest, TestUnboundChoiceElementVariable) {
+  std::string_view src = "{ p(X) }.";
+  Parser parser(src);
+  auto prog = parser.parse_program();
+  ASSERT_OK(prog);
+  auto status = verify_safe(**prog);
+  ASSERT_THAT(status, Not(IsOk()));
+  EXPECT_EQ(status.message(),
+            "line 1: { p(X) }.\n"
+            "unsafe variable in rule '{p/1}': X");
+}
+
+TEST_F(SafetyTest, TestUnboundChoiceBoundVariable) {
+  std::string_view src = "q(1). N <= { p(1) } :- q(1).";
+  Parser parser(src);
+  auto prog = parser.parse_program();
+  ASSERT_OK(prog);
+  EXPECT_THAT(verify_safe(**prog), Not(IsOk()));
+}
+
+TEST_F(SafetyTest, TestChoiceVariableBoundByBody) {
+  std::string_view src = "d(1). { p(X) } :- d(X).";
+  Parser parser(src);
+  auto prog = parser.parse_program();
+  ASSERT_OK(prog);
+  EXPECT_THAT(verify_safe(**prog), IsOk());
 }
 
 TEST_F(SafetyTest, TestRecursiveAggregateRejected) {

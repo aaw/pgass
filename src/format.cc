@@ -331,7 +331,7 @@ void format_body(std::string* fmt, const Body& body) {
 void format_weight(std::string* fmt, const Weight& weight) {
   format_term(fmt, *weight.weight);
   if (weight.level) {
-    absl::StrAppend(fmt, " AT ");
+    absl::StrAppend(fmt, "@");
     format_term(fmt, *weight.level);
   }
   if (weight.terms) {
@@ -344,10 +344,12 @@ void format_statement(std::string* fmt, const Statement& statement) {
   if (statement.weight) {
     absl::StrAppend(fmt, ":~ ");
     format_body(fmt, *statement.body);
-    absl::StrAppend(fmt, "[ ");
+    absl::StrAppend(fmt, ". [");
     format_weight(fmt, *statement.weight);
-    absl::StrAppend(fmt, " ]");
-  } else if (statement.head) {
+    absl::StrAppend(fmt, "]");
+    return;
+  }
+  if (statement.head) {
     format_head(fmt, *statement.head);
     if (statement.body) {
       absl::StrAppend(fmt, " :- ");

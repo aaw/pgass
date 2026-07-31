@@ -209,6 +209,16 @@ target_link_libraries(safety_test
     GTest::gmock
 )
 
+add_executable(format_test src/format_test.cc)
+target_compile_options(format_test PRIVATE ${PGASS_WARNINGS})
+target_link_libraries(format_test
+  PRIVATE
+    format_lib
+    parse_lib
+    GTest::gtest_main
+    GTest::gmock
+)
+
 add_executable(normalize_test src/normalize_test.cc)
 target_compile_options(normalize_test PRIVATE ${PGASS_WARNINGS})
 target_link_libraries(normalize_test
@@ -286,6 +296,7 @@ target_link_libraries(graph_test
 include(GoogleTest)
 gtest_discover_tests(parse_test)
 gtest_discover_tests(safety_test)
+gtest_discover_tests(format_test)
 gtest_discover_tests(normalize_test)
 gtest_discover_tests(collect_test)
 gtest_discover_tests(graph_test)

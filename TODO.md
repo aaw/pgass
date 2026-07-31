@@ -1,9 +1,11 @@
 ## Bugs
 
-* Parse a guard that is not a number on an aggregate's left side.
+* Parse a left-side aggregate guard that starts with an identifier.
   `q :- a > #count{ X : p(X) } >= 1.` is a parse error: the body item parser
-  reads `a` as a literal and never backs up to try an aggregate. The right side
-  takes any term already, and both sides should.
+  reads `a` as a literal and never backs up to try an aggregate. Same for a
+  function term, e.g. `f(1) < #count{...}`. Numbers, strings, variables, and
+  arithmetic like `1+1` already work on the left, and the right side takes any
+  term, so this is only about guards the literal parser swallows first.
 * Say something when arithmetic on a non-number drops a rule. `p(-a).` grounds
   to an empty program in silence. Decide first whether `-a` is a term or is
   ill-formed.
