@@ -397,6 +397,45 @@ TEST(SolveTest, NegativeMaxAnswerSetsIsAnError) {
               HasSubstr("cannot be negative"));
 }
 
+/* #min and #max range over the ASP-Core-2 order on terms, where every integer
+   sits below every symbolic constant. So the #min is at least 3 exactly in the
+   answer sets without p(1), and the #max is below a exactly in those without
+   p(a).
+
+   The empty answer set gets both. Its set of tuples is empty, which is
+   +infinity for #min and -infinity for #max. */
+TEST(SolveTest, MinMaxAggregatesRangeOverTheTermOrder) {
+  auto out = solve_source(R"(
+    { p(1) }. { p(3) }. { p(a) }.
+    q :- #min{ X : p(X) } >= 3.
+    r :- #max{ X : p(X) } < a.
+  )");
+  ASSERT_OK(out);
+  EXPECT_THAT(*out, UnorderedElementsAre("q r",                //
+                                         "p(1) r",             //
+                                         "p(3) q r",           //
+                                         "p(a) q",             //
+                                         "p(1) p(3) r",        //
+                                         "p(1) p(a)",          //
+                                         "p(3) p(a) q",        //
+                                         "p(1) p(3) p(a)"));
+}
+
+// A #max binds a variable to a term, so s takes whichever of 1 and a the answer
+// set has. The empty answer set derives no s. Its #max is -infinity, which
+// equals no term, so S has nothing to take.
+TEST(SolveTest, MaxAggregateBindsATermPerAnswerSet) {
+  auto out = solve_source(R"(
+    { p(1) }. { p(a) }.
+    s(S) :- #max{ X : p(X) } = S.
+  )");
+  ASSERT_OK(out);
+  EXPECT_THAT(*out, UnorderedElementsAre("",  //
+                                         "p(1) s(1)",
+                                         "p(a) s(a)",
+                                         "p(1) p(a) s(a)"));
+}
+
 // A weak constraint costs one unit per node picked, so the cheapest answer set
 // picks only the node the integrity constraint forces. The answer sets that
 // pick more are optimal for nothing and never come back.

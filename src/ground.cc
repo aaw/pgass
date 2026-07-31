@@ -1206,6 +1206,40 @@ struct AggTuple {
   std::vector<std::vector<aspif::Lit>> supports;
 };
 
+// Whether `function` is #min or #max, the two aggregates whose value is a term
+// rather than a number.
+bool is_minmax(AggregateFunctionType function) {
+  return function == AggregateFunctionType::kAGGREGATE_MIN ||
+         function == AggregateFunctionType::kAGGREGATE_MAX;
+}
+
+// What a #min or #max evaluates to: one of the terms its tuples produced, or
+// the infinity an empty set gives. ASP-Core-2 puts -infinity below every term
+// and +infinity above every one. Neither equals a term.
+struct MinMaxValue {
+  enum Kind { kNegInf, kTerm, kPosInf };
+
+  Kind kind;
+  Sym term = kNoSym;  // set only when kind == kTerm
+};
+
+// Whether 'value op guard' holds, e.g. true for the 'a >= 1' of a #max over
+// the terms 1 and a.
+bool minmax_holds(BinopType op, const MinMaxValue& value, Sym guard,
+                  const Symbols& syms) {
+  switch (value.kind) {
+    case MinMaxValue::kTerm:
+      return builtin_holds(op, value.term, guard, syms);
+    case MinMaxValue::kPosInf:
+      return op == BinopType::kGREATER || op == BinopType::kGREATER_OR_EQ ||
+             op == BinopType::kUNEQUAL;
+    case MinMaxValue::kNegInf:
+      return op == BinopType::kLESS || op == BinopType::kLESS_OR_EQ ||
+             op == BinopType::kUNEQUAL;
+  }
+  return false;  // unreachable
+}
+
 // Grounds an aggregate's elements against the store: the distinct tuples they
 // can produce, in first-produced order. ASP-Core-2 aggregates range over a
 // *set* of tuples, so two elements, or two groundings of one element, that
@@ -1243,6 +1277,11 @@ absl::StatusOr<std::vector<AggTuple>> collect_agg_tuples(
               return absl::OkStatus();
             }
             weight = syms.number_of(tuple[0]);
+          } else if (is_minmax(agg.function) && tuple.empty()) {
+            // #min and #max read a tuple's first term, so a tuple with no
+            // terms is in neither. An element that is all condition, like the
+            // '#min{ : p }' counting whether p holds, produces one.
+            return absl::OkStatus();
           }
 
           auto [it, inserted] = seen.try_emplace(tuple, tuples.size());
@@ -1282,14 +1321,11 @@ bool elements_use_negation(const Aggregate& agg) {
   return false;
 }
 
-// The value the aggregate takes in every answer set, when grounding can work
-// that out on its own, e.g. the 2 of '#count{ X : p(X) }' over the facts p(1)
-// and p(2). Nullopt means the solver still has a say.
-//
-// Every tuple has to be settled for the value to be, and a tuple is settled
-// when one of its supports came out empty: every literal in that support was a
-// fact, so the tuple is in the set whatever the solver decides. One tuple whose
-// supports all carry a literal is enough to leave the value open.
+// Whether the set an aggregate ranges over is the same in every answer set. A
+// tuple is settled when one of its supports came out empty: every literal in
+// that support was a fact, so the tuple is in the set whatever the solver
+// decides. One tuple whose supports all carry a literal is enough to leave the
+// set open.
 //
 // Element conditions must be free of 'not' for any of this to hold. safety.cc
 // keeps an aggregate's un-negated predicates out of the rule's own component,
@@ -1297,15 +1333,9 @@ bool elements_use_negation(const Aggregate& agg) {
 // leaves negated ones alone: 'not q(X)' inside an element can point at a
 // predicate that has no atoms yet, which would read here as a support that
 // nothing can take away.
-std::optional<int64_t> settled_agg_value(const Aggregate& agg,
-                                         const std::vector<AggTuple>& tuples) {
-  // #min and #max are rejected further on; their value is not this sum.
-  if (agg.function != AggregateFunctionType::kAGGREGATE_COUNT &&
-      agg.function != AggregateFunctionType::kAGGREGATE_SUM) {
-    return std::nullopt;
-  }
-  if (elements_use_negation(agg)) return std::nullopt;
-  int64_t value = 0;
+bool set_is_settled(const Aggregate& agg,
+                    const std::vector<AggTuple>& tuples) {
+  if (elements_use_negation(agg)) return false;
   for (const AggTuple& tuple : tuples) {
     bool settled = false;
     for (const std::vector<aspif::Lit>& support : tuple.supports) {
@@ -1314,8 +1344,39 @@ std::optional<int64_t> settled_agg_value(const Aggregate& agg,
         break;
       }
     }
-    if (!settled) return std::nullopt;
-    value += tuple.weight;
+    if (!settled) return false;
+  }
+  return true;
+}
+
+// The value a #count or #sum takes in every answer set, when grounding can work
+// that out on its own, e.g. the 2 of '#count{ X : p(X) }' over the facts p(1)
+// and p(2). Nullopt means the solver still has a say.
+std::optional<int64_t> settled_agg_value(const Aggregate& agg,
+                                         const std::vector<AggTuple>& tuples) {
+  if (!set_is_settled(agg, tuples)) return std::nullopt;
+  int64_t value = 0;
+  for (const AggTuple& tuple : tuples) value += tuple.weight;
+  return value;
+}
+
+// The value a #min or #max takes in every answer set, worked out the same way,
+// over the term order instead of a sum. An empty set is an infinity.
+std::optional<MinMaxValue> settled_minmax_value(
+    const Aggregate& agg, const std::vector<AggTuple>& tuples,
+    const Symbols& syms) {
+  if (!set_is_settled(agg, tuples)) return std::nullopt;
+  const bool want_min = agg.function == AggregateFunctionType::kAGGREGATE_MIN;
+  MinMaxValue value{.kind = want_min ? MinMaxValue::kPosInf
+                                     : MinMaxValue::kNegInf};
+  for (const AggTuple& tuple : tuples) {
+    const Sym first = tuple.tuple.front();
+    if (value.kind != MinMaxValue::kTerm) {
+      value = MinMaxValue{.kind = MinMaxValue::kTerm, .term = first};
+      continue;
+    }
+    const int c = syms.compare(first, value.term);
+    if (want_min ? c < 0 : c > 0) value.term = first;
   }
   return value;
 }
@@ -1323,6 +1384,33 @@ std::optional<int64_t> settled_agg_value(const Aggregate& agg,
 // A cap on how many values an aggregate may bind a variable to: each value
 // costs one ground instance of the rule.
 constexpr size_t kMaxAggregateValues = 4096;
+
+// The terms a #min or #max can take, in ascending order. Its value is the first
+// term of one of its tuples.
+//
+// An empty set gives an infinity, which is no term of the program and equal to
+// none, so it binds nothing: 'q(S) :- #min{ X : p(X) } = S.' derives no q when
+// nothing supports p.
+absl::StatusOr<std::vector<Sym>> minmax_values(
+    const Aggregate& agg, const std::vector<AggTuple>& tuples, Symbols& syms) {
+  std::optional<MinMaxValue> settled = settled_minmax_value(agg, tuples, syms);
+  if (settled.has_value()) {
+    if (settled->kind != MinMaxValue::kTerm) return std::vector<Sym>{};
+    return std::vector<Sym>{settled->term};
+  }
+
+  std::vector<Sym> values;
+  for (const AggTuple& tuple : tuples) values.push_back(tuple.tuple.front());
+  std::sort(values.begin(), values.end(),
+            [&syms](Sym a, Sym b) { return syms.compare(a, b) < 0; });
+  values.erase(std::unique(values.begin(), values.end()), values.end());
+  if (values.size() > kMaxAggregateValues) {
+    return absl::ResourceExhaustedError(absl::StrCat(
+        "an aggregate whose value binds a variable can take more than ",
+        kMaxAggregateValues, " different values"));
+  }
+  return values;
+}
 
 // The values an aggregate can take, in ascending order. Which tuples are in
 // the set is up to the solver, so the value is the sum of the weights of some
@@ -1332,12 +1420,14 @@ constexpr size_t kMaxAggregateValues = 4096;
 // A value no answer set reaches, e.g. the 0 of a #count over a tuple backed
 // by a fact, is harmless: its rule instance carries the literals that check
 // for that value, which no answer set satisfies.
-absl::StatusOr<std::vector<int64_t>> possible_values(
-    const Aggregate& agg, const std::vector<AggTuple>& tuples) {
+absl::StatusOr<std::vector<Sym>> possible_values(
+    const Aggregate& agg, const std::vector<AggTuple>& tuples, Symbols& syms) {
+  if (is_minmax(agg.function)) return minmax_values(agg, tuples, syms);
+
   // An aggregate grounding has settled takes one value and no other, e.g. the
   // 2 that 'q(S) :- #count{ X : p(X) } = S.' binds S to over two p facts.
   std::optional<int64_t> settled = settled_agg_value(agg, tuples);
-  if (settled.has_value()) return std::vector<int64_t>{*settled};
+  if (settled.has_value()) return std::vector<Sym>{syms.number(*settled)};
   absl::btree_set<int64_t> reachable = {0};
   for (const AggTuple& tuple : tuples) {
     absl::btree_set<int64_t> extended = reachable;
@@ -1349,7 +1439,10 @@ absl::StatusOr<std::vector<int64_t>> possible_values(
     }
     reachable = std::move(extended);
   }
-  return std::vector<int64_t>(reachable.begin(), reachable.end());
+  std::vector<Sym> values;
+  values.reserve(reachable.size());
+  for (int64_t value : reachable) values.push_back(syms.number(value));
+  return values;
 }
 
 // The variables an aggregate binds to its own value, e.g. the S of
@@ -1407,11 +1500,11 @@ absl::StatusOr<std::vector<Instance>> expand_over_values(
   for (const Instance& instance : instances) {
     ASSIGN_OR_RETURN(std::vector<AggTuple> tuples,
                      collect_agg_tuples(agg, instance.binding, store, syms));
-    ASSIGN_OR_RETURN(std::vector<int64_t> values, possible_values(agg, tuples));
-    for (int64_t value : values) {
+    ASSIGN_OR_RETURN(std::vector<Sym> values,
+                     possible_values(agg, tuples, syms));
+    for (Sym value : values) {
       Instance next = instance;
-      const Sym sym = syms.number(value);
-      for (size_t slot : outputs) next.binding.set(slot, sym);
+      for (size_t slot : outputs) next.binding.set(slot, value);
       // The value can complete an assignment, e.g. the 'T = S + 1' of
       // 'q(T) :- #count{X : p(X)} = S, T = S + 1.'
       BindingTrail trail(next.binding);
@@ -1501,6 +1594,104 @@ std::vector<aspif::WeightedLit> ground_agg_elements(
   return weighted;
 }
 
+// The literal meaning "some tuple whose first term `wanted` accepts is in the
+// set". A fresh atom with one rule per accepted tuple, which is what gives it
+// the "some".
+//
+// No accepted tuple leaves the atom with no rule at all, so it is false. That
+// is where an empty set's infinities come from: '#min{ } <= u' is this literal
+// and so fails, and '#min{ } >= u' negates it and so holds.
+aspif::Lit some_tuple_in_set(const std::vector<AggTuple>& tuples,
+                             const std::vector<aspif::WeightedLit>& lits,
+                             absl::FunctionRef<bool(Sym)> wanted,
+                             aspif::Program& result) {
+  std::vector<aspif::Lit> accepted;
+  for (size_t i = 0; i < tuples.size(); ++i) {
+    if (wanted(tuples[i].tuple.front())) accepted.push_back(lits[i].lit);
+  }
+  // One accepted tuple needs no atom of its own: its literal already says
+  // exactly "this tuple is in the set", and it is the only one that could be.
+  if (accepted.size() == 1) return accepted.front();
+
+  aspif::Atom atom = result.new_atom();
+  for (aspif::Lit lit : accepted) {
+    aspif::Rule rule;
+    rule.head = {atom};
+    rule.body = {lit};
+    result.rules.push_back(std::move(rule));
+  }
+  return atom;
+}
+
+// The comparison that holds exactly when `op` fails, e.g. '<' for '>='.
+BinopType negated(BinopType op) {
+  switch (op) {
+    case BinopType::kLESS:
+      return BinopType::kGREATER_OR_EQ;
+    case BinopType::kLESS_OR_EQ:
+      return BinopType::kGREATER;
+    case BinopType::kGREATER:
+      return BinopType::kLESS_OR_EQ;
+    case BinopType::kGREATER_OR_EQ:
+      return BinopType::kLESS;
+    case BinopType::kEQUAL:
+      return BinopType::kUNEQUAL;
+    case BinopType::kUNEQUAL:
+      return BinopType::kEQUAL;
+  }
+  return op;  // unreachable
+}
+
+// The literal standing for one comparison of a #min or #max value against
+// `guard`, e.g. the '> 3' of '#min{ X : p(X) } > 3'. Only the four ordering
+// comparisons come here. '=' and '!=' are built out of two of these.
+//
+// A #min is at or below `guard` exactly when some tuple is, and above it
+// exactly when no tuple is at or below it, so one search over the tuples
+// answers either way round. A #max mirrors both.
+aspif::Lit minmax_compare(bool is_min, BinopType op, Sym guard,
+                          const std::vector<AggTuple>& tuples,
+                          const std::vector<aspif::WeightedLit>& lits,
+                          const Symbols& syms, aspif::Program& result) {
+  const bool wants_larger =
+      op == BinopType::kGREATER || op == BinopType::kGREATER_OR_EQ;
+  // A #min searches for the tuples that break a lower guard, and a #max for
+  // those that break an upper one. Both search for the opposite comparison.
+  const bool negate = is_min == wants_larger;
+  const BinopType search = negate ? negated(op) : op;
+  const aspif::Lit some = some_tuple_in_set(
+      tuples, lits,
+      [&](Sym value) { return builtin_holds(search, value, guard, syms); },
+      result);
+  return negate ? -some : some;
+}
+
+// One comparison a #min or #max value must pass, read as 'value op term'. The
+// lower side of a '3 <= #min{...}' is swapped round into '>= 3', so both of an
+// aggregate's guards read the same way.
+struct Guard {
+  BinopType op;
+  Sym term;
+};
+
+// The same comparison read from the other side, e.g. '>=' for '<='.
+BinopType with_sides_swapped(BinopType op) {
+  switch (op) {
+    case BinopType::kLESS:
+      return BinopType::kGREATER;
+    case BinopType::kLESS_OR_EQ:
+      return BinopType::kGREATER_OR_EQ;
+    case BinopType::kGREATER:
+      return BinopType::kLESS;
+    case BinopType::kGREATER_OR_EQ:
+      return BinopType::kLESS_OR_EQ;
+    case BinopType::kEQUAL:
+    case BinopType::kUNEQUAL:
+      return op;
+  }
+  return op;  // unreachable
+}
+
 // The aggregate bound requirements accumulated from its (up to two)
 // 'term binop' sides, e.g. "3 <= #count{...} < 7" contributes lower = 3 (from
 // '3 <=') and upper = 6 (from '< 7').
@@ -1509,6 +1700,9 @@ struct AggBounds {
   std::optional<int64_t> upper;    // the aggregate's value must be <= this.
   std::vector<int64_t> not_equal;  // the aggregate's value must differ from
                                    // each of these.
+  // Whether a bound rules every value out, which only a bound that is not a
+  // number can do. See apply_non_numeric_bound().
+  bool unsatisfiable = false;
 
   void apply_lower(int64_t k) {
     lower = lower.has_value() ? std::max(*lower, k) : k;
@@ -1519,6 +1713,7 @@ struct AggBounds {
 
   // Whether a value meets every bound collected here.
   bool hold_for(int64_t value) const {
+    if (unsatisfiable) return false;
     if (lower.has_value() && value < *lower) return false;
     if (upper.has_value() && value > *upper) return false;
     for (int64_t k : not_equal) {
@@ -1637,42 +1832,73 @@ aspif::Atom at_least(int64_t bound,
   return atom;
 }
 
-// Evaluates one side of an aggregate's bound, e.g. the '3' in
-// '3 <= #count{...}'.
-absl::StatusOr<std::optional<int64_t>> eval_bound(const Term& term,
-                                                  const Binding& binding,
-                                                  Symbols& syms) {
-  // In a '#count{...} = S', S holds the value this rule instance checks for:
-  // find_instances() split the instance over the values the aggregate can
-  // take.
-  ASSIGN_OR_RETURN(std::optional<Sym> value, eval_term(term, binding, syms));
-  if (!value.has_value()) return std::nullopt;
-  if (!syms.is_number(*value)) {
-    return absl::InvalidArgumentError("an aggregate bound must be a number");
-  }
-  return syms.number_of(*value);
+// Folds a bound that is not a number into `bounds`, e.g. the 'a' of
+// '#count{...} >= a'. A #count or #sum is always an integer, and ASP-Core-2
+// puts every integer below every other kind of term, so which integer it turns
+// out to be makes no difference. Any number stands in for it here.
+void apply_non_numeric_bound(Sym bound, BinopType op, bool bound_is_upper,
+                             AggBounds& bounds, Symbols& syms) {
+  const Sym any_number = syms.number(0);
+  const bool holds = bound_is_upper
+                         ? builtin_holds(op, any_number, bound, syms)
+                         : builtin_holds(op, bound, any_number, syms);
+  if (!holds) bounds.unsatisfiable = true;
 }
 
-// Reads the (up to two) bound sides of an aggregate under `binding`. Nullopt
-// means a bound is ill-formed, e.g. the '4 / 0' of '#count{...} >= 4 / X'
+// Reads the (up to two) bound sides of a #count or #sum under `binding`.
+// Nullopt means a bound is ill-formed, e.g. the '4 / 0' of '#count{...} >= 4/X'
 // under X = 0, which makes the enclosing rule instance nonexistent.
+//
+// In a '#count{...} = S', S holds the value this rule instance checks for:
+// find_instances() split the instance over the values the aggregate can take.
 absl::StatusOr<std::optional<AggBounds>> eval_agg_bounds(const Aggregate& agg,
                                                          const Binding& binding,
                                                          Symbols& syms) {
   AggBounds bounds;
   if (agg.lb_term != nullptr) {
-    ASSIGN_OR_RETURN(std::optional<int64_t> k,
-                     eval_bound(*agg.lb_term, binding, syms));
+    ASSIGN_OR_RETURN(std::optional<Sym> k,
+                     eval_term(*agg.lb_term, binding, syms));
     if (!k.has_value()) return std::nullopt;
-    apply_lower_bound(*k, agg.lb_op, bounds);
+    if (syms.is_number(*k)) {
+      apply_lower_bound(syms.number_of(*k), agg.lb_op, bounds);
+    } else {
+      apply_non_numeric_bound(*k, agg.lb_op, /*bound_is_upper=*/false, bounds,
+                              syms);
+    }
   }
   if (agg.ub_term != nullptr) {
-    ASSIGN_OR_RETURN(std::optional<int64_t> k,
-                     eval_bound(*agg.ub_term, binding, syms));
+    ASSIGN_OR_RETURN(std::optional<Sym> k,
+                     eval_term(*agg.ub_term, binding, syms));
     if (!k.has_value()) return std::nullopt;
-    apply_upper_bound(*k, agg.ub_op, bounds);
+    if (syms.is_number(*k)) {
+      apply_upper_bound(syms.number_of(*k), agg.ub_op, bounds);
+    } else {
+      apply_non_numeric_bound(*k, agg.ub_op, /*bound_is_upper=*/true, bounds,
+                              syms);
+    }
   }
   return bounds;
+}
+
+// Reads the (up to two) guards of a #min or #max under `binding`. A guard is
+// any term, since the value it is compared against is one too. Nullopt means
+// the same as it does for eval_agg_bounds().
+absl::StatusOr<std::optional<std::vector<Guard>>> eval_minmax_guards(
+    const Aggregate& agg, const Binding& binding, Symbols& syms) {
+  std::vector<Guard> guards;
+  if (agg.lb_term != nullptr) {
+    ASSIGN_OR_RETURN(std::optional<Sym> term,
+                     eval_term(*agg.lb_term, binding, syms));
+    if (!term.has_value()) return std::nullopt;
+    guards.push_back({.op = with_sides_swapped(agg.lb_op), .term = *term});
+  }
+  if (agg.ub_term != nullptr) {
+    ASSIGN_OR_RETURN(std::optional<Sym> term,
+                     eval_term(*agg.ub_term, binding, syms));
+    if (!term.has_value()) return std::nullopt;
+    guards.push_back({.op = agg.ub_op, .term = *term});
+  }
+  return guards;
 }
 
 // Whether an aggregate whose value grounding has settled holds, e.g. true for
@@ -1681,9 +1907,26 @@ absl::StatusOr<std::optional<AggBounds>> eval_agg_bounds(const Aggregate& agg,
 std::optional<bool> settled_agg_holds(const Aggregate& agg,
                                       const AggBounds& bounds,
                                       const std::vector<AggTuple>& tuples) {
+  // A bound no integer meets, e.g. the 'a' of '#count{...} >= a', settles the
+  // aggregate whatever the solver does with its value.
+  if (bounds.unsatisfiable) return agg.naf;
   std::optional<int64_t> value = settled_agg_value(agg, tuples);
   if (!value.has_value()) return std::nullopt;
   const bool holds = bounds.hold_for(*value);
+  return agg.naf ? !holds : holds;
+}
+
+// The same for a #min or #max, over the term order.
+std::optional<bool> settled_minmax_holds(const Aggregate& agg,
+                                         const std::vector<Guard>& guards,
+                                         const std::vector<AggTuple>& tuples,
+                                         const Symbols& syms) {
+  std::optional<MinMaxValue> value = settled_minmax_value(agg, tuples, syms);
+  if (!value.has_value()) return std::nullopt;
+  bool holds = true;
+  for (const Guard& guard : guards) {
+    if (!minmax_holds(guard.op, *value, guard.term, syms)) holds = false;
+  }
   return agg.naf ? !holds : holds;
 }
 
@@ -1704,6 +1947,14 @@ absl::StatusOr<std::optional<bool>> settle_aggregate(const Aggregate& agg,
   // A 'not' inside an element points at a predicate the same way; see
   // settled_agg_value().
   if (elements_use_negation(agg)) return std::nullopt;
+  if (is_minmax(agg.function)) {
+    ASSIGN_OR_RETURN(std::optional<std::vector<Guard>> guards,
+                     eval_minmax_guards(agg, binding, syms));
+    if (!guards.has_value()) return std::nullopt;
+    ASSIGN_OR_RETURN(std::vector<AggTuple> tuples,
+                     collect_agg_tuples(agg, binding, store, syms));
+    return settled_minmax_holds(agg, *guards, tuples, syms);
+  }
   ASSIGN_OR_RETURN(std::optional<AggBounds> bounds,
                    eval_agg_bounds(agg, binding, syms));
   if (!bounds.has_value()) return std::nullopt;
@@ -1712,12 +1963,65 @@ absl::StatusOr<std::optional<bool>> settle_aggregate(const Aggregate& agg,
   return settled_agg_holds(agg, *bounds, tuples);
 }
 
+// The literals one guard on a #min or #max contributes to the enclosing rule's
+// body. The four ordering comparisons give one literal each. '=' asks for two,
+// since a value equals the guard when it is neither above nor below it, and
+// '!=' negates that pair.
+std::vector<aspif::Lit> minmax_guard_lits(
+    bool is_min, const Guard& guard, const std::vector<AggTuple>& tuples,
+    const std::vector<aspif::WeightedLit>& lits, const Symbols& syms,
+    aspif::Program& result) {
+  if (guard.op != BinopType::kEQUAL && guard.op != BinopType::kUNEQUAL) {
+    return {minmax_compare(is_min, guard.op, guard.term, tuples, lits, syms,
+                           result)};
+  }
+  aspif::Lit not_above = minmax_compare(is_min, BinopType::kLESS_OR_EQ,
+                                        guard.term, tuples, lits, syms, result);
+  aspif::Lit not_below = minmax_compare(is_min, BinopType::kGREATER_OR_EQ,
+                                        guard.term, tuples, lits, syms, result);
+  if (guard.op == BinopType::kEQUAL) return {not_above, not_below};
+  return {negate_conjunction({not_above, not_below}, result)};
+}
+
+// Grounds one #min or #max body item into the literals its guards ask of the
+// enclosing rule's body, as ground_aggregate() does for the other two.
+absl::StatusOr<std::optional<std::vector<aspif::Lit>>> ground_minmax(
+    const Aggregate& agg, const Binding& outer_binding, const Store& store,
+    Symbols& syms, aspif::Program& result) {
+  ASSIGN_OR_RETURN(std::optional<std::vector<Guard>> maybe_guards,
+                   eval_minmax_guards(agg, outer_binding, syms));
+  if (!maybe_guards.has_value()) return std::nullopt;
+  const std::vector<Guard>& guards = *maybe_guards;
+
+  ASSIGN_OR_RETURN(std::vector<AggTuple> tuples,
+                   collect_agg_tuples(agg, outer_binding, store, syms));
+  std::optional<bool> settled =
+      settled_minmax_holds(agg, guards, tuples, syms);
+  if (settled.has_value()) {
+    if (!*settled) return std::nullopt;
+    return std::vector<aspif::Lit>{};
+  }
+
+  const std::vector<aspif::WeightedLit> lits =
+      ground_agg_elements(tuples, result);
+  const bool is_min = agg.function == AggregateFunctionType::kAGGREGATE_MIN;
+  std::vector<aspif::Lit> extra;
+  for (const Guard& guard : guards) {
+    std::vector<aspif::Lit> lits_for_guard =
+        minmax_guard_lits(is_min, guard, tuples, lits, syms, result);
+    extra.insert(extra.end(), lits_for_guard.begin(), lits_for_guard.end());
+  }
+
+  if (!agg.naf) return extra;
+  return std::vector<aspif::Lit>{negate_conjunction(extra, result)};
+}
+
 // Grounds one Aggregate body item into the literals that must be appended to
 // the enclosing rule's body for the aggregate to hold, e.g. '#count{X :
 // p(X)} >= 2' grounds to a single literal referencing a fresh atom defined
-// by an ASPIF weight-body rule. Only #count and #sum are supported: they map
-// directly onto ASPIF's weight body, whereas #min/#max would need a
-// different (guess-and-check) encoding.
+// by an ASPIF weight-body rule. #count and #sum map onto that weight body;
+// #min and #max range over the term order instead, and ground_minmax() encodes
+// those.
 //
 // An aggregate whose value grounding has settled needs no encoding at all: it
 // either holds in every answer set, and so asks nothing of the rule's body, or
@@ -1729,10 +2033,8 @@ absl::StatusOr<std::optional<bool>> settle_aggregate(const Aggregate& agg,
 absl::StatusOr<std::optional<std::vector<aspif::Lit>>> ground_aggregate(
     const Aggregate& agg, const Binding& outer_binding, const Store& store,
     Symbols& syms, aspif::Program& result) {
-  if (agg.function == AggregateFunctionType::kAGGREGATE_MAX ||
-      agg.function == AggregateFunctionType::kAGGREGATE_MIN) {
-    return absl::UnimplementedError(
-        "#min and #max aggregates are not supported yet");
+  if (is_minmax(agg.function)) {
+    return ground_minmax(agg, outer_binding, store, syms, result);
   }
 
   ASSIGN_OR_RETURN(std::optional<AggBounds> maybe_bounds,
@@ -1880,13 +2182,13 @@ absl::StatusOr<bool> ignored_parts_are_well_formed(const BodyParts& parts,
   }
   for (const Aggregate* aggregate : parts.aggregates) {
     if (aggregate->lb_term != nullptr) {
-      ASSIGN_OR_RETURN(std::optional<int64_t> k,
-                       eval_bound(*aggregate->lb_term, binding, syms));
+      ASSIGN_OR_RETURN(std::optional<Sym> k,
+                       eval_term(*aggregate->lb_term, binding, syms));
       if (!k.has_value()) return false;
     }
     if (aggregate->ub_term != nullptr) {
-      ASSIGN_OR_RETURN(std::optional<int64_t> k,
-                       eval_bound(*aggregate->ub_term, binding, syms));
+      ASSIGN_OR_RETURN(std::optional<Sym> k,
+                       eval_term(*aggregate->ub_term, binding, syms));
       if (!k.has_value()) return false;
     }
   }

@@ -910,10 +910,116 @@ TEST(GroundTest, ZeroSumWeightIsLeftOutOfTheWeightBody) {
   EXPECT_THAT(*out, HasSubstr("1 0 1 4 0 0\n"));
 }
 
-TEST(GroundTest, MinMaxAggregatesRejected) {
-  auto out = ground_source("p(1). q :- #max{ X : p(X) } >= 1.");
-  ASSERT_FALSE(out.ok());
-  EXPECT_THAT(std::string(out.status().message()), HasSubstr("#max"));
+TEST(GroundTest, MinAggregateOverFactsIsSettled) {
+  // Both p atoms are facts, so the set is the same in every answer set and
+  // grounding works the #min out itself. q is a fact and no rule mentions it.
+  auto out = ground_source("p(1). p(3). q :- #min{ X : p(X) } = 1.");
+  ASSERT_OK(out);
+  EXPECT_EQ(*out,
+            "asp 1 0 0\n"
+            "1 0 1 1 0 0\n"
+            "1 0 1 2 0 0\n"
+            "1 0 1 3 0 0\n"
+            "4 4 p(1) 1 1\n"
+            "4 4 p(3) 1 2\n"
+            "4 1 q 1 3\n"
+            "0\n");
+}
+
+TEST(GroundTest, MinMaxRangeOverTheTermOrder) {
+  // #min and #max compare terms, not just numbers, and ASP-Core-2 orders every
+  // integer below every symbolic constant. So the #max here is a, not 1.
+  auto out = ground_source("p(1). p(a). q :- #max{ X : p(X) } = a.");
+  ASSERT_OK(out);
+  EXPECT_THAT(*out, HasSubstr("4 1 q 1 3\n"));
+
+  auto missed = ground_source("p(1). p(a). q :- #max{ X : p(X) } = 1.");
+  ASSERT_OK(missed);
+  EXPECT_THAT(*missed, Not(HasSubstr("1 0 1 3")));
+}
+
+TEST(GroundTest, MinAggregateBindsItsValue) {
+  // The value a #min binds is a term like any other, so q takes the smallest
+  // one the elements produced.
+  auto out = ground_source("p(1). p(a). q(S) :- #min{ X : p(X) } = S.");
+  ASSERT_OK(out);
+  EXPECT_THAT(*out, HasSubstr("4 4 q(1) 1 3\n"));
+}
+
+TEST(GroundTest, EmptySetMakesMinAggregateInfinite) {
+  // Nothing supports p, so the set is empty, which is +infinity for #min and
+  // -infinity for #max. The #min bound holds and the #max one cannot, so the
+  // #max leaves its atom with no rule at all.
+  auto min_out = ground_source("q :- #min{ X : p(X) } >= 5.");
+  ASSERT_OK(min_out);
+  EXPECT_THAT(*min_out, HasSubstr("1 0 1 1 0 0\n"));
+
+  auto max_out = ground_source("q :- #max{ X : p(X) } >= 5.");
+  ASSERT_OK(max_out);
+  EXPECT_THAT(*max_out, Not(HasSubstr("1 0 1 1")));
+}
+
+TEST(GroundTest, EmptySetBindsNoVariable) {
+  // An empty set gives an infinity, which is no term of the program and equal
+  // to none, so S has nothing to take and the rule no ground instance.
+  auto out = ground_source("q(S) :- #min{ X : p(X) } = S.");
+  ASSERT_OK(out);
+  EXPECT_EQ(*out, "asp 1 0 0\n0\n");
+}
+
+TEST(GroundTest, MinAggregateOverChoicesIsLeftToTheSolver) {
+  // Neither p atom is settled, so the bound becomes a rule. The #min is at
+  // least 3 exactly when no tuple below 3 is in the set, which is when p(1) is
+  // false. Only p(1) is below 3, and a lone tuple needs no atom of its own, so
+  // atom 5 rests on the p(1) literal directly.
+  auto out = ground_source("{ p(1) }. { p(3) }. q :- #min{ X : p(X) } >= 3.");
+  ASSERT_OK(out);
+  EXPECT_EQ(*out,
+            "asp 1 0 0\n"
+            "1 0 2 1 2 0 0\n"
+            "1 0 2 3 4 0 0\n"
+            "1 0 1 5 0 1 -1\n"
+            "4 4 p(1) 1 1\n"
+            "4 4 p(3) 1 3\n"
+            "4 1 q 1 5\n"
+            "0\n");
+}
+
+TEST(GroundTest, NotMinAggregate) {
+  // '#min{...} < 3' holds exactly when p(1) holds, so negating it gives a rule
+  // resting on 'not p(1)'.
+  auto out = ground_source("{ p(1) }. q :- not #min{ X : p(X) } < 3.");
+  ASSERT_OK(out);
+  EXPECT_THAT(*out, HasSubstr("1 0 1 1 0 1 -2\n"));
+}
+
+TEST(GroundTest, NonNumericBoundIsComparedByTermOrder) {
+  // A bound is a term, so 'aa' is a legal one. The #max is b, which outranks
+  // aa lexicographically, so q holds.
+  auto out = ground_source("p(1). p(b). q :- #max{ X : p(X) } >= aa.");
+  ASSERT_OK(out);
+  EXPECT_THAT(*out, HasSubstr("4 1 q 1 3\n"));
+}
+
+TEST(GroundTest, ACountAgainstANonNumericBoundIsDecidedByKind) {
+  // A #count is always an integer and every integer is below every symbolic
+  // constant, so which integer it comes out as makes no difference. '>= aa'
+  // can never hold and '< aa' always does.
+  auto missed = ground_source("p(1). p(b). q :- #count{ X : p(X) } >= aa.");
+  ASSERT_OK(missed);
+  EXPECT_THAT(*missed, Not(HasSubstr("1 0 1 3")));
+
+  auto out = ground_source("p(1). p(b). q :- #count{ X : p(X) } < aa.");
+  ASSERT_OK(out);
+  EXPECT_THAT(*out, HasSubstr("1 0 1 3 0 0\n"));
+}
+
+TEST(GroundTest, AnElementWithNoTermsIsNoMinMaxTuple) {
+  // #min reads a tuple's first term, and '#min{ : p }' produces a tuple with
+  // no term at all, so the set stays empty and the #min stays +infinity.
+  auto out = ground_source("{ p }. q :- #min{ : p } >= 1.");
+  ASSERT_OK(out);
+  EXPECT_THAT(*out, HasSubstr("1 0 1 3 0 0\n"));
 }
 
 /* One instance of a disjunctive rule derives an atom for every predicate in its

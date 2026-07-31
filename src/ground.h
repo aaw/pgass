@@ -19,7 +19,14 @@
 // Arithmetic and function terms like f(X) are supported too, as are #count
 // and #sum aggregates, rewritten as ASPIF weight bodies, and weak constraints,
 // rewritten as ASPIF minimize statements. A query becomes an ASPIF assumption.
-// #min and #max aggregates are rejected with an error for now.
+//
+// #min and #max range over the ASP-Core-2 order on terms rather than over
+// numbers, so '#max{ X : p(X) }' over p(1) and p(a) is a. Each becomes rules
+// over one atom per element tuple: a #min is at most some term exactly when
+// some tuple is. An empty set is +infinity for #min and -infinity for #max.
+// Those compare against a term but are no term themselves, so a variable taking
+// the value binds to nothing: 'q(S) :- #min{ X : p(X) } = S.' derives no q when
+// nothing supports p.
 //
 // An atom that holds in every answer set is stated as a fact rather than
 // through the rules deriving it, and drops out of the bodies asking for it, so

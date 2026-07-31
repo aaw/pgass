@@ -1,8 +1,5 @@
 ## Spec gaps
 
-* Implement `#min` and `#max`. `ground.cc` rejects both. They range over the
-  total term order, not just integers, and an empty set gives `#min` +infinity
-  and `#max` -infinity.
 * Answer queries cautiously. A query is an ASPIF assumption today, which asks
   whether some answer set contains it. The spec asks whether every one does, so
   `a | b. a?` should say no.
@@ -11,6 +8,10 @@
 
 ## Bugs
 
+* Parse a guard that is not a number on an aggregate's left side.
+  `q :- a > #count{ X : p(X) } >= 1.` is a parse error: the body item parser
+  reads `a` as a literal and never backs up to try an aggregate. The right side
+  takes any term already, and both sides should.
 * Say something when arithmetic on a non-number drops a rule. `p(-a).` grounds
   to an empty program in silence. Decide first whether `-a` is a term or is
   ill-formed.

@@ -205,6 +205,18 @@ TEST(EncodeTest, PicksLinearArithmeticForAWeightBody) {
 
 // The least cost of a priority level is only known once several queries have
 // been answered, and a script asks one question.
+// A #min or #max grounds to plain rules over one atom per element tuple, never
+// to a weight body, so difference logic still covers the program.
+TEST(EncodeTest, TranslatesAMinAggregate) {
+  auto script = encode_source(R"(
+    { p(1) }. { p(3) }.
+    q :- #min{ X : p(X) } >= 3.
+  )");
+  ASSERT_OK(script);
+  EXPECT_THAT(*script, AllOf(HasSubstr("(set-logic QF_IDL)"),
+                             HasSubstr("(assert (=> (not |p(1)|) q))")));
+}
+
 TEST(EncodeTest, RefusesWeakConstraints) {
   auto script = encode_source(R"(
     a :- not b.
