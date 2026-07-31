@@ -2524,17 +2524,16 @@ void name_outputs(const Store& store, const Symbols& syms,
   }
 }
 
-// Turns the program's query into an ASPIF assumption: a literal every answer
-// set must satisfy.
+// Collects the atoms the program's query matches, which solve.h then asks
+// every answer set about.
 //
-// A query's variables are existential, so that 'p(X, a)?' asks whether an
-// answer set holds p(x, a) for some x. The assumption therefore has to mean "at
-// least one of the matching ground atoms is true". A fresh atom with one rule
-// per matching atom says exactly that: any one of them derives it.
+// A query's variables stand for substitutions. 'p(X, a)?' asks of each x in
+// the store whether p(x, a) holds in every answer set, so the matches are kept
+// apart rather than folded into one atom. Which of them hold is the answer to
+// a non-ground query.
 //
-// A query that matches nothing gets that atom with no rule at all, so it can
-// never be true and the program has no answer set. That is the right answer:
-// nothing satisfies the query.
+// A query nothing matches collects no atom, so nothing can make it hold. That
+// is the right answer, nothing in the program satisfying the query.
 absl::Status emit_query(const ClassicalLiteral& query, const Store& store,
                         Symbols& syms, aspif::Program& result) {
   // A query is its own scope, so its variables are numbered on their own rather
@@ -2546,20 +2545,7 @@ absl::Status emit_query(const ClassicalLiteral& query, const Store& store,
       query, [&](const Variable& var) { slots.add(var, by_name); });
   ASSIGN_OR_RETURN(std::vector<aspif::Atom> matched,
                    matching_atoms(query, Binding(slots), store, syms));
-  // One match needs no atom of its own: assuming that atom means the same
-  // thing, e.g. for a query with no variables in it at all.
-  if (matched.size() == 1) {
-    result.assumptions.push_back(matched[0]);
-    return absl::OkStatus();
-  }
-  aspif::Atom holds = result.new_atom();
-  for (aspif::Lit lit : matched) {
-    aspif::Rule rule;
-    rule.head = {holds};
-    rule.body = {lit};
-    result.rules.push_back(std::move(rule));
-  }
-  result.assumptions.push_back(holds);
+  result.query.emplace(matched.begin(), matched.end());
   return absl::OkStatus();
 }
 

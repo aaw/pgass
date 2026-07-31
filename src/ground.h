@@ -18,7 +18,9 @@
 //
 // Arithmetic and function terms like f(X) are supported too, as are #count
 // and #sum aggregates, rewritten as ASPIF weight bodies, and weak constraints,
-// rewritten as ASPIF minimize statements. A query becomes an ASPIF assumption.
+// rewritten as ASPIF minimize statements. A query becomes the list of its
+// matching ground atoms, which solve.h asks every answer set about one at a
+// time.
 //
 // #min and #max range over the ASP-Core-2 order on terms rather than over
 // numbers, so '#max{ X : p(X) }' over p(1) and p(a) is a. Each becomes rules

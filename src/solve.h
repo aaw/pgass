@@ -46,13 +46,44 @@ struct SolveOptions {
 // Weak constraints are minimized level by level, most important level first,
 // before any answer set is returned. Every answer set returned is optimal.
 //
-// A disjunctive head costs a second query per candidate answer set, but only
-// where two of its atoms lie on a common positive cycle. Every other program,
-// normal or disjunctive, is decided by one translation. encode.cc says why.
+// A disjunctive head costs a second solver call per candidate answer set, but
+// only where two of its atoms lie on a common positive cycle. Every other
+// program, normal or disjunctive, is decided by one translation. encode.cc says
+// why.
+//
+// A query asks about the answer sets rather than restricting them, so it does
+// not narrow what comes back here. answer_query() answers it.
 //
 // Choice rule heads return an UnimplementedError. Nothing produces one:
 // normalization rewrites choice rules into disjunctive ones.
 absl::StatusOr<std::vector<AnswerSet>> solve(const aspif::Program& prog,
                                              const SolveOptions& options);
+
+// The answer to a program's query.
+enum class QueryAnswer {
+  // One of the atoms the query matched holds in every answer set.
+  kYes,
+  // Each of them is left out of some answer set.
+  kNo,
+  // The program has no answer set, so there is nothing to ask about.
+  kNoAnswerSet,
+};
+
+// Answers the program's query, the atoms grounding left in
+// aspif::Program::query.
+//
+// A query asks about every answer set at once. 'a?' asks whether a holds in all
+// of them, not whether one of them holds a. So 'a | b. a?' answers kNo, because
+// b on its own is an answer set too.
+//
+// The atoms a non-ground query matched are asked about one at a time. Take
+// 'p(X)?' over a program whose answer sets are {p(1)} and {p(2)}. The answer is
+// kNo. Each answer set holds p of something, but neither p(1) nor p(2) holds in
+// both. A program with no query has no atom to hold, so it answers kNo as well.
+//
+// Weak constraints leave only the optimal answer sets, the ones solve()
+// returns, and the query is asked of those.
+absl::StatusOr<QueryAnswer> answer_query(const aspif::Program& prog,
+                                         const SolveOptions& options);
 
 #endif  // SOLVE_H_

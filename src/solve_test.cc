@@ -104,6 +104,17 @@ absl::StatusOr<std::vector<std::string>> solve_source(const std::string& source,
   return linear;
 }
 
+// Parses, normalizes, grounds, and answers the query of `source`.
+absl::StatusOr<QueryAnswer> query_source(const std::string& source) {
+  Parser parser(source);
+  ASSIGN_OR_RETURN(auto program, parser.parse_program());
+  RETURN_IF_ERROR(normalize(*program));
+  ASSIGN_OR_RETURN(aspif::Program grounded, ground(*program));
+
+  SolveOptions options;
+  return answer_query(grounded, options);
+}
+
 // A positive cycle holds only where something outside it offers support. Under
 // 'p' the cycle is reached through 'a :- p'; under 'q' nothing reaches it, and
 // the level ranking is what stops a and b from supporting each other.
@@ -360,15 +371,115 @@ TEST(SolveTest, ReachabilityConstraint) {
           "arc(1,2) arc(2,1) node(1) node(2) r(1) r(2) sel(1,2) skip(2,1)"));
 }
 
-// A query becomes an aspif assumption, which every answer set has to satisfy.
-TEST(SolveTest, QueryBecomesAnAssumption) {
-  auto out = solve_source(R"(
+// A query holds where every answer set satisfies it. Whichever of p and q
+// holds, r follows.
+TEST(SolveTest, QueryHoldsInEveryAnswerSet) {
+  auto out = query_source(R"(
+    p :- not q.
+    q :- not p.
+    r :- p.
+    r :- q.
+    r?
+  )");
+  ASSERT_OK(out);
+  EXPECT_EQ(*out, QueryAnswer::kYes);
+}
+
+// One answer set satisfying the query is not enough. The answer set holding q
+// leaves p out, and that answers 'p?' no.
+TEST(SolveTest, QueryOneAnswerSetHoldingItIsNotEnough) {
+  auto out = query_source(R"(
     p :- not q.
     q :- not p.
     p?
   )");
   ASSERT_OK(out);
-  EXPECT_THAT(*out, UnorderedElementsAre("p"));
+  EXPECT_EQ(*out, QueryAnswer::kNo);
+}
+
+// A disjunction picks one of its atoms without saying which, so neither atom
+// holds throughout.
+TEST(SolveTest, QueryOverADisjunctionIsNo) {
+  auto out = query_source("a | b. a?");
+  ASSERT_OK(out);
+  EXPECT_EQ(*out, QueryAnswer::kNo);
+}
+
+// A query with a variable is asked about each atom it matched. Both p(1) and
+// p(2) are facts, so either one answers it.
+TEST(SolveTest, QueryWithAVariableAsksAboutEachMatch) {
+  auto out = query_source("p(1). p(2). p(X)?");
+  ASSERT_OK(out);
+  EXPECT_EQ(*out, QueryAnswer::kYes);
+}
+
+// Every answer set holds p of something, but neither p(1) nor p(2) holds in
+// both, so no substitution answers the query.
+TEST(SolveTest, QueryWithAVariableNeedsOneMatchThroughout) {
+  auto out = query_source(R"(
+    p(1) :- not p(2).
+    p(2) :- not p(1).
+    p(X)?
+  )");
+  ASSERT_OK(out);
+  EXPECT_EQ(*out, QueryAnswer::kNo);
+}
+
+// A query no atom matches has nothing that can make it hold.
+TEST(SolveTest, QueryMatchingNothingIsNo) {
+  auto out = query_source("p(1). q(2)?");
+  ASSERT_OK(out);
+  EXPECT_EQ(*out, QueryAnswer::kNo);
+}
+
+// A program with no answer set has nothing to ask about, which is neither a
+// yes nor a no.
+TEST(SolveTest, QueryAgainstAnIncoherentProgramHasNoAnswerSet) {
+  auto out = query_source(R"(
+    p :- not p.
+    p?
+  )");
+  ASSERT_OK(out);
+  EXPECT_EQ(*out, QueryAnswer::kNoAnswerSet);
+}
+
+// The question is asked of the optimal answer sets only. Both {a} and {b} are
+// answer sets, but {b} costs 1, so only {a} is left to ask about.
+TEST(SolveTest, QueryIsAskedOfOptimalAnswerSetsOnly) {
+  auto out = query_source(R"(
+    a | b.
+    :~ b. [1@1]
+    a?
+  )");
+  ASSERT_OK(out);
+  EXPECT_EQ(*out, QueryAnswer::kYes);
+}
+
+// Under a head cycle a model is only a candidate answer set, so the search
+// checks each one against the reduct. The answer sets here are {a, b} and {c},
+// and the first of them leaves c out.
+TEST(SolveTest, QueryUnderAHeadCycleChecksTheReduct) {
+  auto out = query_source(R"(
+    a | b | c.
+    a :- b.
+    b :- a.
+    c?
+  )");
+  ASSERT_OK(out);
+  EXPECT_EQ(*out, QueryAnswer::kNo);
+}
+
+// The same cycle without the third disjunct has {a, b} as its only answer set,
+// so a holds throughout.
+TEST(SolveTest, QueryHoldsInsideAHeadCycle) {
+  auto out = query_source(R"(
+    a | b.
+    a :- b.
+    b :- a.
+    a?
+  )");
+  ASSERT_OK(out);
+  EXPECT_EQ(*out, QueryAnswer::kYes);
 }
 
 // Which answer set comes back under a limit is up to cvc5, so only the count is

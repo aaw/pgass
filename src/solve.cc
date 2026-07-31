@@ -119,8 +119,8 @@ cvc5::Term reduct_body(cvc5::TermManager& tm, const aspif::Rule& rule,
 // One Boolean per candidate atom stands for that subset. Atoms outside the
 // candidate are false in every subset of it, so they need no variable.
 //
-// This is the second query a head cycle costs. It asks for the absence of a
-// smaller model, which no search for a model can answer on its own.
+// This is the second solver call a head cycle costs. It asks for the absence
+// of a smaller model, which no search for a model can answer on its own.
 absl::StatusOr<bool> subset_models_reduct(
     cvc5::TermManager& tm, const aspif::Program& prog, const char* logic,
     const absl::flat_hash_set<aspif::Atom>& candidate) {
@@ -176,8 +176,8 @@ absl::StatusOr<std::int64_t> int64_value(const cvc5::Term& value) {
 
 // The solver, and what looking for answer sets rather than models takes.
 //
-// Every query goes through find(). Where a component is head-cyclic, a model of
-// the assertions can fail to be an answer set. find() checks each model it is
+// Every search goes through find(). Where a component is head-cyclic, a model
+// of the assertions can fail to be an answer set. find() checks each model it is
 // handed and rules out the ones that fail, until it holds an answer set or the
 // solver runs out of models. Where no component is head-cyclic, the assertions
 // describe the answer sets exactly and find() is one checkSat().
@@ -207,7 +207,7 @@ struct Search {
   // The atoms true in the model the solver holds.
   std::vector<aspif::Atom> model_atoms() const;
 
-  // Rules a model out of every later query.
+  // Rules a model out of every later search.
   void block(const std::vector<aspif::Atom>& atoms);
 
   void push();
@@ -294,7 +294,8 @@ using LeastCost = absl::StatusOr<std::optional<std::int64_t>>;
 //
 // The bounds only ever shrink, so each one can be asserted on top of the last
 // with no bookkeeping. They all go in one push() scope. The final bound is
-// unsatisfiable by construction, so it has to be popped before any later query.
+// unsatisfiable by construction, so it has to be popped before anything else
+// is asked.
 LeastCost minimize_by_stepping_down(Search& search, const LevelCost& level) {
   cvc5::TermManager& tm = search.tm;
   std::optional<std::int64_t> best;
@@ -316,8 +317,8 @@ LeastCost minimize_by_stepping_down(Search& search, const LevelCost& level) {
 // beats. So the least cost stays in [low, high] and the two meet on it. Each
 // probe either pulls `high` down to the cost of the answer set it found or
 // lifts `low` past the bound it refuted. Both of those are permanent. The
-// probed bound itself is not, so it goes in as an assumption of the one query
-// rather than an assertion.
+// probed bound itself is not, so it goes in as an assumption of the one solver
+// call rather than an assertion.
 LeastCost minimize_by_bisecting(Search& search, const LevelCost& level) {
   cvc5::TermManager& tm = search.tm;
   // One answer set to start the range off. Its absence is how an unsatisfiable
@@ -399,6 +400,57 @@ absl::StatusOr<std::vector<std::int64_t>> optimize(
   return costs;
 }
 
+// What it takes to search one program: the encoding, the solver holding it, and
+// the Search over that solver. They live together because a Search holds
+// references to the other two, and because building them has to happen in this
+// order. They all hold terms of `tm`, so `tm` is declared first and destroyed
+// last.
+struct Session {
+  cvc5::TermManager tm;
+  Encoding encoding;
+  std::optional<cvc5::Solver> solver;
+  std::optional<Search> search;
+  // The cost of each priority level, pinned to its least value. Empty for a
+  // program with no minimize statements, and for one with no answer set.
+  std::vector<std::int64_t> costs;
+
+  // Builds the encoding, loads it into a solver, and settles every weak
+  // constraint level. On return the solver is satisfiable exactly when the
+  // program has an answer set, and every answer set it still admits is optimal.
+  absl::Status start(const aspif::Program& prog, const SolveOptions& options);
+};
+
+absl::Status Session::start(const aspif::Program& prog,
+                            const SolveOptions& options) {
+  ASSIGN_OR_RETURN(encoding, build_encoding(tm, prog));
+
+  solver.emplace(tm);
+  solver->setLogic(encoding.logic);
+  solver->setOption("produce-models", "true");
+  solver->setOption("incremental", "true");
+  for (const Section& section : encoding.sections) {
+    for (const cvc5::Term& assertion : section.assertions) {
+      solver->assertFormula(assertion);
+    }
+  }
+
+  // The encoding settles everything but a head cycle, which is what turns the
+  // minimality check on.
+  search.emplace(Search{.tm = tm,
+                        .solver = *solver,
+                        .prog = prog,
+                        .atom_var = encoding.atom_var,
+                        .check_reduct = encoding.needs_reduct_check,
+                        .logic = encoding.logic});
+
+  // A program with no minimize statements has no levels, so this comes back
+  // with no cost and no solver call made.
+  ASSIGN_OR_RETURN(
+      costs, optimize(*search, collect_level_costs(tm, prog, encoding.atom_var),
+                      options.optimizer));
+  return absl::OkStatus();
+}
+
 }  // namespace
 
 absl::StatusOr<std::vector<AnswerSet>> solve(const aspif::Program& prog,
@@ -408,35 +460,9 @@ absl::StatusOr<std::vector<AnswerSet>> solve(const aspif::Program& prog,
         "max_answer_sets cannot be negative; 0 asks for all answer sets");
   }
 
-  cvc5::TermManager tm;
-  ASSIGN_OR_RETURN(const Encoding encoding, build_encoding(tm, prog));
-
-  cvc5::Solver solver(tm);
-  solver.setLogic(encoding.logic);
-  solver.setOption("produce-models", "true");
-  solver.setOption("incremental", "true");
-  for (const Section& section : encoding.sections) {
-    for (const cvc5::Term& assertion : section.assertions) {
-      solver.assertFormula(assertion);
-    }
-  }
-
-  // The encoding settles everything but a head cycle, which is what turns the
-  // minimality check on.
-  Search search{.tm = tm,
-                .solver = solver,
-                .prog = prog,
-                .atom_var = encoding.atom_var,
-                .check_reduct = encoding.needs_reduct_check,
-                .logic = encoding.logic};
-
-  // The cost every answer set below will have, optimizing having pinned each
-  // level to its least value. A program with no minimize statements has no
-  // levels, so it comes back with no cost and no solver call made.
-  ASSIGN_OR_RETURN(
-      const std::vector<std::int64_t> costs,
-      optimize(search, collect_level_costs(tm, prog, encoding.atom_var),
-               options.optimizer));
+  Session session;
+  RETURN_IF_ERROR(session.start(prog, options));
+  Search& search = *session.search;
 
   std::vector<AnswerSet> answer_sets;
   while (options.max_answer_sets == 0 ||
@@ -445,7 +471,7 @@ absl::StatusOr<std::vector<AnswerSet>> solve(const aspif::Program& prog,
     if (!found) break;
 
     AnswerSet answer_set;
-    answer_set.costs = costs;
+    answer_set.costs = session.costs;
     answer_set.atoms = search.model_atoms();
     search.block(answer_set.atoms);
     answer_sets.push_back(std::move(answer_set));
@@ -455,4 +481,39 @@ absl::StatusOr<std::vector<AnswerSet>> solve(const aspif::Program& prog,
     if (prog.next_atom <= 1) break;
   }
   return answer_sets;
+}
+
+absl::StatusOr<QueryAnswer> answer_query(const aspif::Program& prog,
+                                         const SolveOptions& options) {
+  Session session;
+  RETURN_IF_ERROR(session.start(prog, options));
+  Search& search = *session.search;
+
+  // A program with no answer set is asked nothing at all. Looking for an answer
+  // set first is also what tells that case apart from a query that holds. Both
+  // leave the searches below with nothing to find.
+  ASSIGN_OR_RETURN(const bool coherent, search.find());
+  if (!coherent) return QueryAnswer::kNoAnswerSet;
+
+  // An atom this answer set leaves out is already answered no, so only the ones
+  // it holds are worth a search. That is what makes a query over a large
+  // predicate affordable, since one answer set usually leaves few standing.
+  std::vector<cvc5::Term> standing;
+  for (const cvc5::Term& atom : session.encoding.query) {
+    if (search.solver.getValue(atom).getBooleanValue()) {
+      standing.push_back(atom);
+    }
+  }
+
+  for (const cvc5::Term& atom : standing) {
+    // Asking about an atom means looking for an answer set without it. That
+    // goes in a scope of its own rather than as an assumption, because find()
+    // can make several solver calls and an assumption holds for one.
+    search.push();
+    search.solver.assertFormula(session.tm.mkTerm(cvc5::Kind::NOT, {atom}));
+    ASSIGN_OR_RETURN(const bool refuted, search.find());
+    search.pop();
+    if (!refuted) return QueryAnswer::kYes;
+  }
+  return QueryAnswer::kNo;
 }

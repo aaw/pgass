@@ -91,16 +91,33 @@ TEST(AspifTest, FactOutputHasEmptyCondition) {
             "0\n");
 }
 
-TEST(AspifTest, QueryBecomesAssumption) {
+TEST(AspifTest, GroundQueryBecomesAssumption) {
   Program prog;
   Atom q = prog.new_atom();
   prog.rules.push_back(Rule{.head = {q}});
-  prog.assumptions.push_back(q);
+  prog.query = {{q}};
 
   EXPECT_EQ(to_aspif(prog),
             "asp 1 0 0\n"
             "1 0 1 1 0 0\n"
             "6 1 1\n"
+            "0\n");
+}
+
+// The atoms a query matched are alternatives, and an assumption asks for all
+// of its literals at once. So a query of several atoms prints nothing.
+TEST(AspifTest, QueryOfSeveralAtomsPrintsNoAssumption) {
+  Program prog;
+  Atom p1 = prog.new_atom();
+  Atom p2 = prog.new_atom();
+  prog.rules.push_back(Rule{.head = {p1}});
+  prog.rules.push_back(Rule{.head = {p2}});
+  prog.query = {p1, p2};
+
+  EXPECT_EQ(to_aspif(prog),
+            "asp 1 0 0\n"
+            "1 0 1 1 0 0\n"
+            "1 0 1 2 0 0\n"
             "0\n");
 }
 

@@ -498,13 +498,14 @@ absl::StatusOr<Encoding> build_encoding(cvc5::TermManager& tm,
   ranking_formulas(tm, prog, encoding.atom_var, encoding.level_var, supports,
                    ranking_terms);
 
-  // The ground query: literals every answer set has to satisfy. They hold for
-  // every answer set of the program and nothing retracts them, so they go in
-  // with the rest rather than as an assumption of one query.
-  std::vector<cvc5::Term> query_terms;
-  query_terms.reserve(prog.assumptions.size());
-  for (aspif::Lit lit : prog.assumptions) {
-    query_terms.push_back(literal_term(tm, encoding.atom_var, lit));
+  // The atoms the query matched, as formulas. None of them is asserted.
+  // Asserting one would ask for an answer set that holds it, and a query asks
+  // whether every answer set holds it. solve.cc asks that.
+  if (prog.query.has_value()) {
+    encoding.query.reserve(prog.query->size());
+    for (aspif::Lit lit : *prog.query) {
+      encoding.query.push_back(literal_term(tm, encoding.atom_var, lit));
+    }
   }
 
   encoding.sections.push_back(
@@ -513,8 +514,6 @@ absl::StatusOr<Encoding> build_encoding(cvc5::TermManager& tm,
       Section{.title = "Support", .assertions = std::move(support_terms)});
   encoding.sections.push_back(Section{.title = "Level ranking",
                                       .assertions = std::move(ranking_terms)});
-  encoding.sections.push_back(
-      Section{.title = "Query", .assertions = std::move(query_terms)});
   return encoding;
 }
 
@@ -526,6 +525,19 @@ absl::StatusOr<std::string> encode_smtlib(const aspif::Program& prog) {
     return absl::UnimplementedError(
         "weak constraints cannot be encoded: finding the least cost of a "
         "priority level takes repeated queries under a falling bound");
+  }
+
+  // A script has one check-sat, so it can only carry a query of one atom.
+  if (prog.query.has_value() && prog.query->size() != 1) {
+    if (prog.query->empty()) {
+      return absl::UnimplementedError(
+          "a query matching no atom cannot be encoded: nothing can make it "
+          "hold, so the answer is no whatever the answer sets are");
+    }
+    return absl::UnimplementedError(absl::StrCat(
+        "a query matching ", prog.query->size(),
+        " atoms cannot be encoded: each atom is asked about on its own, under "
+        "a negation of its own"));
   }
 
   cvc5::TermManager tm;
@@ -566,6 +578,19 @@ absl::StatusOr<std::string> encode_smtlib(const aspif::Program& prog) {
       absl::StrAppend(&assertions, "(assert ", assertion.toString(), ")\n");
     }
     append_block(script, section.title, assertions);
+  }
+
+  // The query goes in negated, so the script looks for an answer set the query
+  // fails in. That flips what 'unsat' means, so the script says so itself.
+  if (encoding.query.size() == 1) {
+    append_block(
+        script, "Query",
+        absl::StrCat(
+            "; The query holds where every answer set satisfies it, so it\n"
+            "; goes in negated. A model is an answer set the query fails in,\n"
+            "; and 'unsat' means the query holds.\n(assert ",
+            tm.mkTerm(cvc5::Kind::NOT, {encoding.query.front()}).toString(),
+            ")\n"));
   }
 
   absl::StrAppend(&script, "\n(check-sat)\n(get-model)\n");

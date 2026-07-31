@@ -177,9 +177,9 @@ TEST(EncodeTest, RanksTheAtomsOfAPositiveCycle) {
                                        Contains("; Level ranking")));
 }
 
-// A query is a literal every answer set has to satisfy, asserted under a
-// section of its own.
-TEST(EncodeTest, AssertsTheQuery) {
+// A query asks whether every answer set satisfies it, so the script asserts it
+// negated. A model is an answer set the query fails in.
+TEST(EncodeTest, AssertsTheNegatedQuery) {
   auto script = encode_source(R"(
     p(1) :- not q(1).
     q(1) :- not p(1).
@@ -187,7 +187,7 @@ TEST(EncodeTest, AssertsTheQuery) {
   )");
   ASSERT_OK(script);
   EXPECT_THAT(comments(*script), Contains("; Query"));
-  EXPECT_THAT(commands(*script), Contains("(assert |q(1)|)"));
+  EXPECT_THAT(commands(*script), Contains("(assert (not |q(1)|))"));
 }
 
 // A weight body adds up the weights of many literals at once, which no

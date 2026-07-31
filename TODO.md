@@ -1,10 +1,9 @@
 ## Spec gaps
 
-* Answer queries cautiously. A query is an ASPIF assumption today, which asks
-  whether some answer set contains it. The spec asks whether every one does, so
-  `a | b. a?` should say no.
-* Report the substitutions a non-ground query holds under in every answer set.
-  `p(1). p(2). p(X)?` prints an answer set instead.
+* Report the substitutions a non-ground query holds under. `p(1). p(2). p(X)?`
+  answers yes, having found an instance that holds in every answer set, but
+  never says X is 1 and 2. solve.h already asks instance by instance, so the
+  answer is there to collect.
 
 ## Bugs
 
@@ -28,5 +27,7 @@
 * Why can clingo solve PHP much faster than we can? Is it using some symmetry-breaking?
 * Add `--encode=sat`, which dumps the encoding as DIMACS. `--encode=smtlib` is in.
 * Give `--encode=smtlib` something to say about a program it now refuses: weak
-  constraints, whose optimum takes repeated queries, and head cycles, whose
-  models are only candidates.
+  constraints, whose optimum takes repeated queries, head cycles, whose models
+  are only candidates, and a query of other than one instance, which is other
+  than one check-sat.
+* Take a pass over all absl::UnimplementedError we throw and compare to clingo

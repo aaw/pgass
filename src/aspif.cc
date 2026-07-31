@@ -45,10 +45,11 @@ std::string to_aspif(const Program& prog) {
     for (Lit lit : output.condition) absl::StrAppend(&out, " ", lit);
     absl::StrAppend(&out, "\n");
   }
-  if (!prog.assumptions.empty()) {
-    absl::StrAppend(&out, "6 ", prog.assumptions.size());
-    for (Lit lit : prog.assumptions) absl::StrAppend(&out, " ", lit);
-    absl::StrAppend(&out, "\n");
+  // Statement 6, assumptions. A query that matched one atom is that
+  // assumption. A query that matched several is left out. Its atoms are
+  // alternatives, and an assumption would ask for all of them at once.
+  if (prog.query.has_value() && prog.query->size() == 1) {
+    absl::StrAppend(&out, "6 1 ", prog.query->front(), "\n");
   }
   absl::StrAppend(&out, "0\n");
   return out;

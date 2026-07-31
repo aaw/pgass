@@ -2,6 +2,7 @@
 #define ASPIF_H_
 
 #include <cstdint>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -68,8 +69,17 @@ struct Program {
   std::vector<Rule> rules;
   std::vector<Minimize> minimize;
   std::vector<Output> outputs;
-  // Statement 6: literals every answer set must satisfy (the ground query).
-  std::vector<Lit> assumptions;
+  // The atoms the program's query matched. 'p(X)?' over p(1) and p(2) puts
+  // both of them here. They are alternatives. solve.h asks about each one on
+  // its own, and the query holds where one of them holds in every answer set.
+  //
+  // No value means the program asks nothing. An empty list means it asks
+  // something no atom matched, as 'p(1). q(2)?' does.
+  //
+  // aspif has no query statement. A query of one atom prints as statement 6,
+  // an assumption. A longer list does not print at all. An assumption asks for
+  // all of its literals at once, which is not what these atoms mean.
+  std::optional<std::vector<Lit>> query;
 
   // Atom ids are allocated here so rules and auxiliaries share one space.
   Atom next_atom = 1;

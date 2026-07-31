@@ -174,6 +174,29 @@ int main(int argc, char** argv) {
   SolveOptions options;
   options.max_answer_sets = absl::GetFlag(FLAGS_models);
   options.optimizer = *optimizer;
+
+  // A query asks a yes or no question about all the answer sets at once, so a
+  // program with one gets an answer instead of a list of answer sets.
+  if (grounded->query.has_value()) {
+    auto answer = answer_query(*grounded, options);
+    if (!answer.ok()) {
+      std::cerr << "pgass: solve error: " << answer.status().message() << "\n";
+      return 1;
+    }
+    switch (*answer) {
+      case QueryAnswer::kYes:
+        std::cout << "yes\n";
+        break;
+      case QueryAnswer::kNo:
+        std::cout << "no\n";
+        break;
+      case QueryAnswer::kNoAnswerSet:
+        std::cout << "UNSATISFIABLE\n";
+        break;
+    }
+    return 0;
+  }
+
   auto answer_sets = solve(*grounded, options);
   if (!answer_sets.ok()) {
     std::cerr << "pgass: solve error: " << answer_sets.status().message()

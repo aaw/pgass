@@ -1573,19 +1573,18 @@ TEST(GroundTest, GroundQueryAssumesItsAtom) {
             "0\n");
 }
 
-TEST(GroundTest, QueryWithAVariableAssumesAnyMatch) {
+// A query with a variable matches an atom at a time, and the matches are
+// alternatives. An assumption cannot say that, so nothing about the query
+// prints and the grounding is the one the program has without it.
+TEST(GroundTest, QueryWithAVariableKeepsItsMatchesApart) {
   auto out = ground_source("p(1). p(2). p(X)?");
   ASSERT_OK(out);
-  // p(1)=1, p(2)=2, and atom 3 holds when either of them does.
   EXPECT_EQ(*out,
             "asp 1 0 0\n"
             "1 0 1 1 0 0\n"
             "1 0 1 2 0 0\n"
-            "1 0 1 3 0 1 1\n"
-            "1 0 1 3 0 1 2\n"
             "4 4 p(1) 1 1\n"
             "4 4 p(2) 1 2\n"
-            "6 1 3\n"
             "0\n");
 }
 
@@ -1603,22 +1602,22 @@ TEST(GroundTest, QueryOverADerivedPredicate) {
   EXPECT_THAT(*out, HasSubstr("6 1 2\n"));
 }
 
-TEST(GroundTest, QueryThatMatchesNothingCanNeverHold) {
+// A query nothing matches leaves no atom to assume and nothing that can make
+// it hold.
+TEST(GroundTest, QueryThatMatchesNothingAssumesNothing) {
   auto out = ground_source("p(1). p(3)?");
   ASSERT_OK(out);
-  // Atom 2 has no rule deriving it, so assuming it leaves no answer set.
   EXPECT_EQ(*out,
             "asp 1 0 0\n"
             "1 0 1 1 0 0\n"
             "4 4 p(1) 1 1\n"
-            "6 1 2\n"
             "0\n");
 }
 
 TEST(GroundTest, QueryOverAPredicateWithNoAtomsAtAll) {
   auto out = ground_source("p(1). q(X)?");
   ASSERT_OK(out);
-  EXPECT_THAT(*out, HasSubstr("6 1 2\n"));
+  EXPECT_THAT(*out, Not(HasSubstr("\n6 ")));
 }
 
 TEST(GroundTest, QueryOnAClassicallyNegatedLiteral) {

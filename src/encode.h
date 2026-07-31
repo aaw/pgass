@@ -66,6 +66,11 @@ struct Encoding {
   // for the atom where there is one.
   std::vector<std::string> atom_name;
   std::vector<Section> sections;
+  // One formula per atom the program's query matched, empty where it matched
+  // none. These are questions rather than assertions, so they are kept out of
+  // the sections above. Asking one takes a search for an answer set that
+  // falsifies it, which solve.cc runs.
+  std::vector<cvc5::Term> query;
   // Whether a model of the assertions is only a candidate answer set, which is
   // what a head cycle leaves behind. Where this is false the assertions
   // describe the answer sets exactly.
@@ -82,10 +87,14 @@ absl::StatusOr<Encoding> build_encoding(cvc5::TermManager& tm,
 // a constant is named after the symbol the program prints for its atom, so that
 // a model reads back as an answer set.
 //
+// A program with a query asserts the query negated, so its script asks the
+// opposite question. A model of it is an answer set the query fails in, and
+// 'unsat' means the query holds.
+//
 // Returns an UnimplementedError where one script cannot say what an answer set
 // is. A program with weak constraints is one, its optimal cost being known only
-// after several queries. So is a program with a head cycle, whose models are
-// candidates a query against the reduct still has to pass.
+// after several solver calls. So is a program with a head cycle, whose models
+// are candidates that a further call, against the reduct, still has to pass.
 absl::StatusOr<std::string> encode_smtlib(const aspif::Program& prog);
 
 #endif  // ENCODE_H_
