@@ -373,6 +373,45 @@ TEST_F(SafetyTest, TestAggregateWithNoElements) {
   EXPECT_THAT(verify_safe(**prog), IsOk());
 }
 
+// W is shared between the elements and the rest of the rule, and the only
+// literal that could bind it waits on the aggregate in turn. Neither W nor Y
+// ever gets a value.
+TEST_F(SafetyTest, TestAggregateGuardDoesNotBindThroughAGlobalCycle) {
+  std::string_view src = "p(Y) :- #count{X : q(X, W)} = Y, W = Y.";
+  Parser parser(src);
+  auto prog = parser.parse_program();
+  ASSERT_OK(prog);
+  EXPECT_THAT(verify_safe(**prog), Not(IsOk()));
+}
+
+// The same aggregate is safe when another literal binds the shared W.
+TEST_F(SafetyTest, TestAggregateGuardBindsOnceGlobalsAreBound) {
+  std::string_view src = "p(Y) :- r(W), #count{X : q(X, W)} = Y.";
+  Parser parser(src);
+  auto prog = parser.parse_program();
+  ASSERT_OK(prog);
+  EXPECT_THAT(verify_safe(**prog), IsOk());
+}
+
+// X stays inside the elements, so the element's own q(X) binds it.
+TEST_F(SafetyTest, TestAggregateElementBindsItsOwnLocalVariable) {
+  std::string_view src = "p(Y) :- #count{X : q(X)} = Y.";
+  Parser parser(src);
+  auto prog = parser.parse_program();
+  ASSERT_OK(prog);
+  EXPECT_THAT(verify_safe(**prog), IsOk());
+}
+
+// A guard stands outside the elements, so this X is shared rather than local
+// and q(X) alone does not bind it.
+TEST_F(SafetyTest, TestAggregateGuardVariableAlsoInsideElements) {
+  std::string_view src = "p :- #count{X : q(X)} = X.";
+  Parser parser(src);
+  auto prog = parser.parse_program();
+  ASSERT_OK(prog);
+  EXPECT_THAT(verify_safe(**prog), Not(IsOk()));
+}
+
 TEST_F(SafetyTest, ErrorMessageUnsafeWeakConstraint) {
   std::string_view src = ":~ p(X). [1@0, Y]";
   Parser parser(src);

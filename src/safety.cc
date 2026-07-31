@@ -18,8 +18,9 @@
 //   Classical atoms: q(X) binds every variable in its argument list.
 //   Equality: V = <expr> binds V when all variables in <expr> are already bound
 //             (and vice versa when V is on the right).
-//   Aggregates: a fully-bound aggregate propagates binding to its output
-//               variable. NAF aggregates never bind.
+//   Aggregates: an aggregate propagates binding to its output variable once
+//               its elements are bound and the rule has bound whatever those
+//               elements share with the rest of it. NAF aggregates never bind.
 
 namespace {
 
@@ -89,6 +90,101 @@ void propagate_naf_literal(const NafLiteral* naf_lit,
       break;
     }
   }
+}
+
+// Inserts into `out` every variable of `head`, with no filtering.
+void collect_every_head_variable(const Head& head,
+                                 absl::flat_hash_set<std::string_view>& out) {
+  switch (head.kind) {
+    case Head::DisjunctionKind:
+      for (const auto& literal :
+           static_cast<const Disjunction&>(head).literals) {
+        collect::collect_variables(*literal, out);
+      }
+      return;
+    case Head::ChoiceKind: {
+      const auto& choice = static_cast<const Choice&>(head);
+      if (choice.lb_term) collect::collect_variables(*choice.lb_term, out);
+      if (choice.ub_term) collect::collect_variables(*choice.ub_term, out);
+      if (choice.elements == nullptr) return;
+      for (const auto& element : *(choice.elements)) {
+        collect::collect_variables(*element->literal, out);
+        if (element->conditions == nullptr) continue;
+        for (const auto& condition : *(element->conditions)) {
+          collect::collect_variables(*condition->literal, out);
+        }
+      }
+      return;
+    }
+  }
+}
+
+// Inserts into `out` the global variables of `statement`: the ones standing
+// anywhere other than inside an aggregate element, so an aggregate contributes
+// only its bounds.
+//
+// The rest of the rule has to bind a global variable, while a local one is the
+// element's own to bind. The X of '#count{X : q(X)}' asks nothing of the rule,
+// but the X of '#count{X : q(X)} = Y, r(X)' is the same X in both places.
+void collect_global_variables(const Statement& statement,
+                              absl::flat_hash_set<std::string_view>& out) {
+  if (statement.head) collect_every_head_variable(*statement.head, out);
+  if (statement.weight) {
+    const Weight& weight = *statement.weight;
+    collect::collect_variables(*weight.weight, out);
+    if (weight.level) collect::collect_variables(*weight.level, out);
+    if (weight.terms) {
+      for (const auto& term : *(weight.terms)) {
+        collect::collect_variables(*term, out);
+      }
+    }
+  }
+  if (statement.body == nullptr) return;
+  for (const auto& item : *(statement.body->items)) {
+    switch (item->kind) {
+      case BodyItem::NafLiteralKind:
+        collect::collect_variables(
+            *static_cast<const NafLiteral*>(item.get())->literal, out);
+        break;
+      case BodyItem::AggregateKind: {
+        const auto& aggregate = *static_cast<const Aggregate*>(item.get());
+        if (aggregate.lb_term) {
+          collect::collect_variables(*aggregate.lb_term, out);
+        }
+        if (aggregate.ub_term) {
+          collect::collect_variables(*aggregate.ub_term, out);
+        }
+        break;
+      }
+    }
+  }
+}
+
+// True once every variable the aggregate's elements share with the rest of the
+// rule is bound. Until then the aggregate has no value to pass on, so
+// 'p(Y) :- #count{X : q(X, W)} = Y, W = Y.' leaves W and Y waiting on each
+// other.
+bool element_globals_are_bound(
+    const Aggregate& aggregate,
+    const absl::flat_hash_set<std::string_view>& global_vars,
+    const absl::flat_hash_set<std::string_view>& bound_vars) {
+  if (aggregate.elements == nullptr) return true;
+  absl::flat_hash_set<std::string_view> element_vars;
+  for (const auto& element : *(aggregate.elements)) {
+    if (element->terms) {
+      for (const auto& term : *(element->terms)) {
+        collect::collect_variables(*term, element_vars);
+      }
+    }
+    if (element->literals == nullptr) continue;
+    for (const auto& naf_literal : *(element->literals)) {
+      collect::collect_variables(*naf_literal->literal, element_vars);
+    }
+  }
+  for (std::string_view v : element_vars) {
+    if (global_vars.contains(v) && !bound_vars.contains(v)) return false;
+  }
+  return true;
 }
 
 // Records in `vars` the head variables the body has to bind. A disjunction's
@@ -188,6 +284,8 @@ absl::Status verify_safe(const Program& prog) {
   for (const auto& statement : *(prog.statements)) {
     absl::flat_hash_set<std::string_view> bound_vars, vars;
     absl::flat_hash_set<Aggregate*> bound_aggregates, aggregates;
+    absl::flat_hash_set<std::string_view> global_vars;
+    collect_global_variables(*statement, global_vars);
 
     std::size_t prev_num_bound = 0;
     do {
@@ -236,15 +334,20 @@ absl::Status verify_safe(const Program& prog) {
             bool bound = is_subset(agg_vars, agg_bound_vars);
             if (bound) bound_aggregates.insert(aggregate);
 
-            // A bound aggregate propagates to its output variable if connected
-            // by equality (e.g. `#sum{...} = X` binds X).
-            if (bound && !aggregate->naf && aggregate->lb_term != nullptr &&
+            // A bound aggregate propagates to its output variable if
+            // connected by equality (e.g. `#sum{...} = X` binds X), once the
+            // rule has bound whatever its elements share with the rest of it.
+            const bool propagates =
+                bound && !aggregate->naf &&
+                element_globals_are_bound(*aggregate, global_vars, bound_vars);
+
+            if (propagates && aggregate->lb_term != nullptr &&
                 aggregate->lb_term->kind == Term::VariableKind &&
                 aggregate->lb_op == BinopType::kEQUAL) {
               bound_vars.insert(
                   static_cast<Variable*>(aggregate->lb_term.get())->name);
             }
-            if (bound && !aggregate->naf && aggregate->ub_term != nullptr &&
+            if (propagates && aggregate->ub_term != nullptr &&
                 aggregate->ub_term->kind == Term::VariableKind &&
                 aggregate->ub_op == BinopType::kEQUAL) {
               bound_vars.insert(

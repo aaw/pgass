@@ -12,10 +12,10 @@
 namespace {
 
 // Builds an argument list of `arity` fresh variables, or nullptr when arity is
-// 0 so an atom formats as 'p' rather than 'p()'. A single argument is named 'X';
-// several are numbered 'X1', 'X2', ... by position. The names must be distinct
-// per position (so each position of p is tied to the same position of _neg_p)
-// but shared between the two atoms in the constraint that uses them.
+// 0 so an atom formats as 'p' rather than 'p()'. A single argument is named
+// 'X'; several are numbered 'X1', 'X2', ... by position. The names must be
+// distinct per position (so each position of p is tied to the same position of
+// _neg_p) but shared between the two atoms in the constraint that uses them.
 Terms fresh_variable_args(size_t arity) {
   if (arity == 0) return nullptr;
   auto args = std::make_unique<std::vector<std::unique_ptr<Term>>>();
@@ -66,7 +66,7 @@ absl::Status rewrite_weak_constraints(Program& prog) {
 
     auto args = std::make_unique<std::vector<std::unique_ptr<Term>>>();
     args->push_back(statement->weight->level ? statement->weight->level->clone()
-                                              : std::make_unique<Number>(0));
+                                             : std::make_unique<Number>(0));
     args->push_back(statement->weight->weight->clone());
     if (statement->weight->terms) {
       for (const auto& term : *statement->weight->terms) {
@@ -142,30 +142,26 @@ std::unique_ptr<std::vector<std::unique_ptr<BodyItem>>> clone_body_items(
   return items;
 }
 
-// Collects, in first-occurrence order, the variables of a choice element: the
-// ones in its literal followed by the ones introduced by its conditions. The
-// auxiliary '_crN' atom must carry these so each ground instance of the element
-// is counted (and chosen) separately.
-std::vector<std::string> element_variables(const ChoiceElement& element) {
-  std::vector<std::string> names;
-  collect::collect_variables(*element.literal, names);
-  if (element.conditions) {
-    for (const auto& cond : *element.conditions) {
-      collect::collect_variables(*cond->literal, names);
-    }
-  }
-  return names;
+/* The auxiliary atom that says `atom` was passed over: '_ch_p(1)' for 'p(1)'.
+   Naming it after the atom rather than after the choice element it came from
+   makes the same atom offered by two elements one atom to choose and one tuple
+   to count, so '{ a : q ; a : r } <= 1' counts a once.
+
+   Grounding hides '_' predicates, and the lexer rejects a leading '_' in an
+   identifier, so no user predicate collides with one.
+*/
+std::unique_ptr<ClassicalLiteral> choice_aux_atom(
+    const ClassicalLiteral& atom) {
+  auto aux = atom.clone();
+  aux->id = absl::StrCat("_ch_", atom.id);
+  return aux;
 }
 
-// Builds an argument list of variables from `names`, or nullptr when empty so
-// the auxiliary atom formats as '_crN' rather than '_crN()'.
-Terms variables_as_args(const std::vector<std::string>& names) {
-  if (names.empty()) return nullptr;
-  auto args = std::make_unique<std::vector<std::unique_ptr<Term>>>();
-  for (const auto& name : names) {
-    args->push_back(std::make_unique<Variable>(name));
-  }
-  return args;
+// The same auxiliary as a term, which is the shape the counting aggregate
+// collects it in.
+std::unique_ptr<Term> choice_aux_term(const ClassicalLiteral& atom) {
+  auto aux = choice_aux_atom(atom);
+  return std::make_unique<Atom>(aux->id, std::move(aux->args));
 }
 
 /* Transform each choice rule of the form:
@@ -174,15 +170,17 @@ Terms variables_as_args(const std::vector<std::string>& names) {
 
    into rules like:
 
-   p1 | _cr0 :- a1, a2, x, y.
-   p2 | _cr1 :- b1, x, y.
-   p3 | _cr2 :- x, y.
-   :- x, y, not #count{ _cr0 : p1, a1, a2 ; _cr1 : p2, b1 ; _cr2 } < 2.
+   p1 | _ch_p1 :- a1, a2, x, y.
+   p2 | _ch_p2 :- b1, x, y.
+   p3 | _ch_p3 :- x, y.
+   :- x, y, not #count{ _ch_p1 : p1, a1, a2 ; _ch_p2 : p2, b1 ; _ch_p3 } < 2.
+
+   A tuple in that count names the atom chosen, so a bound counts atoms however
+   many elements happen to offer the same one.
 */
 absl::Status normalize_choice_rules(Program& prog) {
   auto new_statements =
       std::make_unique<std::vector<std::unique_ptr<Statement>>>();
-  int i = 0;
   for (auto& statement : *(prog.statements)) {
     if (statement->head == nullptr ||
         statement->head->kind != Head::ChoiceKind) {
@@ -193,28 +191,13 @@ absl::Status normalize_choice_rules(Program& prog) {
     const Body* body = statement->body.get();
     const auto& elements = *choice.elements;
 
-    // Give each element a fresh auxiliary id up front so the disjunctive rules
-    // and the counting aggregate below refer to the same variables. The counter
-    // is program-wide so ids don't clash across multiple choice rules.
-    std::vector<std::string> ids;
-    std::vector<std::vector<std::string>> vars;
-    ids.reserve(elements.size());
-    vars.reserve(elements.size());
-    for (size_t e = 0; e < elements.size(); ++e) {
-      ids.push_back(absl::StrCat("_cr", i++));
-      vars.push_back(element_variables(*elements[e]));
-    }
-
-    // One disjunctive rule per element: 'pN | _crN(vars) :- conditions, body.'
+    // One disjunctive rule per element: 'pN | _ch_pN :- conditions, body.'
     for (size_t e = 0; e < elements.size(); ++e) {
       const ChoiceElement& element = *elements[e];
 
       auto disjunction = std::make_unique<Disjunction>();
       disjunction->literals.push_back(element.literal->clone());
-      auto aux = std::make_unique<ClassicalLiteral>();
-      aux->id = ids[e];
-      aux->args = variables_as_args(vars[e]);
-      disjunction->literals.push_back(std::move(aux));
+      disjunction->literals.push_back(choice_aux_atom(*element.literal));
 
       auto items = clone_body_items(body);
       if (element.conditions) {
@@ -239,7 +222,7 @@ absl::Status normalize_choice_rules(Program& prog) {
     if (choice.lb_term == nullptr && choice.ub_term == nullptr) continue;
 
     // Integrity constraint enforcing the choice bounds via a #count aggregate:
-    // ':- body, not #count{ _cr0 : p1, conditions ; ... } <bounds>.'
+    // ':- body, not #count{ _ch_p1 : p1, conditions ; ... } <bounds>.'
     auto aggregate = std::make_unique<Aggregate>();
     aggregate->naf = true;
     aggregate->function = AggregateFunctionType::kAGGREGATE_COUNT;
@@ -253,8 +236,7 @@ absl::Status normalize_choice_rules(Program& prog) {
       const ChoiceElement& element = *elements[e];
 
       auto terms = std::make_unique<std::vector<std::unique_ptr<Term>>>();
-      terms->push_back(
-          std::make_unique<Atom>(ids[e], variables_as_args(vars[e])));
+      terms->push_back(choice_aux_term(*element.literal));
 
       auto literals =
           std::make_unique<std::vector<std::unique_ptr<NafLiteral>>>();

@@ -95,9 +95,9 @@ TEST_F(NormalizeTest, TestNormalizeChoiceRuleSimple) {
   ASSERT_OK(normalize(**prog));
 
   EXPECT_THAT(**prog, EquivalentToSource(R"(
-    p1 | _cr0 :- q1.
-    p2 | _cr1 :- q1.
-    p3 | _cr2 :- q1.
+    p1 | _ch_p1 :- q1.
+    p2 | _ch_p2 :- q1.
+    p3 | _ch_p3 :- q1.
   )"));
 }
 
@@ -112,12 +112,12 @@ TEST_F(NormalizeTest, TestNormalizeChoiceRuleComplex) {
   ASSERT_OK(normalize(**prog));
 
   EXPECT_THAT(**prog, EquivalentToSource(R"(
-    a | _cr0 :- a1, a2, x, y, not z.
-    b | _cr1 :- x, y, not z.
-    c | _cr2 :- c1, c2, x, y, not z.
-    d | _cr3 :- x, y, not z.
-    e | _cr4 :- x, y, not z.
-    :- x, y, not z, not 1 < #count{ _cr0: a, a1, a2, _cr1: b, _cr2: c, c1, c2, _cr3: d, _cr4: e } <= 4.
+    a | _ch_a :- a1, a2, x, y, not z.
+    b | _ch_b :- x, y, not z.
+    c | _ch_c :- c1, c2, x, y, not z.
+    d | _ch_d :- x, y, not z.
+    e | _ch_e :- x, y, not z.
+    :- x, y, not z, not 1 < #count{ _ch_a: a, a1, a2, _ch_b: b, _ch_c: c, c1, c2, _ch_d: d, _ch_e: e } <= 4.
   )"));
 }
 
@@ -133,10 +133,10 @@ TEST_F(NormalizeTest, TestNormalizeMultipleChoiceRules) {
   ASSERT_OK(normalize(**prog));
 
   EXPECT_THAT(**prog, EquivalentToSource(R"(
-    p1 | _cr0 :- q1.
-    p2 | _cr1 :- q1.
-    r1 | _cr2 :- s1.
-    r2 | _cr3 :- s1.
+    p1 | _ch_p1 :- q1.
+    p2 | _ch_p2 :- q1.
+    r1 | _ch_r1 :- s1.
+    r2 | _ch_r2 :- s1.
   )"));
 }
 
@@ -151,8 +151,47 @@ TEST_F(NormalizeTest, TestNormalizeChoiceWithVars) {
   ASSERT_OK(normalize(**prog));
 
   EXPECT_THAT(**prog, EquivalentToSource(R"(
-    p(X, Y) | _cr0(X, Y) :- q(X), r(Y).
-    :- r(Y), not #count{ _cr0(X, Y): p(X, Y), q(X) } <= 1.
+    p(X, Y) | _ch_p(X, Y) :- q(X), r(Y).
+    :- r(Y), not #count{ _ch_p(X, Y): p(X, Y), q(X) } <= 1.
+  )"));
+}
+
+TEST_F(NormalizeTest, TestNormalizeChoiceCountsAnAtomOfferedTwiceOnce) {
+  // Two elements offering the same atom share one auxiliary atom, so the bound
+  // is read against a count of atoms. Counting elements instead would put this
+  // choice over its bound the moment 'a' is chosen.
+  std::string program = R"(
+    { a : q; a : r } <= 1.
+  )";
+
+  Parser parser(program);
+  auto prog = parser.parse_program();
+  ASSERT_OK(prog);
+  ASSERT_OK(normalize(**prog));
+
+  EXPECT_THAT(**prog, EquivalentToSource(R"(
+    a | _ch_a :- q.
+    a | _ch_a :- r.
+    :- not #count{ _ch_a: a, q, _ch_a: a, r } <= 1.
+  )"));
+}
+
+TEST_F(NormalizeTest, TestNormalizeChoiceAuxAtomLeavesOutConditionVariables) {
+  // The auxiliary atom carries the chosen atom's arguments and nothing else.
+  // With the condition's X in there too, this would count one tuple per q fact
+  // and the bound of 1 would forbid choosing 'a' at all.
+  std::string program = R"(
+    { a : q(X) } <= 1.
+  )";
+
+  Parser parser(program);
+  auto prog = parser.parse_program();
+  ASSERT_OK(prog);
+  ASSERT_OK(normalize(**prog));
+
+  EXPECT_THAT(**prog, EquivalentToSource(R"(
+    a | _ch_a :- q(X).
+    :- not #count{ _ch_a: a, q(X) } <= 1.
   )"));
 }
 
