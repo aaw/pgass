@@ -1,8 +1,5 @@
 ## Bugs
 
-* Say something when arithmetic on a non-number drops a rule. `p(-a).` grounds
-  to an empty program in silence. Decide first whether `-a` is a term or is
-  ill-formed.
 * Use unlimited precision integers for numbers and arithmetic. A number is a
   `uint64_t` in the AST and an `int64_t` once grounded, in a `SymEntry` or
   inlined into a `Sym` handle. ASP-Core-2 doesn't bound integers. Today

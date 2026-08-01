@@ -7,4 +7,10 @@
 
 std::string format(const Program& prog);
 
+// One statement on its own, e.g. "p(X) :- q(X)."
+std::string format(const Statement& statement);
+
+// One term on its own, e.g. "X + 1".
+std::string format(const Term& term);
+
 #endif  // FORMAT_H_

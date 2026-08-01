@@ -176,11 +176,15 @@ int main(int argc, char** argv) {
     return 1;
   }
 
-  auto grounded = ground(**program);
+  std::vector<std::string> warnings;
+  auto grounded = ground(**program, &warnings);
   if (!grounded.ok()) {
     std::cerr << "pgass: grounding error: " << grounded.status().message()
               << "\n";
     return 1;
+  }
+  for (const std::string& warning : warnings) {
+    std::cerr << "pgass: warning: " << warning << "\n";
   }
   if (absl::GetFlag(FLAGS_ground)) {
     std::cout << to_aspif(*grounded);

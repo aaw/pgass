@@ -125,6 +125,7 @@ target_link_libraries(ground_lib
     absl::inlined_vector
     absl::strings
     collect_lib
+    format_lib
     graph_lib
     symbols_lib
 )

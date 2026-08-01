@@ -1,6 +1,9 @@
 #ifndef GROUND_H_
 #define GROUND_H_
 
+#include <string>
+#include <vector>
+
 #include "absl/status/statusor.h"
 #include "aspif.h"
 #include "ast.h"
@@ -40,6 +43,13 @@
 // neither. Grounding an unsafe program can run forever, e.g. 'p(0). p(S) :-
 // #count{ X : p(X) } = S.', where every new p atom gives the count one more
 // atom to range over.
-absl::StatusOr<aspif::Program> ground(const Program& prog);
+//
+// A term with no value, e.g. the 'a + 1' that 'X + 1' becomes under {X: a},
+// gives its rule no ground instance under that binding. Grounding drops the
+// instance. If `warnings` is not null, it also appends one line naming the rule,
+// so that a program dropping rules this way does not do it in silence. A rule
+// warns once however many instances it drops.
+absl::StatusOr<aspif::Program> ground(
+    const Program& prog, std::vector<std::string>* warnings = nullptr);
 
 #endif  // GROUND_H_

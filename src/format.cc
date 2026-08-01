@@ -381,3 +381,15 @@ std::string format(const Program& prog) {
   }
   return fmt;
 }
+
+std::string format(const Statement& statement) {
+  std::string fmt;
+  format_statement(&fmt, statement);
+  return fmt;
+}
+
+std::string format(const Term& term) {
+  std::string fmt;
+  format_term(&fmt, term);
+  return fmt;
+}

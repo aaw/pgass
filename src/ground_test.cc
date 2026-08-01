@@ -4,6 +4,7 @@
 #include <gtest/gtest.h>
 
 #include <string>
+#include <vector>
 
 #include "absl/status/statusor.h"
 #include "macros.h"
@@ -23,6 +24,18 @@ absl::StatusOr<std::string> ground_source(const std::string& source) {
   RETURN_IF_ERROR(normalize(*program));
   ASSIGN_OR_RETURN(aspif::Program grounded, ground(*program));
   return to_aspif(grounded);
+}
+
+// Parses, normalizes, and grounds `source`, returning what grounding warned
+// about rather than the program it built.
+absl::StatusOr<std::vector<std::string>> ground_warnings(
+    const std::string& source) {
+  Parser parser(source);
+  ASSIGN_OR_RETURN(auto program, parser.parse_program());
+  RETURN_IF_ERROR(normalize(*program));
+  std::vector<std::string> warnings;
+  RETURN_IF_ERROR(ground(*program, &warnings).status());
+  return warnings;
 }
 
 TEST(GroundTest, Facts) {
@@ -157,8 +170,8 @@ TEST(GroundTest, VariableRuleGroundsOncePerMatch) {
             "0\n");
 }
 
-// A disjunctive head grounds to one aspif rule per instance, holding an atom per
-// disjunct.
+// A disjunctive head grounds to one aspif rule per instance, holding an atom
+// per disjunct.
 TEST(GroundTest, DisjunctiveHeadKeepsEveryDisjunct) {
   auto out = ground_source(R"(
     v(1). v(2).
@@ -1198,6 +1211,85 @@ TEST(GroundTest, IllFormedAggregateBoundDropsTheInstance) {
   // X = 0 makes the bound '4 / 0' ill-formed, so no q(0) is derived at all.
   EXPECT_THAT(*out, HasSubstr("q(2)"));
   EXPECT_THAT(*out, ::testing::Not(HasSubstr("q(0)")));
+}
+
+// A rule losing instances to a term with no value says so, because the answer
+// set otherwise comes out quietly short. 'p(-a).' is the case worth catching:
+// ASP-Core-2 reads the '-' as arithmetic, so '-a' has no value and the fact
+// grounds to nothing, where clingo reads it as classical negation and keeps
+// the fact.
+TEST(GroundTest, ArithmeticWithNoValueWarns) {
+  auto warnings = ground_warnings("p(-a).");
+  ASSERT_OK(warnings);
+  ASSERT_EQ(warnings->size(), 1u);
+  EXPECT_EQ((*warnings)[0],
+            "dropped ground instances of 'p(-a).' where 'a' is not an "
+            "integer");
+}
+
+// One warning per rule, however many of its instances go.
+TEST(GroundTest, ARuleLosingSeveralInstancesWarnsOnce) {
+  auto warnings = ground_warnings("q(a). q(b). p(X + 1) :- q(X).");
+  ASSERT_OK(warnings);
+  ASSERT_EQ(warnings->size(), 1u);
+  EXPECT_THAT((*warnings)[0],
+              HasSubstr("dropped ground instances of 'p(X + 1) :- q(X).'"));
+}
+
+TEST(GroundTest, ComparisonAssignmentAndNegationWithNoValueWarn) {
+  auto warnings = ground_warnings(R"(
+    q(a). r(0).
+    p1 :- q(X), X + 1 > 2.
+    p2(Y) :- q(X), Y = -X.
+    p3(X) :- r(X), not s(4 / X).
+  )");
+  ASSERT_OK(warnings);
+  EXPECT_EQ(warnings->size(), 3u);
+}
+
+// A positive literal whose argument has no value matches nothing, so its rule
+// loses that instance the same way, and the surviving instances are untouched.
+TEST(GroundTest, PositiveLiteralArgumentWithNoValueWarns) {
+  auto warnings = ground_warnings("p(0). p(2). r(2). q(X) :- p(X), r(4 / X).");
+  ASSERT_OK(warnings);
+  ASSERT_EQ(warnings->size(), 1u);
+  EXPECT_THAT((*warnings)[0], HasSubstr("'4 / X' divides by zero"));
+
+  auto out = ground_source("p(0). p(2). r(2). q(X) :- p(X), r(4 / X).");
+  ASSERT_OK(out);
+  EXPECT_THAT(*out, HasSubstr("q(2)"));
+  EXPECT_THAT(*out, ::testing::Not(HasSubstr("q(0)")));
+}
+
+// A #min or #max can bind a variable to a constant, which leaves an assignment
+// reading it without a value.
+TEST(GroundTest, AggregateValueWithNoValueForAnAssignmentWarns) {
+  auto warnings =
+      ground_warnings("p(a). q(T) :- #min{ X : p(X) } = S, T = S + 1.");
+  ASSERT_OK(warnings);
+  ASSERT_EQ(warnings->size(), 1u);
+  EXPECT_THAT((*warnings)[0], HasSubstr("'S' is not an integer"));
+}
+
+TEST(GroundTest, AggregateBoundWithNoValueWarns) {
+  auto warnings = ground_warnings(
+      "d(0). d(2). p(1). q(X) :- d(X), #count{ Y : p(Y) } >= 4 / X.");
+  ASSERT_OK(warnings);
+  ASSERT_EQ(warnings->size(), 1u);
+  EXPECT_THAT((*warnings)[0], HasSubstr("'4 / X' divides by zero"));
+}
+
+// A rule whose arithmetic works out says nothing, and neither does one whose
+// instances go for any other reason: a body literal nothing matches, or an
+// aggregate the store settles false.
+TEST(GroundTest, WellFormedArithmeticWarnsNothing) {
+  auto warnings = ground_warnings(R"(
+    q(1). q(2). p(X + 1) :- q(X).
+    s :- t.
+    u :- q(X), #count{ Y : q(Y) } >= 4.
+  )");
+  ASSERT_OK(warnings);
+  EXPECT_THAT(*warnings, ::testing::IsEmpty());
 }
 
 TEST(GroundTest, FunctionTermsMatchArgumentByArgument) {
