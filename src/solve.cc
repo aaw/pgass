@@ -26,7 +26,7 @@ struct LevelCost {
   // A cost no answer set can go below, which is where bisecting starts. Only a
   // negative weight can push the sum under zero, so this is the negative
   // weights added up.
-  std::int64_t lower_bound = 0;
+  BigInt lower_bound;
 };
 
 // One entry per priority level, the most important level first. That is the
@@ -39,7 +39,7 @@ struct LevelCost {
 std::vector<LevelCost> collect_level_costs(
     cvc5::TermManager& tm, const aspif::Program& prog,
     const std::vector<cvc5::Term>& atom_var) {
-  absl::btree_map<std::int64_t, std::vector<aspif::WeightedLit>> by_priority;
+  absl::btree_map<BigInt, std::vector<aspif::WeightedLit>> by_priority;
   for (const aspif::Minimize& minimize : prog.minimize) {
     std::vector<aspif::WeightedLit>& lits = by_priority[minimize.priority];
     lits.insert(lits.end(), minimize.lits.begin(), minimize.lits.end());
@@ -50,7 +50,7 @@ std::vector<LevelCost> collect_level_costs(
   // btree_map orders its keys ascending, so walking it backwards puts the
   // highest priority first.
   for (auto it = by_priority.rbegin(); it != by_priority.rend(); ++it) {
-    std::int64_t lower_bound = 0;
+    BigInt lower_bound;
     for (const aspif::WeightedLit& weighted : it->second) {
       if (weighted.weight < 0) lower_bound += weighted.weight;
     }
@@ -99,7 +99,7 @@ cvc5::Term reduct_body(cvc5::TermManager& tm, const aspif::Rule& rule,
   std::vector<cvc5::Term> addends;
   addends.reserve(rule.weighted_body.size());
   for (const aspif::WeightedLit& weighted : rule.weighted_body) {
-    const cvc5::Term weight = tm.mkInteger(weighted.weight);
+    const cvc5::Term weight = tm.mkInteger(weighted.weight.to_string());
     if (weighted.lit < 0 && !candidate.contains(-weighted.lit)) {
       addends.push_back(weight);
     } else if (weighted.lit > 0 && candidate.contains(weighted.lit)) {
@@ -107,8 +107,9 @@ cvc5::Term reduct_body(cvc5::TermManager& tm, const aspif::Rule& rule,
           tm.mkTerm(cvc5::Kind::ITE, {subset_var[weighted.lit], weight, zero}));
     }
   }
-  return tm.mkTerm(cvc5::Kind::GEQ,
-                   {sum(tm, addends), tm.mkInteger(rule.lower_bound)});
+  return tm.mkTerm(
+      cvc5::Kind::GEQ,
+      {sum(tm, addends), tm.mkInteger(rule.lower_bound.to_string())});
 }
 
 // Whether some proper subset of `candidate` models the reduct of `prog` with
@@ -163,24 +164,25 @@ absl::StatusOr<bool> subset_models_reduct(
   return undecided(result);
 }
 
-// Reads an integer the solver assigned. cvc5 works in unbounded integers, so a
-// program whose weights add up past 2^63 has a cost no std::int64_t can hold.
-// Better to say so than to report a wrapped-around number.
-absl::StatusOr<std::int64_t> int64_value(const cvc5::Term& value) {
-  if (!value.isInt64Value()) {
-    return absl::OutOfRangeError(absl::StrCat(
-        "cost ", value.getIntegerValue(), " does not fit in a 64-bit integer"));
+// Reads an integer the solver assigned. cvc5 prints one in decimal and works in
+// unbounded integers, as BigInt does, so no cost is too big to read back.
+absl::StatusOr<BigInt> cost_value(const cvc5::Term& value) {
+  const std::string text = value.getIntegerValue();
+  std::optional<BigInt> cost = BigInt::from_decimal(text);
+  if (!cost.has_value()) {
+    return absl::InternalError(absl::StrCat("cvc5 gave a cost of '", text,
+                                            "', which is not a number"));
   }
-  return value.getInt64Value();
+  return *std::move(cost);
 }
 
 // The solver, and what looking for answer sets rather than models takes.
 //
 // Every search goes through find(). Where a component is head-cyclic, a model
-// of the assertions can fail to be an answer set. find() checks each model it is
-// handed and rules out the ones that fail, until it holds an answer set or the
-// solver runs out of models. Where no component is head-cyclic, the assertions
-// describe the answer sets exactly and find() is one checkSat().
+// of the assertions can fail to be an answer set. find() checks each model it
+// is handed and rules out the ones that fail, until it holds an answer set or
+// the solver runs out of models. Where no component is head-cyclic, the
+// assertions describe the answer sets exactly and find() is one checkSat().
 struct Search {
   cvc5::TermManager& tm;
   cvc5::Solver& solver;
@@ -188,19 +190,21 @@ struct Search {
   const std::vector<cvc5::Term>& atom_var;
   // Whether a model has to pass the minimality check to count as an answer set.
   bool check_reduct = false;
-  // The logic to check the reduct in, which is the one the program is solved in.
+  // The logic to check the reduct in, which is the one the program is solved
+  // in.
   const char* logic = nullptr;
 
   // Clauses ruling out the models already handed back, the answer sets and the
   // failed candidates alike. Both are permanent. A model that is not an answer
   // set never becomes one, and an answer set is reported once. pop() drops what
-  // its scope asserted, so they are kept here and asserted again on the way out.
+  // its scope asserted, so they are kept here and asserted again on the way
+  // out.
   std::vector<cvc5::Term> blocked;
   // Where in `blocked` each open push() scope began.
   std::vector<size_t> scopes;
 
-  // Whether the solver holds an answer set. `assumption`, where given, holds for
-  // this search alone.
+  // Whether the solver holds an answer set. `assumption`, where given, holds
+  // for this search alone.
   absl::StatusOr<bool> find(
       const std::optional<cvc5::Term>& assumption = std::nullopt);
 
@@ -260,8 +264,7 @@ void Search::pop() {
   scopes.pop_back();
 }
 
-absl::StatusOr<bool> Search::find(
-    const std::optional<cvc5::Term>& assumption) {
+absl::StatusOr<bool> Search::find(const std::optional<cvc5::Term>& assumption) {
   while (true) {
     const cvc5::Result result = assumption.has_value()
                                     ? solver.checkSatAssuming(*assumption)
@@ -271,14 +274,14 @@ absl::StatusOr<bool> Search::find(
     if (!check_reduct) return true;
 
     const std::vector<aspif::Atom> atoms = model_atoms();
-    ASSIGN_OR_RETURN(
-        const bool smaller,
-        subset_models_reduct(
-            tm, prog, logic,
-            absl::flat_hash_set<aspif::Atom>(atoms.begin(), atoms.end())));
+    ASSIGN_OR_RETURN(const bool smaller,
+                     subset_models_reduct(tm, prog, logic,
+                                          absl::flat_hash_set<aspif::Atom>(
+                                              atoms.begin(), atoms.end())));
     if (!smaller) return true;
     // A model of the rules that a smaller model of its reduct undercuts is no
-    // answer set, whatever cost bound it was found under, so it is out for good.
+    // answer set, whatever cost bound it was found under, so it is out for
+    // good.
     block(atoms);
   }
 }
@@ -286,7 +289,7 @@ absl::StatusOr<bool> Search::find(
 // The least cost a level can take, or nullopt when the program has no answer
 // set. Both searches below return that, and leave the solver holding whatever
 // bounds they proved along the way.
-using LeastCost = absl::StatusOr<std::optional<std::int64_t>>;
+using LeastCost = absl::StatusOr<std::optional<BigInt>>;
 
 // Finds any answer set, works out its cost, then asks for a strictly lower one.
 // Repeats until that comes back unsat. The last cost seen is the least
@@ -298,14 +301,14 @@ using LeastCost = absl::StatusOr<std::optional<std::int64_t>>;
 // is asked.
 LeastCost minimize_by_stepping_down(Search& search, const LevelCost& level) {
   cvc5::TermManager& tm = search.tm;
-  std::optional<std::int64_t> best;
+  std::optional<BigInt> best;
   search.push();
   while (true) {
     ASSIGN_OR_RETURN(const bool found, search.find());
     if (!found) break;
-    ASSIGN_OR_RETURN(best, int64_value(search.solver.getValue(level.cost)));
-    search.solver.assertFormula(
-        tm.mkTerm(cvc5::Kind::LT, {level.cost, tm.mkInteger(*best)}));
+    ASSIGN_OR_RETURN(best, cost_value(search.solver.getValue(level.cost)));
+    search.solver.assertFormula(tm.mkTerm(
+        cvc5::Kind::LT, {level.cost, tm.mkInteger(best->to_string())}));
   }
   search.pop();
   return best;
@@ -325,30 +328,29 @@ LeastCost minimize_by_bisecting(Search& search, const LevelCost& level) {
   // program shows up.
   ASSIGN_OR_RETURN(const bool found, search.find());
   if (!found) return std::nullopt;
-  ASSIGN_OR_RETURN(std::int64_t high,
-                   int64_value(search.solver.getValue(level.cost)));
+  ASSIGN_OR_RETURN(BigInt high, cost_value(search.solver.getValue(level.cost)));
   search.solver.assertFormula(
-      tm.mkTerm(cvc5::Kind::LEQ, {level.cost, tm.mkInteger(high)}));
+      tm.mkTerm(cvc5::Kind::LEQ, {level.cost, tm.mkInteger(high.to_string())}));
 
-  std::int64_t low = level.lower_bound;
+  BigInt low = level.lower_bound;
   while (low < high) {
     // Rounds down, so the midpoint stays below `high` and the range really
     // shrinks.
-    const std::int64_t middle = low + (high - low) / 2;
+    const BigInt middle = low + (high - low) / 2;
     ASSIGN_OR_RETURN(
         const bool under_bound,
         search.find(tm.mkTerm(cvc5::Kind::LEQ,
-                              {level.cost, tm.mkInteger(middle)})));
+                              {level.cost, tm.mkInteger(middle.to_string())})));
     if (under_bound) {
       // The answer set found may cost well under what the probe asked for, so
       // take its cost rather than the midpoint.
-      ASSIGN_OR_RETURN(high, int64_value(search.solver.getValue(level.cost)));
-      search.solver.assertFormula(
-          tm.mkTerm(cvc5::Kind::LEQ, {level.cost, tm.mkInteger(high)}));
+      ASSIGN_OR_RETURN(high, cost_value(search.solver.getValue(level.cost)));
+      search.solver.assertFormula(tm.mkTerm(
+          cvc5::Kind::LEQ, {level.cost, tm.mkInteger(high.to_string())}));
     } else {
       low = middle + 1;
-      search.solver.assertFormula(
-          tm.mkTerm(cvc5::Kind::GEQ, {level.cost, tm.mkInteger(low)}));
+      search.solver.assertFormula(tm.mkTerm(
+          cvc5::Kind::GEQ, {level.cost, tm.mkInteger(low.to_string())}));
     }
   }
   return high;
@@ -382,20 +384,21 @@ LeastCost minimize_level(Search& search, const LevelCost& level,
 //
 // On return the solver is satisfiable exactly when the program has an answer
 // set, and every answer set it still admits is an optimal one.
-absl::StatusOr<std::vector<std::int64_t>> optimize(
+absl::StatusOr<std::vector<BigInt>> optimize(
     Search& search, const std::vector<LevelCost>& level_costs,
     SolveOptions::Optimizer optimizer) {
-  std::vector<std::int64_t> costs;
+  std::vector<BigInt> costs;
   costs.reserve(level_costs.size());
   for (const LevelCost& level : level_costs) {
-    ASSIGN_OR_RETURN(const std::optional<std::int64_t> least,
+    ASSIGN_OR_RETURN(const std::optional<BigInt> least,
                      minimize_level(search, level, optimizer));
     // No cost at all means the program is unsat, which the caller finds out for
     // itself when it looks for an answer set.
-    if (!least.has_value()) return std::vector<std::int64_t>();
+    if (!least.has_value()) return std::vector<BigInt>();
     costs.push_back(*least);
     search.solver.assertFormula(search.tm.mkTerm(
-        cvc5::Kind::EQUAL, {level.cost, search.tm.mkInteger(*least)}));
+        cvc5::Kind::EQUAL,
+        {level.cost, search.tm.mkInteger(least->to_string())}));
   }
   return costs;
 }
@@ -412,7 +415,7 @@ struct Session {
   std::optional<Search> search;
   // The cost of each priority level, pinned to its least value. Empty for a
   // program with no minimize statements, and for one with no answer set.
-  std::vector<std::int64_t> costs;
+  std::vector<BigInt> costs;
 
   // Builds the encoding, loads it into a solver, and settles every weak
   // constraint level. On return the solver is satisfiable exactly when the

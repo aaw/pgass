@@ -41,11 +41,23 @@ FetchContent_MakeAvailable(googletest abseil-cpp)
 # cvc5, the SMT solver the QF_IDL translation is handed to.
 include(cmake/cvc5.cmake)
 
+add_library(bigint_lib STATIC src/bigint.cc)
+target_compile_options(bigint_lib PRIVATE ${PGASS_WARNINGS})
+target_include_directories(bigint_lib PUBLIC src)
+target_link_libraries(bigint_lib
+  PUBLIC
+    absl::inlined_vector
+  PRIVATE
+    absl::str_format
+    absl::strings
+)
+
 add_library(parse_lib STATIC src/parse.cc src/ast.cc)
 target_compile_options(parse_lib PRIVATE ${PGASS_WARNINGS})
 target_include_directories(parse_lib PUBLIC src)
 target_link_libraries(parse_lib
   PUBLIC
+    bigint_lib
     absl::statusor
   PRIVATE
     absl::strings
@@ -95,6 +107,8 @@ add_library(aspif_lib STATIC src/aspif.cc)
 target_compile_options(aspif_lib PRIVATE ${PGASS_WARNINGS})
 target_include_directories(aspif_lib PUBLIC src)
 target_link_libraries(aspif_lib
+  PUBLIC
+    bigint_lib
   PRIVATE
     absl::strings
 )
@@ -104,6 +118,7 @@ target_compile_options(symbols_lib PRIVATE ${PGASS_WARNINGS})
 target_include_directories(symbols_lib PUBLIC src)
 target_link_libraries(symbols_lib
   PUBLIC
+    bigint_lib
     absl::node_hash_map
     absl::span
   PRIVATE
@@ -190,6 +205,17 @@ target_link_libraries(pgass
     absl::flags
     absl::flags_parse
     absl::flags_usage
+)
+
+add_executable(bigint_test src/bigint_test.cc)
+target_compile_options(bigint_test PRIVATE ${PGASS_WARNINGS})
+target_link_libraries(bigint_test
+  PRIVATE
+    bigint_lib
+    absl::hash
+    absl::strings
+    GTest::gtest_main
+    GTest::gmock
 )
 
 add_executable(parse_test src/parse_test.cc)
@@ -295,6 +321,7 @@ target_link_libraries(graph_test
 )
 
 include(GoogleTest)
+gtest_discover_tests(bigint_test)
 gtest_discover_tests(parse_test)
 gtest_discover_tests(safety_test)
 gtest_discover_tests(format_test)

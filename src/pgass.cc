@@ -68,7 +68,7 @@ void print_answer_set(const aspif::Program& prog, const AnswerSet& answer_set) {
   std::cout << "\n";
   if (!answer_set.costs.empty()) {
     std::cout << "Cost:";
-    for (std::int64_t cost : answer_set.costs) std::cout << ' ' << cost;
+    for (const BigInt& cost : answer_set.costs) std::cout << ' ' << cost;
     std::cout << "\n";
   }
 }
@@ -79,7 +79,8 @@ void print_answer_set(const aspif::Program& prog, const AnswerSet& answer_set) {
 //
 // A program with no answer set holds every query under every substitution, and
 // there are too many of those to print, so it gets a sentence instead.
-void print_substitutions(const aspif::Program& prog, const QueryResult& answer) {
+void print_substitutions(const aspif::Program& prog,
+                         const QueryResult& answer) {
   if (answer.no_answer_set) {
     std::cout << "the program has no answer set. every substitution answers "
                  "the query\n";
@@ -180,8 +181,8 @@ int main(int argc, char** argv) {
   }
 
   std::vector<std::string> warnings;
-  auto grounded = ground(**program, &warnings,
-                         absl::GetFlag(FLAGS_max_ground_atoms));
+  auto grounded =
+      ground(**program, &warnings, absl::GetFlag(FLAGS_max_ground_atoms));
   if (!grounded.ok()) {
     std::cerr << "pgass: grounding error: " << grounded.status().message()
               << "\n";

@@ -8,6 +8,7 @@
 
 #include "absl/container/node_hash_map.h"
 #include "absl/types/span.h"
+#include "bigint.h"
 
 // A ground value, interned down to four bytes.
 //
@@ -51,9 +52,9 @@ struct SymEntry {
   enum Kind { kNumber, kConstant, kString, kFunction };
 
   Kind kind;
-  std::int64_t number = 0;  // set only when kind == kNumber
-  std::string text;         // the constant's, string's, or function's name
-  std::vector<Sym> args;    // set only when kind == kFunction, never empty
+  BigInt number;          // set only when kind == kNumber
+  std::string text;       // the constant's, string's, or function's name
+  std::vector<Sym> args;  // set only when kind == kFunction, never empty
 
   bool operator==(const SymEntry&) const = default;
 
@@ -78,7 +79,7 @@ inline std::int64_t inline_number(Sym sym) {
 class Symbols {
  public:
   // The handle for a value, interning it if this is the first time it is seen.
-  Sym number(std::int64_t value);
+  Sym number(const BigInt& value);
   Sym constant(std::string_view name);
   Sym string(std::string_view contents);
   Sym function(std::string_view name, std::vector<Sym> args);
@@ -90,8 +91,9 @@ class Symbols {
 
   // The integer `sym` stands for. Only ask this of a handle is_number() said
   // yes to.
-  std::int64_t number_of(Sym sym) const {
-    return is_inline_number(sym) ? inline_number(sym) : entry(sym).number;
+  BigInt number_of(Sym sym) const {
+    return is_inline_number(sym) ? BigInt(inline_number(sym))
+                                 : entry(sym).number;
   }
 
   // What `sym` was interned from. Only ask this of a handle that has a table

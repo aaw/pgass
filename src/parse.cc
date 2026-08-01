@@ -1,9 +1,9 @@
 #include "parse.h"
 
-#include <cstdint>
+#include <optional>
+#include <utility>
 #include <vector>
 
-#include "absl/strings/numbers.h"
 #include "absl/strings/str_cat.h"
 #include "macros.h"
 
@@ -693,13 +693,13 @@ absl::StatusOr<std::unique_ptr<Term>> Parser::parse_single_term() {
     }
     return std::make_unique<Atom>(std::string(token.val), nullptr);
   } else if (token.type == TokenType::kNUMBER) {
-    uint64_t number;
-    if (!absl::SimpleAtoi(token.val, &number)) {
-      return absl::InvalidArgumentError(absl::StrCat(
-          "Couldn't convert number ", token.val,
-          " to 64-bit unsigned integer\n", lexer_.report_last_token_pos()));
+    std::optional<BigInt> number = BigInt::from_decimal(token.val);
+    if (!number.has_value()) {
+      return absl::InvalidArgumentError(
+          absl::StrCat("Couldn't read '", token.val, "' as a number\n",
+                       lexer_.report_last_token_pos()));
     }
-    return std::make_unique<Number>(number);
+    return std::make_unique<Number>(*std::move(number));
   } else if (token.type == TokenType::kSTRING) {
     return std::make_unique<String>(string_contents(token.val));
   } else if (token.type == TokenType::kVARIABLE) {

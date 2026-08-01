@@ -1,11 +1,13 @@
 #ifndef AST_H_
 #define AST_H_
 
-#include <cstdint>
 #include <memory>
 #include <string>
 #include <string_view>
+#include <utility>
 #include <vector>
+
+#include "bigint.h"
 
 struct Head {
   enum Kind { ChoiceKind, DisjunctionKind };
@@ -225,9 +227,11 @@ struct Atom : Term {
 };
 
 struct Number : Term {
-  std::uint64_t value;  // TODO: use an unlimited precision bignum
+  // A literal is always non-negative. A leading '-' is its own token, which
+  // parses as a NegatedTerm around this.
+  BigInt value;
 
-  Number(std::uint64_t value) : Term(NumberKind), value(value) {}
+  Number(BigInt value) : Term(NumberKind), value(std::move(value)) {}
 
   std::unique_ptr<Term> clone() const override;
 };

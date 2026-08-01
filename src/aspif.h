@@ -6,6 +6,8 @@
 #include <string>
 #include <vector>
 
+#include "bigint.h"
+
 /* A ground program in the aspif intermediate format (Kaminski et al.,
    "How to build your own ASP-based system?!", appendix B), the line-based
    format that gringo emits and clasp accepts. Each struct below mirrors one
@@ -26,7 +28,7 @@ using Lit = std::int32_t;
 
 struct WeightedLit {
   Lit lit;
-  std::int64_t weight;
+  BigInt weight;
 
   bool operator==(const WeightedLit&) const = default;
 };
@@ -47,14 +49,14 @@ struct Rule {
   std::vector<Lit> body;
   // Valid iff body_type == kWeight: the body holds when the weights of the
   // true literals sum to at least lower_bound. Weights must be positive.
-  std::int64_t lower_bound = 0;
+  BigInt lower_bound;
   std::vector<WeightedLit> weighted_body;
 };
 
 // Statement 2. All weighted literals of one priority level; a solver
 // minimizes the sum of weights of true literals, lower levels less important.
 struct Minimize {
-  std::int64_t priority = 0;
+  BigInt priority;
   std::vector<WeightedLit> lits;
 };
 

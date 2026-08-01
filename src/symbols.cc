@@ -2,6 +2,7 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <optional>
 #include <string>
 #include <utility>
 
@@ -15,9 +16,12 @@ Sym Symbols::intern(SymEntry entry) {
   return it->second;
 }
 
-Sym Symbols::number(std::int64_t value) {
-  if (value >= kMinInlineNumber && value <= kMaxInlineNumber) {
-    return kInlineNumberTag | static_cast<Sym>(value + kInlineNumberBias);
+Sym Symbols::number(const BigInt& value) {
+  // Only a number too big to ride inside a handle is copied into the table.
+  const std::optional<std::int64_t> small = value.to_int64();
+  if (small.has_value() && *small >= kMinInlineNumber &&
+      *small <= kMaxInlineNumber) {
+    return kInlineNumberTag | static_cast<Sym>(*small + kInlineNumberBias);
   }
   return intern(SymEntry{.kind = SymEntry::kNumber, .number = value});
 }
@@ -70,8 +74,15 @@ int Symbols::compare(Sym a, Sym b) const {
   const SymEntry::Kind other_kind = kind_of(b);
   if (kind != other_kind) return kind < other_kind ? -1 : 1;
   if (kind == SymEntry::kNumber) {
-    const std::int64_t left = number_of(a);
-    const std::int64_t right = number_of(b);
+    // Almost every number a program compares rides inside its handle, and
+    // reading those two straight off costs nothing.
+    if (is_inline_number(a) && is_inline_number(b)) {
+      const std::int64_t left = inline_number(a);
+      const std::int64_t right = inline_number(b);
+      return left < right ? -1 : left > right ? 1 : 0;
+    }
+    const BigInt left = number_of(a);
+    const BigInt right = number_of(b);
     return left < right ? -1 : left > right ? 1 : 0;
   }
   const SymEntry& left = entry(a);

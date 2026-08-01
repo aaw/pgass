@@ -1,11 +1,11 @@
 #ifndef SOLVE_H_
 #define SOLVE_H_
 
-#include <cstdint>
 #include <vector>
 
 #include "absl/status/statusor.h"
 #include "aspif.h"
+#include "bigint.h"
 
 // One answer set: the atoms true in it. Every atom of the program that is not
 // listed is false. The ids are the ones the solved aspif::Program used, so
@@ -15,7 +15,7 @@ struct AnswerSet {
   // One entry per priority level of the program's aspif::Minimize statements,
   // the most important level first. Each is the weights of that level's true
   // literals, added up. Empty for a program with no minimize statements.
-  std::vector<std::int64_t> costs;
+  std::vector<BigInt> costs;
 };
 
 struct SolveOptions {

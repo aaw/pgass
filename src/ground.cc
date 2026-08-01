@@ -1,7 +1,6 @@
 #include "ground.h"
 
 #include <algorithm>
-#include <cstdint>
 #include <deque>
 #include <optional>
 #include <string>
@@ -261,8 +260,8 @@ bool has_no_value(const absl::Status& status) {
   return status.code() == kNoValue;
 }
 
-absl::StatusOr<int64_t> eval_number(const Term& term, const Binding& binding,
-                                    Symbols& syms);
+absl::StatusOr<BigInt> eval_number(const Term& term, const Binding& binding,
+                                   Symbols& syms);
 
 // Evaluates a term to its ground value, e.g. 'X' evaluates to 1 under the
 // binding {X: 1}. Every variable must already be bound.
@@ -272,10 +271,7 @@ absl::StatusOr<Sym> eval_term(const Term& term, const Binding& binding,
                               Symbols& syms) {
   switch (term.kind) {
     case Term::NumberKind:
-      // TODO: this cast and the arithmetic below wrap on overflow; move to
-      // unlimited precision integers to fix.
-      return syms.number(
-          static_cast<int64_t>(static_cast<const Number&>(term).value));
+      return syms.number(static_cast<const Number&>(term).value);
     case Term::StringKind:
       return syms.string(static_cast<const String&>(term).value);
     case Term::AtomKind: {
@@ -303,15 +299,14 @@ absl::StatusOr<Sym> eval_term(const Term& term, const Binding& binding,
           "'_' cannot appear in a position that must be ground");
     case Term::NegatedTermKind: {
       const NegatedTerm& negated = static_cast<const NegatedTerm&>(term);
-      ASSIGN_OR_RETURN(int64_t value,
-                       eval_number(*negated.term, binding, syms));
+      ASSIGN_OR_RETURN(BigInt value, eval_number(*negated.term, binding, syms));
       return syms.number(-value);
     }
     case Term::TermOperationKind: {
       const TermOperation& operation = static_cast<const TermOperation&>(term);
-      ASSIGN_OR_RETURN(int64_t left,
+      ASSIGN_OR_RETURN(BigInt left,
                        eval_number(*operation.left, binding, syms));
-      ASSIGN_OR_RETURN(int64_t right,
+      ASSIGN_OR_RETURN(BigInt right,
                        eval_number(*operation.right, binding, syms));
       switch (operation.op) {
         case OperationType::kPLUS:
@@ -321,7 +316,7 @@ absl::StatusOr<Sym> eval_term(const Term& term, const Binding& binding,
         case OperationType::kTIMES:
           return syms.number(left * right);
         case OperationType::kDIV:
-          if (right == 0) return no_value(term, "divides by zero");
+          if (right.is_zero()) return no_value(term, "divides by zero");
           return syms.number(left / right);
       }
       return absl::InternalError("unknown arithmetic operator");
@@ -333,8 +328,8 @@ absl::StatusOr<Sym> eval_term(const Term& term, const Binding& binding,
 // Evaluates a term that has to come out as a number, e.g. either side of a
 // '+'. Arithmetic works on integers only, so anything else comes back kNoValue,
 // e.g. the 'a' that 'X' becomes under {X: a}.
-absl::StatusOr<int64_t> eval_number(const Term& term, const Binding& binding,
-                                    Symbols& syms) {
+absl::StatusOr<BigInt> eval_number(const Term& term, const Binding& binding,
+                                   Symbols& syms) {
   ASSIGN_OR_RETURN(Sym value, eval_term(term, binding, syms));
   if (!syms.is_number(value)) return no_value(term, "is not an integer");
   return syms.number_of(value);
@@ -1254,7 +1249,7 @@ absl::StatusOr<std::optional<std::vector<aspif::Lit>>> negative_lits(
 // are derived.
 struct AggTuple {
   Tuple tuple;
-  int64_t weight;  // what the tuple adds to the aggregate's value
+  BigInt weight;  // what the tuple adds to the aggregate's value
   // One body per grounding that puts the tuple in the set. Empty when every
   // grounding has an ill-formed 'not' literal.
   std::vector<std::vector<aspif::Lit>> supports;
@@ -1321,7 +1316,7 @@ absl::StatusOr<std::vector<AggTuple>> collect_agg_tuples(
               // contributes no tuple to the set.
               ASSIGN_OR_RETURN(Tuple tuple, eval_terms(element.terms,
                                                        instance.binding, syms));
-              int64_t weight = 1;
+              BigInt weight = 1;
               if (agg.function == AggregateFunctionType::kAGGREGATE_SUM) {
                 // #sum adds up the tuples whose first term is an integer and
                 // ignores the others, e.g. '#sum{ 1 : p; a : q }' is just 1. A
@@ -1408,10 +1403,10 @@ bool set_is_settled(const Aggregate& agg, const std::vector<AggTuple>& tuples) {
 // The value a #count or #sum takes in every answer set, when grounding can work
 // that out on its own, e.g. the 2 of '#count{ X : p(X) }' over the facts p(1)
 // and p(2). Nullopt means the solver still has a say.
-std::optional<int64_t> settled_agg_value(const Aggregate& agg,
-                                         const std::vector<AggTuple>& tuples) {
+std::optional<BigInt> settled_agg_value(const Aggregate& agg,
+                                        const std::vector<AggTuple>& tuples) {
   if (!set_is_settled(agg, tuples)) return std::nullopt;
-  int64_t value = 0;
+  BigInt value;
   for (const AggTuple& tuple : tuples) value += tuple.weight;
   return value;
 }
@@ -1482,12 +1477,12 @@ absl::StatusOr<std::vector<Sym>> possible_values(
 
   // An aggregate grounding has settled takes one value and no other, e.g. the
   // 2 that 'q(S) :- #count{ X : p(X) } = S.' binds S to over two p facts.
-  std::optional<int64_t> settled = settled_agg_value(agg, tuples);
+  std::optional<BigInt> settled = settled_agg_value(agg, tuples);
   if (settled.has_value()) return std::vector<Sym>{syms.number(*settled)};
-  absl::btree_set<int64_t> reachable = {0};
+  absl::btree_set<BigInt> reachable = {BigInt()};
   for (const AggTuple& tuple : tuples) {
-    absl::btree_set<int64_t> extended = reachable;
-    for (int64_t sum : reachable) extended.insert(sum + tuple.weight);
+    absl::btree_set<BigInt> extended = reachable;
+    for (const BigInt& sum : reachable) extended.insert(sum + tuple.weight);
     if (extended.size() > kMaxAggregateValues) {
       return absl::ResourceExhaustedError(absl::StrCat(
           "an aggregate whose value binds a variable can take more than ",
@@ -1497,7 +1492,7 @@ absl::StatusOr<std::vector<Sym>> possible_values(
   }
   std::vector<Sym> values;
   values.reserve(reachable.size());
-  for (int64_t value : reachable) values.push_back(syms.number(value));
+  for (const BigInt& value : reachable) values.push_back(syms.number(value));
   return values;
 }
 
@@ -1756,27 +1751,27 @@ BinopType with_sides_swapped(BinopType op) {
 // 'term binop' sides, e.g. "3 <= #count{...} < 7" contributes lower = 3 (from
 // '3 <=') and upper = 6 (from '< 7').
 struct AggBounds {
-  std::optional<int64_t> lower;    // the aggregate's value must be >= this.
-  std::optional<int64_t> upper;    // the aggregate's value must be <= this.
-  std::vector<int64_t> not_equal;  // the aggregate's value must differ from
-                                   // each of these.
+  std::optional<BigInt> lower;    // the aggregate's value must be >= this.
+  std::optional<BigInt> upper;    // the aggregate's value must be <= this.
+  std::vector<BigInt> not_equal;  // the aggregate's value must differ from
+                                  // each of these.
   // Whether a bound rules every value out, which only a bound that is not a
   // number can do. See apply_non_numeric_bound().
   bool unsatisfiable = false;
 
-  void apply_lower(int64_t k) {
+  void apply_lower(const BigInt& k) {
     lower = lower.has_value() ? std::max(*lower, k) : k;
   }
-  void apply_upper(int64_t k) {
+  void apply_upper(const BigInt& k) {
     upper = upper.has_value() ? std::min(*upper, k) : k;
   }
 
   // Whether a value meets every bound collected here.
-  bool hold_for(int64_t value) const {
+  bool hold_for(const BigInt& value) const {
     if (unsatisfiable) return false;
     if (lower.has_value() && value < *lower) return false;
     if (upper.has_value() && value > *upper) return false;
-    for (int64_t k : not_equal) {
+    for (const BigInt& k : not_equal) {
       if (value == k) return false;
     }
     return true;
@@ -1784,7 +1779,7 @@ struct AggBounds {
 };
 
 // Folds the upper-bound side ('AGG op k', e.g. 'AGG <= 7') into `bounds`.
-void apply_upper_bound(int64_t k, BinopType op, AggBounds& bounds) {
+void apply_upper_bound(const BigInt& k, BinopType op, AggBounds& bounds) {
   switch (op) {
     case BinopType::kLESS_OR_EQ:
       bounds.apply_upper(k);
@@ -1809,7 +1804,7 @@ void apply_upper_bound(int64_t k, BinopType op, AggBounds& bounds) {
 }
 
 // Folds the lower-bound side ('k op AGG', e.g. '3 <= AGG') into `bounds`.
-void apply_lower_bound(int64_t k, BinopType op, AggBounds& bounds) {
+void apply_lower_bound(const BigInt& k, BinopType op, AggBounds& bounds) {
   switch (op) {
     case BinopType::kLESS_OR_EQ:
       bounds.apply_lower(k);
@@ -1863,12 +1858,12 @@ aspif::Lit negate_conjunction(const std::vector<aspif::Lit>& lits,
 // using w * [l] = w + (-w) * [not l], which flips the literal, negates its
 // weight, and leaves the constant w to fold into the bound. A weight of 0
 // never changes the sum, so its literal is left out.
-aspif::Atom at_least(int64_t bound,
+aspif::Atom at_least(const BigInt& bound,
                      const std::vector<aspif::WeightedLit>& weighted,
                      aspif::Program& result) {
   std::vector<aspif::WeightedLit> positive;
   positive.reserve(weighted.size());
-  int64_t lower = bound;
+  BigInt lower = bound;
   for (const aspif::WeightedLit& wl : weighted) {
     if (wl.weight > 0) {
       positive.push_back(wl);
@@ -1970,7 +1965,7 @@ std::optional<bool> settled_agg_holds(const Aggregate& agg,
   // A bound no integer meets, e.g. the 'a' of '#count{...} >= a', settles the
   // aggregate whatever the solver does with its value.
   if (bounds.unsatisfiable) return agg.naf;
-  std::optional<int64_t> value = settled_agg_value(agg, tuples);
+  std::optional<BigInt> value = settled_agg_value(agg, tuples);
   if (!value.has_value()) return std::nullopt;
   const bool holds = bounds.hold_for(*value);
   return agg.naf ? !holds : holds;
@@ -2122,7 +2117,7 @@ absl::StatusOr<std::optional<std::vector<aspif::Lit>>> ground_aggregate(
   if (bounds.upper.has_value()) {
     extra.push_back(-at_least(*bounds.upper + 1, weighted, result));
   }
-  for (int64_t k : bounds.not_equal) {
+  for (const BigInt& k : bounds.not_equal) {
     // The value equals k exactly when it is at least k but not at least
     // k + 1, so requiring it to differ from k negates that conjunction.
     aspif::Lit k_or_more = at_least(k, weighted, result);
@@ -2568,7 +2563,7 @@ absl::Status emit_rules(const std::vector<const RuleView*>& rules,
 // where X binds to a constant, costs nothing at any level, so it is left out.
 void emit_minimize(const Store& store, const Symbols& syms,
                    aspif::Program& result) {
-  absl::btree_map<int64_t, std::vector<aspif::WeightedLit>> by_level;
+  absl::btree_map<BigInt, std::vector<aspif::WeightedLit>> by_level;
   for (const PredKey& key : store.order) {
     if (key.name != "_viol") continue;
     for (const GroundAtom& atom : store.find(key)->atoms) {

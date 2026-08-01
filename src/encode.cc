@@ -238,7 +238,7 @@ cvc5::Term body_term(cvc5::TermManager& tm,
   // lower_bound.
   return tm.mkTerm(cvc5::Kind::GEQ,
                    {weighted_sum(tm, atom_var, rule.weighted_body),
-                    tm.mkInteger(rule.lower_bound)});
+                    tm.mkInteger(rule.lower_bound.to_string())});
 }
 
 // One rule deriving one atom.
@@ -466,9 +466,9 @@ cvc5::Term weighted_sum(cvc5::TermManager& tm,
   std::vector<cvc5::Term> addends;
   addends.reserve(lits.size());
   for (const aspif::WeightedLit& weighted : lits) {
-    addends.push_back(
-        tm.mkTerm(cvc5::Kind::ITE, {literal_term(tm, atom_var, weighted.lit),
-                                    tm.mkInteger(weighted.weight), zero}));
+    addends.push_back(tm.mkTerm(
+        cvc5::Kind::ITE, {literal_term(tm, atom_var, weighted.lit),
+                          tm.mkInteger(weighted.weight.to_string()), zero}));
   }
   return sum(tm, addends);
 }
