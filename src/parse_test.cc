@@ -248,6 +248,36 @@ TEST_F(ParserTest, ParseAggregateElement) {
   }
 }
 
+// An element's terms are full terms, not the spec grammar's <basic_terms>.
+// See the comment on parse_aggregate_element.
+TEST_F(ParserTest, ParseAggregateElementWithCompoundTerms) {
+  {
+    Parser parser("X*2 : p(X)");
+    auto element_status = parser.parse_aggregate_element();
+    ASSERT_OK(element_status);
+    auto element = std::move(*element_status);
+    ASSERT_NE(element->terms, nullptr);
+    ASSERT_EQ(element->terms->size(), 1);
+    auto* op = dynamic_cast<TermOperation*>(element->terms->at(0).get());
+    ASSERT_NE(op, nullptr);
+    EXPECT_EQ(op->op, OperationType::kTIMES);
+  }
+
+  {
+    Parser parser("f(X) : p(X)");
+    auto element_status = parser.parse_aggregate_element();
+    ASSERT_OK(element_status);
+    auto element = std::move(*element_status);
+    ASSERT_NE(element->terms, nullptr);
+    ASSERT_EQ(element->terms->size(), 1);
+    auto* atom = dynamic_cast<Atom*>(element->terms->at(0).get());
+    ASSERT_NE(atom, nullptr);
+    EXPECT_EQ(atom->name, "f");
+    ASSERT_NE(atom->args, nullptr);
+    EXPECT_EQ(atom->args->size(), 1);
+  }
+}
+
 TEST_F(ParserTest, ParseHeadDisjunction) {
   Parser parser("p(X) | -q(Y)");
   auto head_status = parser.parse_head();

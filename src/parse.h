@@ -16,8 +16,6 @@ class Parser {
   absl::StatusOr<std::unique_ptr<Program>> parse_program();
   absl::StatusOr<Statements> parse_statements();
   absl::StatusOr<std::unique_ptr<Statement>> parse_statement();
-  absl::StatusOr<std::unique_ptr<Term>> parse_basic_term();
-  absl::StatusOr<Terms> parse_basic_terms();
   absl::StatusOr<NafLiterals> parse_naf_literals();
   absl::StatusOr<std::unique_ptr<AggregateElement>> parse_aggregate_element();
   absl::StatusOr<AggregateElements> parse_aggregate_elements();

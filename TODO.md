@@ -7,13 +7,6 @@
   error.
 * Stop grounding a program that never finishes. `p(1). p(X+1) :- p(X).` spins
   forever. A size limit or a message about the growing predicate beats a hang.
-* Decide whether an aggregate element may hold a compound term.
-  `S = #sum{ X*2 : p(X) }` and `C = #count{ f(X) : p(X) }` are parse errors,
-  because the ASP-Core-2 grammar gives an element `<basic_terms>`: a constant,
-  a string, a signed number, or a variable. The spec's own prose says an
-  element is "t1, ..., tm : l1, ..., ln where t1, ..., tm are terms", and
-  clingo takes both, so encodings written for clingo hit this. Following the
-  prose means parsing `<terms>` there instead.
 * Report an unsafe variable from the safety pass, not from grounding.
   `p(X) :- q(X+1).` and `p :- #count{ Z : q(1) } = 1.` are unsafe under the
   spec: a variable inside an arithmetic term binds nothing, and an element's

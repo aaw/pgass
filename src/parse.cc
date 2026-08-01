@@ -153,64 +153,6 @@ absl::StatusOr<std::unique_ptr<Statement>> Parser::parse_statement() {
   return statement;
 }
 
-// <basic_term> ::= <ground_term> | <variable_term>
-// <ground_term> ::= SYMBOLIC_CONSTANT | STRING | [MINUS] NUMBER
-// <variable_term> ::= VARIABLE | ANONYMOUS_VARIABLE
-absl::StatusOr<std::unique_ptr<Term>> Parser::parse_basic_term() {
-  Token token = lexer_.next();
-  if (token.type == TokenType::kID) {
-    return std::make_unique<Atom>(std::string(token.val), nullptr);
-  } else if (token.type == TokenType::kSTRING) {
-    return std::make_unique<String>(string_contents(token.val));
-  } else if (token.type == TokenType::kNUMBER) {
-    uint64_t number;
-    if (!absl::SimpleAtoi(token.val, &number)) {
-      return absl::InvalidArgumentError(absl::StrCat(
-          "Couldn't convert number ", token.val,
-          " to 64-bit unsigned integer\n", lexer_.report_last_token_pos()));
-    }
-    return std::make_unique<Number>(number);
-  } else if (token.type == TokenType::kMINUS) {
-    CONSUME_TOKEN_OR_RETURN(lexer_, num_tok, TokenType::kNUMBER);
-    uint64_t number;
-    if (!absl::SimpleAtoi(num_tok.val, &number)) {
-      return absl::InvalidArgumentError(absl::StrCat(
-          "Couldn't convert number ", num_tok.val,
-          " to 64-bit unsigned integer\n", lexer_.report_last_token_pos()));
-    }
-    return std::make_unique<NegatedTerm>(std::make_unique<Number>(number));
-  } else if (token.type == TokenType::kVARIABLE) {
-    return std::make_unique<Variable>(token.val);
-  } else if (token.type == TokenType::kANONYMOUS_VARIABLE) {
-    return std::make_unique<AnonymousVariable>();
-  }
-
-  return absl::InvalidArgumentError(absl::StrCat(
-      "Unexpected token '", token.val, "' while parsing basic term\n",
-      lexer_.report_last_token_pos()));
-}
-
-// <basic_terms> ::= [<basic_terms> COMMA] <basic_term>
-absl::StatusOr<Terms> Parser::parse_basic_terms() {
-  auto terms = std::make_unique<std::vector<std::unique_ptr<Term>>>();
-  ASSIGN_OR_RETURN(auto first_term, parse_basic_term());
-  terms->push_back(std::move(first_term));
-
-  while (true) {
-    LexerCheckpoint try_comma(lexer_);
-    Token token = lexer_.next();
-    if (token.type != TokenType::kCOMMA) {
-      return terms;
-    }
-    try_comma.commit();
-
-    ASSIGN_OR_RETURN(auto next_term, parse_basic_term());
-    terms->push_back(std::move(next_term));
-  }
-
-  return terms;
-}
-
 // <naf_literals> ::= [<naf_literals> COMMA] <naf_literal>
 absl::StatusOr<NafLiterals> Parser::parse_naf_literals() {
   auto literals = std::make_unique<std::vector<std::unique_ptr<NafLiteral>>>();
@@ -232,16 +174,26 @@ absl::StatusOr<NafLiterals> Parser::parse_naf_literals() {
   return literals;
 }
 
-// <aggregate_element> ::= [<basic_terms>] [COLON [<naf_literals>]]
+/* <aggregate_element> ::= [<terms>] [COLON [<naf_literals>]]
+
+   The ASP-Core-2 grammar writes <basic_terms> here, which is a constant, a
+   string, a signed number, or a variable. We read <terms> instead, so
+   '#sum{ X*2 : p(X) }' and '#count{ f(X) : p(X) }' parse.
+
+   The narrow rule is a mistake in the spec, not a rule we are breaking. The
+   spec's own prose says an element is "t1, ..., tm : l1, ..., ln where
+   t1, ..., tm are terms", which contradicts its grammar, and clingo accepts
+   both forms. Following the grammar would reject ordinary encodings.
+*/
 absl::StatusOr<std::unique_ptr<AggregateElement>>
 Parser::parse_aggregate_element() {
   Terms terms;
   {
-    LexerCheckpoint try_basic_terms(lexer_);
-    auto basic_terms = parse_basic_terms();
-    if (basic_terms.ok()) {
-      try_basic_terms.commit();
-      terms = std::move(*basic_terms);
+    LexerCheckpoint try_terms(lexer_);
+    auto element_terms = parse_terms();
+    if (element_terms.ok()) {
+      try_terms.commit();
+      terms = std::move(*element_terms);
     }
   }
 
