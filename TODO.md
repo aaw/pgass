@@ -7,11 +7,6 @@
   error.
 * Stop grounding a program that never finishes. `p(1). p(X+1) :- p(X).` spins
   forever. A size limit or a message about the growing predicate beats a hang.
-* Report an unsafe variable from the safety pass, not from grounding.
-  `p(X) :- q(X+1).` and `p :- #count{ Z : q(1) } = 1.` are unsafe under the
-  spec: a variable inside an arithmetic term binds nothing, and an element's
-  term binds nothing on its own. Both are rejected, but by the grounder, with
-  "variable 'X' is not bound by the rule body" and no source line.
 
 ## Everything else
 

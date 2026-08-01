@@ -15,7 +15,9 @@
 // ASP safety requires that every variable in a rule body be bound: reachable
 // by ground values without guessing. The three binding sources are:
 //
-//   Classical atoms: q(X) binds every variable in its argument list.
+//   Classical atoms: q(X) binds a variable standing as a whole argument, or
+//                    inside a function term's arguments. A variable under
+//                    arithmetic, like the X of q(X+1), stays unbound.
 //   Equality: V = <expr> binds V when all variables in <expr> are already bound
 //             (and vice versa when V is on the right).
 //   Aggregates: an aggregate propagates binding to its output variable once
@@ -34,6 +36,34 @@ bool is_subset(const absl::flat_hash_set<T>& a,
     }
   }
   return true;
+}
+
+// Inserts into `out` the variables of `term` that a positive atom binds by
+// matching against a stored value: the ones standing as a whole argument, and
+// the ones inside a function term's arguments.
+//
+// A variable under arithmetic binds nothing. Grounding evaluates 'X + 1' and
+// compares the result, it does not solve for X, so the X of 'q(X+1)' has to be
+// bound somewhere else.
+void collect_binding_variables(const Term& term,
+                               absl::flat_hash_set<std::string_view>& out) {
+  switch (term.kind) {
+    case Term::VariableKind:
+      out.insert(static_cast<const Variable&>(term).name);
+      return;
+    case Term::AtomKind: {
+      const auto& atom = static_cast<const Atom&>(term);
+      if (atom.args == nullptr) return;
+      for (const auto& arg : *atom.args) collect_binding_variables(*arg, out);
+      return;
+    }
+    case Term::NegatedTermKind:
+    case Term::TermOperationKind:
+    case Term::NumberKind:
+    case Term::StringKind:
+    case Term::AnonymousVariableKind:
+      return;
+  }
 }
 
 // Updates `bound_vars` and `vars` for a builtin atom (e.g. `X = Y + 1`).
@@ -85,7 +115,10 @@ void propagate_naf_literal(const NafLiteral* naf_lit,
       collect::collect_variables(*classical_lit, cl_vars);
       for (const std::string_view var : cl_vars) {
         vars.insert(var);
-        if (!naf_lit->naf) bound_vars.insert(var);
+      }
+      if (naf_lit->naf || classical_lit->args == nullptr) break;
+      for (const auto& arg : *(classical_lit->args)) {
+        collect_binding_variables(*arg, bound_vars);
       }
       break;
     }
@@ -314,6 +347,19 @@ absl::Status verify_safe(const Program& prog) {
             // Outer bound variables are in scope inside the aggregate body.
             absl::flat_hash_set<std::string_view> agg_bound_vars = bound_vars;
             absl::flat_hash_set<std::string_view> agg_vars;
+
+            // An element's terms bind nothing on their own: the tuple of
+            // '#count{ Z : q(1) }' is what gets counted, not what gets matched,
+            // so its conditions have to bind Z.
+            if (aggregate->elements != nullptr) {
+              for (const auto& agg_element : *(aggregate->elements)) {
+                if (agg_element->terms == nullptr) continue;
+                for (const auto& term : *(agg_element->terms)) {
+                  collect::collect_variables(*term, agg_vars);
+                }
+              }
+            }
+
             std::size_t prev_num_agg_bound = 0;
             do {
               prev_num_agg_bound = agg_bound_vars.size();

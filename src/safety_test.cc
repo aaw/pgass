@@ -55,6 +55,57 @@ TEST_F(SafetyTest, TestNotBoundByLessThan) {
   EXPECT_THAT(verify_safe(**prog), Not(IsOk()));
 }
 
+TEST_F(SafetyTest, TestNotBoundByArithmeticInsideAnAtom) {
+  // Grounding evaluates X + 1 and compares the result, so q(X+1) cannot bind X.
+  std::string_view src = "p(X) :- q(X+1).";
+  Parser parser(src);
+  auto prog = parser.parse_program();
+  ASSERT_OK(prog);
+  auto status = verify_safe(**prog);
+  ASSERT_THAT(status, Not(IsOk()));
+  EXPECT_EQ(status.message(),
+            "line 1: p(X) :- q(X+1).\n"
+            "unsafe variable in rule 'p/1': X");
+}
+
+TEST_F(SafetyTest, TestArithmeticInsideAnAtomIsFineOnceBoundElsewhere) {
+  std::string_view src = "p(X) :- q(X), r(X+1).";
+  Parser parser(src);
+  auto prog = parser.parse_program();
+  ASSERT_OK(prog);
+  EXPECT_THAT(verify_safe(**prog), IsOk());
+}
+
+TEST_F(SafetyTest, TestBoundInsideAFunctionTerm) {
+  // Matching descends into f(...), so the argument position still binds X.
+  std::string_view src = "p(X) :- q(f(X)).";
+  Parser parser(src);
+  auto prog = parser.parse_program();
+  ASSERT_OK(prog);
+  EXPECT_THAT(verify_safe(**prog), IsOk());
+}
+
+TEST_F(SafetyTest, TestAggregateElementTermsDoNotBind) {
+  // Z is what gets counted, not what gets matched, so 'q(1)' has to bind it.
+  std::string_view src = "p :- #count{ Z : q(1) } = 1.";
+  Parser parser(src);
+  auto prog = parser.parse_program();
+  ASSERT_OK(prog);
+  auto status = verify_safe(**prog);
+  ASSERT_THAT(status, Not(IsOk()));
+  EXPECT_EQ(status.message(),
+            "line 1: p :- #count{ Z : q(1) } = 1.\n"
+            "unsafe aggregate in rule 'p/0'");
+}
+
+TEST_F(SafetyTest, TestAggregateElementTermsBoundByTheirCondition) {
+  std::string_view src = "p(N) :- #count{ X+1 : q(X) } = N.";
+  Parser parser(src);
+  auto prog = parser.parse_program();
+  ASSERT_OK(prog);
+  EXPECT_THAT(verify_safe(**prog), IsOk());
+}
+
 TEST_F(SafetyTest, TestFixedPointIterations) {
   // q(X) binds X, then Y = X + 1 binds Y, then Z = Y * 2 binds Z.
   std::string_view src = "q(1). p(X,Y,Z) :- Z = Y * 2, Y = X + 1, q(X).";
