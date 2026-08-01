@@ -29,6 +29,9 @@ ABSL_FLAG(int, models, 1,
 ABSL_FLAG(std::string, encode, "",
           "Print the encoding of the grounded program and exit, in the given "
           "format. Only 'smtlib' is supported");
+ABSL_FLAG(uint64_t, max_ground_atoms, 10000000,
+          "Give up grounding after deriving this many ground atoms; 0 means "
+          "no limit");
 ABSL_FLAG(
     std::string, optimizer, "linear",
     "How to minimize weak constraints: 'linear' asks for a cheaper answer "
@@ -177,7 +180,8 @@ int main(int argc, char** argv) {
   }
 
   std::vector<std::string> warnings;
-  auto grounded = ground(**program, &warnings);
+  auto grounded = ground(**program, &warnings,
+                         absl::GetFlag(FLAGS_max_ground_atoms));
   if (!grounded.ok()) {
     std::cerr << "pgass: grounding error: " << grounded.status().message()
               << "\n";

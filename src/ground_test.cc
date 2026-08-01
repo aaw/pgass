@@ -38,6 +38,16 @@ absl::StatusOr<std::vector<std::string>> ground_warnings(
   return warnings;
 }
 
+// Parses, normalizes, and grounds `source` under a ground atom limit,
+// returning how grounding ended.
+absl::Status ground_under_limit(const std::string& source,
+                                size_t max_ground_atoms) {
+  Parser parser(source);
+  ASSIGN_OR_RETURN(auto program, parser.parse_program());
+  RETURN_IF_ERROR(normalize(*program));
+  return ground(*program, nullptr, max_ground_atoms).status();
+}
+
 TEST(GroundTest, Facts) {
   auto out = ground_source("p(1). p(2).");
   ASSERT_OK(out);
@@ -1738,6 +1748,39 @@ TEST(GroundTest, PredicatesNormalizationInventsStayOutOfTheOutput) {
   ASSERT_OK(out);
   EXPECT_THAT(*out, Not(HasSubstr("_cr")));
   EXPECT_THAT(*out, Not(HasSubstr("_viol")));
+}
+
+// 'p(X+1) :- p(X).' derives a new p every pass, so without the limit this
+// grounds until the machine is out of memory.
+TEST(GroundTest, GivesUpOnAProgramWithNoFiniteGrounding) {
+  absl::Status status = ground_under_limit("p(1). p(X+1) :- p(X).", 1000);
+  EXPECT_EQ(status.code(), absl::StatusCode::kResourceExhausted);
+  EXPECT_THAT(std::string(status.message()), HasSubstr("1000 ground atoms"));
+  EXPECT_THAT(std::string(status.message()), HasSubstr("p/1"));
+}
+
+// A term that grows by nesting rather than by counting runs away just as far.
+TEST(GroundTest, GivesUpOnAFunctionTermThatGrowsWithoutBound) {
+  absl::Status status = ground_under_limit("p(a). p(f(X)) :- p(X).", 1000);
+  EXPECT_EQ(status.code(), absl::StatusCode::kResourceExhausted);
+  EXPECT_THAT(std::string(status.message()), HasSubstr("p/1"));
+}
+
+// The limit counts atoms, not rule instances, so a program deriving fewer
+// atoms than the limit grounds no differently for having one.
+TEST(GroundTest, GroundsNormallyUnderTheLimit) {
+  EXPECT_OK(ground_under_limit("p(1). p(X+1) :- p(X), X < 100.", 1000));
+}
+
+// Every atom counts against the limit whatever predicate it belongs to.
+TEST(GroundTest, CountsAtomsAcrossPredicates) {
+  EXPECT_EQ(ground_under_limit("p(1). p(2). p(3). q(X) :- p(X).", 5).code(),
+            absl::StatusCode::kResourceExhausted);
+  EXPECT_OK(ground_under_limit("p(1). p(2). p(3). q(X) :- p(X).", 6));
+}
+
+TEST(GroundTest, ZeroMeansNoLimit) {
+  EXPECT_OK(ground_under_limit("p(1). p(X+1) :- p(X), X < 100.", 0));
 }
 
 }  // namespace

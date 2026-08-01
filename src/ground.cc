@@ -165,6 +165,10 @@ struct Inserted {
 struct Store {
   absl::flat_hash_map<PredKey, PredData> preds;
   std::vector<PredKey> order;  // predicates in first-seen order
+  // How many atoms the store holds, and the most it may hold. 0 means no
+  // limit. See check_size().
+  size_t num_atoms = 0;
+  size_t max_atoms = 0;
   // Which atoms are facts, indexed by ASPIF atom number. A fact holds in every
   // answer set: derive_from_rule() decides which atoms those are, and
   // emit_rules() states them as facts instead of through their rules.
@@ -199,7 +203,27 @@ struct Store {
       return Inserted{.atom = data.atoms[it->second].id, .is_new = false};
     }
     data.atoms.push_back(GroundAtom{std::move(tuple), aspif_prog.new_atom()});
+    ++num_atoms;
     return Inserted{.atom = data.atoms.back().id, .is_new = true};
+  }
+
+  // Fails once the store holds more than `max_atoms` atoms, naming `key` as the
+  // predicate whose atom took it there.
+  //
+  // Some programs have no finite grounding at all. 'p(1). p(X+1) :- p(X).'
+  // derives a new p forever, because every atom it derives gives the rule one
+  // more atom to read. So does 'p(a). p(f(X)) :- p(X).', and so does an
+  // aggregate feeding its own value back in, as ground.h describes. ASP-Core-2
+  // calls such a program inadmissible but leaves it to the system to notice.
+  // Deriving to a fixpoint never returns on one, so the limit is what turns a
+  // hang into an error naming the predicate that ran away.
+  absl::Status check_size(const PredKey& key) const {
+    if (max_atoms == 0 || num_atoms <= max_atoms) return absl::OkStatus();
+    return absl::ResourceExhaustedError(absl::StrCat(
+        "grounding gave up at ", max_atoms, " ground atoms, while deriving ",
+        key.name, "/", key.arity,
+        ". A predicate whose terms keep growing has no finite grounding. Raise "
+        "--max_ground_atoms if this program really is that big"));
   }
 
   // Starts a derivation pass, so that what the last one derived becomes the
@@ -2313,10 +2337,12 @@ absl::Status derive_from_rule(const RuleView& rule,
                std::vector<Inserted> heads;
                heads.reserve(rule.head.size());
                for (size_t i = 0; i < rule.head.size(); ++i) {
-                 heads.push_back(store.insert(pred_key(*rule.head[i]),
-                                              std::move(tuples[i]),
-                                              aspif_prog));
-                 if (heads.back().is_new) changes.atoms = true;
+                 const PredKey key = pred_key(*rule.head[i]);
+                 heads.push_back(
+                     store.insert(key, std::move(tuples[i]), aspif_prog));
+                 if (!heads.back().is_new) continue;
+                 changes.atoms = true;
+                 RETURN_IF_ERROR(store.check_size(key));
                }
 
                if (derives_facts &&
@@ -2611,7 +2637,8 @@ absl::Status emit_query(const ClassicalLiteral& query, const Store& store,
 }  // namespace
 
 absl::StatusOr<aspif::Program> ground(const Program& prog,
-                                      std::vector<std::string>* warnings) {
+                                      std::vector<std::string>* warnings,
+                                      size_t max_ground_atoms) {
   const PredGraph graph = build_pred_graph(prog);
   const std::vector<int> component =
       strongly_connected_components(derivation_succ(graph));
@@ -2635,6 +2662,7 @@ absl::StatusOr<aspif::Program> ground(const Program& prog,
   // into it, so it has to outlive them.
   Symbols syms;
   Store store;
+  store.max_atoms = max_ground_atoms;
   // One cache across both phases: they ask different questions about the same
   // aggregates, and what either answer rests on is complete before it is asked.
   AggCache agg_cache;

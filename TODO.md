@@ -5,8 +5,6 @@
   inlined into a `Sym` handle. ASP-Core-2 doesn't bound integers. Today
   arithmetic wraps and returns wrong models, and a literal past 2^64 is a parse
   error.
-* Stop grounding a program that never finishes. `p(1). p(X+1) :- p(X).` spins
-  forever. A size limit or a message about the growing predicate beats a hang.
 
 ## Everything else
 
