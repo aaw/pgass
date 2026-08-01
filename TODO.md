@@ -1,4 +1,3 @@
-* Why can clingo solve PHP much faster than we can? Is it using some symmetry-breaking?
 * Give `--encode=smtlib` something to say about a program it now refuses: weak
   constraints, whose optimum takes repeated queries, head cycles, whose models
   are only candidates, and a query of several instances, which is several

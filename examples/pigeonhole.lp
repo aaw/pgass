@@ -3,10 +3,7 @@
 % pgass prints UNSATISFIABLE. The first constraint gives every pigeon exactly
 % one hole, the second stops any hole taking two.
 %
-% Proving it impossible costs a solver time that grows steeply with the number
-% of holes: no short argument exists, so it has to work through the ways the
-% pigeons could be arranged. Three pigeons is instant, but adding a pigeon and
-% a hole at a time gets slow quickly, which makes this a handy stress test.
+% #count puts this in QF_LIA, where pgass solves it fast.
 % Try: pgass pigeonhole.lp
 
 pigeon(1). pigeon(2). pigeon(3).

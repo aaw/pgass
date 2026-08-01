@@ -431,6 +431,7 @@ absl::Status Session::start(const aspif::Program& prog,
   solver->setLogic(encoding.logic);
   solver->setOption("produce-models", "true");
   solver->setOption("incremental", "true");
+  solver->setOption("sat-solver", "cadical");
   for (const Section& section : encoding.sections) {
     for (const cvc5::Term& assertion : section.assertions) {
       solver->assertFormula(assertion);
