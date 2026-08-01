@@ -41,7 +41,8 @@ struct Rule {
 
   HeadType head_type = HeadType::kDisjunction;
   // Empty disjunctive head = integrity constraint. pgass normalization never
-  // produces choice heads or multi-atom disjunctions, but aspif has them.
+  // produces choice heads, but aspif has them. It does produce multi-atom
+  // disjunctions: a choice rule becomes one per element, 'p | _ch_p'.
   std::vector<Atom> head;
 
   BodyType body_type = BodyType::kNormal;

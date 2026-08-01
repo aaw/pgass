@@ -89,12 +89,16 @@ absl::StatusOr<Encoding> build_encoding(cvc5::TermManager& tm,
 //
 // A program with a query asserts the query negated, so its script asks the
 // opposite question. A model of it is an answer set the query fails in, and
-// 'unsat' means the query holds.
+// 'unsat' means the query holds. A query no atom matched asserts nothing: no
+// answer set can satisfy it, so 'unsat' there means the program has no answer
+// set, which is the one way such a query holds.
 //
 // Returns an UnimplementedError where one script cannot say what an answer set
 // is. A program with weak constraints is one, its optimal cost being known only
 // after several solver calls. So is a program with a head cycle, whose models
 // are candidates that a further call, against the reduct, still has to pass.
+// So is a query matching several atoms, each of which takes a check-sat under
+// a negation of its own.
 absl::StatusOr<std::string> encode_smtlib(const aspif::Program& prog);
 
 #endif  // ENCODE_H_

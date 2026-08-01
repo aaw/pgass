@@ -527,13 +527,10 @@ absl::StatusOr<std::string> encode_smtlib(const aspif::Program& prog) {
         "priority level takes repeated queries under a falling bound");
   }
 
-  // A script has one check-sat, so it can only carry a query of one atom.
-  if (prog.query.has_value() && prog.query->size() != 1) {
-    if (prog.query->empty()) {
-      return absl::UnimplementedError(
-          "a query matching no atom cannot be encoded: nothing can make it "
-          "hold, so the answer is no whatever the answer sets are");
-    }
+  // A script has one check-sat, so it can only carry a query of one atom. A
+  // query of no atom needs no atom of its own: the assertions already say it,
+  // as the query block below explains.
+  if (prog.query.has_value() && prog.query->size() > 1) {
     return absl::UnimplementedError(absl::StrCat(
         "a query matching ", prog.query->size(),
         " atoms cannot be encoded: each atom is asked about on its own, under "
@@ -591,6 +588,12 @@ absl::StatusOr<std::string> encode_smtlib(const aspif::Program& prog) {
             "; and 'unsat' means the query holds.\n(assert ",
             tm.mkTerm(cvc5::Kind::NOT, {encoding.query.front()}).toString(),
             ")\n"));
+  } else if (prog.query.has_value()) {
+    // A query no atom matched, as 'p(1). q(2)?' asks.
+    append_block(
+        script, "Query",
+        "; The query matched no atom. It is true only if the program has\n"
+        "; no answer set, which is what 'unsat' means.\n");
   }
 
   absl::StrAppend(&script, "\n(check-sat)\n(get-model)\n");

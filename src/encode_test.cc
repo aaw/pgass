@@ -190,6 +190,49 @@ TEST(EncodeTest, AssertsTheNegatedQuery) {
   EXPECT_THAT(commands(*script), Contains("(assert (not |q(1)|))"));
 }
 
+// A query no atom matched fails in every answer set, so there is nothing to
+// assert and the encoding stands as it is. 'sat' says an answer set is there
+// to fail the query, which is the answer no.
+TEST(EncodeTest, AssertsNothingForAQueryNoAtomMatched) {
+  auto script = encode_source(R"(
+    p(1).
+    q(2)?
+  )");
+  ASSERT_OK(script);
+  EXPECT_THAT(comments(*script), Contains("; Query"));
+  EXPECT_THAT(commands(*script), Each(Not(HasSubstr("q(2)"))));
+
+  auto answer = check_sat_of(R"(
+    p(1).
+    q(2)?
+  )");
+  ASSERT_OK(answer);
+  EXPECT_EQ(*answer, "sat");
+}
+
+// The one way a query no atom matched holds is for the program to have no
+// answer set, and 'unsat' is how the script says that.
+TEST(EncodeTest, IsUnsatWhereAQueryNoAtomMatchedHolds) {
+  auto answer = check_sat_of(R"(
+    a :- not a.
+    q(2)?
+  )");
+  ASSERT_OK(answer);
+  EXPECT_EQ(*answer, "unsat");
+}
+
+// Each atom a query matched is asked about under a negation of its own, and a
+// script has one check-sat to spend.
+TEST(EncodeTest, RefusesAQueryMatchingSeveralAtoms) {
+  auto script = encode_source(R"(
+    p(1). p(2).
+    p(X)?
+  )");
+  EXPECT_EQ(script.status().code(), absl::StatusCode::kUnimplemented);
+  EXPECT_THAT(std::string(script.status().message()),
+              HasSubstr("a query matching 2 atoms"));
+}
+
 // A weight body adds up the weights of many literals at once, which no
 // difference logic atom can say, so the whole script moves to QF_LIA.
 TEST(EncodeTest, PicksLinearArithmeticForAWeightBody) {
