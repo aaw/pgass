@@ -32,12 +32,28 @@ namespace {
 // once, which no difference logic atom can say, and costs the whole program the
 // more general QF_LIA. Every QF_IDL formula is also a QF_LIA formula, so
 // answering QF_LIA is never wrong, only slower.
+
+// Whether a weight body only counts its literals. #count writes every weight as
+// one, and so does the counting constraint a choice rule normalizes into, which
+// makes this the common weight body by far. at_least() says it without
+// arithmetic, so it leaves the logic alone.
+bool is_cardinality(const aspif::Rule& rule) {
+  if (rule.body_type != aspif::Rule::BodyType::kWeight) return false;
+  for (const aspif::WeightedLit& weighted : rule.weighted_body) {
+    if (weighted.weight != BigInt(1)) return false;
+  }
+  return true;
+}
+
 const char* logic_for(const aspif::Program& prog) {
   // A weighted sum is a weighted sum whether it comes from an aggregate or a
   // weak constraint.
   if (!prog.minimize.empty()) return "QF_LIA";
   for (const aspif::Rule& rule : prog.rules) {
-    if (rule.body_type == aspif::Rule::BodyType::kWeight) return "QF_LIA";
+    if (rule.body_type == aspif::Rule::BodyType::kWeight &&
+        !is_cardinality(rule)) {
+      return "QF_LIA";
+    }
   }
   return "QF_IDL";
 }
@@ -233,6 +249,22 @@ cvc5::Term body_term(cvc5::TermManager& tm,
       conjuncts.push_back(literal_term(tm, atom_var, lit));
     }
     return conjunction(tm, conjuncts);
+  }
+  // A body that only counts is a question about the literals themselves, and
+  // at_least() answers it without reaching for arithmetic.
+  if (is_cardinality(rule)) {
+    // A bound past the number of literals is out of reach however they fall,
+    // and checking that first is what leaves the bound small enough to count to.
+    if (rule.lower_bound > BigInt(static_cast<int64_t>(
+                               rule.weighted_body.size()))) {
+      return tm.mkFalse();
+    }
+    std::vector<cvc5::Term> lits;
+    lits.reserve(rule.weighted_body.size());
+    for (const aspif::WeightedLit& weighted : rule.weighted_body) {
+      lits.push_back(literal_term(tm, atom_var, weighted.lit));
+    }
+    return at_least(tm, lits, rule.lower_bound.to_int64().value_or(0));
   }
   // A weight body holds when the weights of its true literals reach
   // lower_bound.
@@ -457,6 +489,62 @@ cvc5::Term literal_term(cvc5::TermManager& tm,
                         aspif::Lit lit) {
   if (lit > 0) return atom_var[lit];
   return tm.mkTerm(cvc5::Kind::NOT, {atom_var[-lit]});
+}
+
+namespace {
+
+// The counts of one run of `lits`: entry i says at least i + 1 of
+// lits[begin, end) hold. The list stops at `cap` entries, so a run longer than
+// the bound still only carries the counts the bound can tell apart.
+std::vector<cvc5::Term> at_least_counts(cvc5::TermManager& tm,
+                                        const std::vector<cvc5::Term>& lits,
+                                        size_t begin, size_t end, size_t cap) {
+  const size_t n = end - begin;
+  if (n == 1) return {lits[begin]};
+
+  const size_t mid = begin + n / 2;
+  const std::vector<cvc5::Term> left =
+      at_least_counts(tm, lits, begin, mid, cap);
+  const std::vector<cvc5::Term> right =
+      at_least_counts(tm, lits, mid, end, cap);
+
+  // At least k hold across both halves when, for some split of k, that many
+  // hold in each. The halves are counted already, so this only picks the splits
+  // and takes them together.
+  std::vector<cvc5::Term> counts;
+  counts.reserve(std::min(n, cap));
+  for (size_t k = 1; k <= std::min(n, cap); ++k) {
+    // The right half cannot supply more than it has, which is what puts a floor
+    // under the left half's share.
+    const size_t lowest = k > right.size() ? k - right.size() : 0;
+    std::vector<cvc5::Term> splits;
+    for (size_t i = lowest; i <= std::min(k, left.size()); ++i) {
+      const size_t j = k - i;
+      if (i == 0) {
+        splits.push_back(right[j - 1]);
+      } else if (j == 0) {
+        splits.push_back(left[i - 1]);
+      } else {
+        splits.push_back(
+            tm.mkTerm(cvc5::Kind::AND, {left[i - 1], right[j - 1]}));
+      }
+    }
+    counts.push_back(disjunction(tm, splits));
+  }
+  return counts;
+}
+
+}  // namespace
+
+cvc5::Term at_least(cvc5::TermManager& tm, const std::vector<cvc5::Term>& lits,
+                    std::int64_t bound) {
+  // Nothing to reach, and nothing that could reach it.
+  if (bound <= 0) return tm.mkTrue();
+  if (static_cast<size_t>(bound) > lits.size()) return tm.mkFalse();
+
+  const std::vector<cvc5::Term> counts =
+      at_least_counts(tm, lits, 0, lits.size(), static_cast<size_t>(bound));
+  return counts[bound - 1];
 }
 
 cvc5::Term weighted_sum(cvc5::TermManager& tm,

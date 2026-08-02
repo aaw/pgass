@@ -43,6 +43,24 @@ cvc5::Term weighted_sum(cvc5::TermManager& tm,
                         const std::vector<cvc5::Term>& atom_var,
                         const std::vector<aspif::WeightedLit>& lits);
 
+// Whether at least `bound` of `lits` hold, as a formula about the literals
+// rather than a sum of them.
+//
+// Saying it as a sum would be shorter, but it would also be the only arithmetic
+// in an otherwise Boolean program, and it would cost the whole program QF_LIA.
+// cvc5 then answers a question about counting Booleans by running simplex over
+// terms lifted out of them, splitting on disequalities all the way. Measured on
+// one ASP Competition graceful-graphs instance, the sum spent 59s where this
+// spends 12s.
+//
+// This is the totalizer encoding: the literals are halved, each half counted,
+// and the two counts added by cases. Counting stops at `bound`, since a count
+// past it answers the same question, which keeps the formula O(n * bound)
+// rather than O(n^2). The halves share their sub-counts, and cvc5 hash-conses
+// terms, so a shared count is built once however often it is named.
+cvc5::Term at_least(cvc5::TermManager& tm, const std::vector<cvc5::Term>& lits,
+                    std::int64_t bound);
+
 // One group of assertions and what it is called. They all have to hold, so the
 // grouping changes nothing for the solver. It gives the script headings a
 // reader can navigate by.

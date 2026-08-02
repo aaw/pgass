@@ -233,9 +233,23 @@ TEST(EncodeTest, RefusesAQueryMatchingSeveralAtoms) {
               HasSubstr("a query matching 2 atoms"));
 }
 
-// A weight body adds up the weights of many literals at once, which no
-// difference logic atom can say, so the whole script moves to QF_LIA.
+// A weight body whose weights all differ adds up literals, which no difference
+// logic atom can say, so the whole script moves to QF_LIA.
 TEST(EncodeTest, PicksLinearArithmeticForAWeightBody) {
+  auto script = encode_source(R"(
+    item(a). item(b).
+    picked(X) :- item(X), not skipped(X).
+    skipped(X) :- item(X), not picked(X).
+    :- #sum{ 2,a : picked(a) ; 3,b : picked(b) } > 4.
+  )");
+  ASSERT_OK(script);
+  EXPECT_THAT(commands(*script), Contains("(set-logic QF_LIA)"));
+}
+
+// Counting is a question about the literals, not a sum of them, so a #count
+// leaves the script in difference logic. 'more than one of two' is both of
+// them, which is what the totalizer boils down to here.
+TEST(EncodeTest, CountsWithoutArithmetic) {
   auto script = encode_source(R"(
     item(a). item(b).
     picked(X) :- item(X), not skipped(X).
@@ -243,7 +257,9 @@ TEST(EncodeTest, PicksLinearArithmeticForAWeightBody) {
     :- #count{ X : picked(X) } > 1.
   )");
   ASSERT_OK(script);
-  EXPECT_THAT(commands(*script), Contains("(set-logic QF_LIA)"));
+  EXPECT_THAT(*script, AllOf(HasSubstr("(set-logic QF_IDL)"),
+                             HasSubstr("(and |picked(a)| |picked(b)|)"),
+                             Not(HasSubstr("(ite ")), Not(HasSubstr("(+ "))));
 }
 
 // The least cost of a priority level is only known once several queries have
