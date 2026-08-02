@@ -2,8 +2,15 @@
 
 #include <gtest/gtest.h>
 
+#include <string>
+
+#include "absl/status/status.h"
+#include "gmock/gmock.h"
+
 namespace aspif {
 namespace {
+
+using ::testing::HasSubstr;
 
 TEST(AspifTest, EmptyProgramIsHeaderAndTerminator) {
   EXPECT_EQ(to_aspif(Program{}), "asp 1 0 0\n0\n");
@@ -119,6 +126,174 @@ TEST(AspifTest, QueryOfSeveralAtomsPrintsNoAssumption) {
             "1 0 1 1 0 0\n"
             "1 0 1 2 0 0\n"
             "0\n");
+}
+
+// Reading a document and writing it back out gives the document again.
+TEST(FromAspifTest, RoundTripsEveryStatementTypeItReads) {
+  const std::string text =
+      "asp 1 0 0\n"
+      "1 1 1 1 0 0\n"                   // choice head
+      "1 0 2 2 3 0 2 1 -2\n"            // disjunctive head, normal body
+      "1 0 0 0 1 -3\n"                  // integrity constraint
+      "1 0 1 4 1 2 3 1 1 2 1 -2 3\n"    // weight body
+      "2 0 2 1 5 2 1\n"
+      "2 1 1 3 2\n"
+      "4 1 a 1 1\n"
+      "4 6 p(1,2) 0\n"
+      "6 1 4\n"
+      "0\n";
+
+  auto prog = from_aspif(text);
+  ASSERT_TRUE(prog.ok()) << prog.status();
+  EXPECT_EQ(to_aspif(*prog), text);
+}
+
+// A name is taken by its length prefix, not up to the next space.
+TEST(FromAspifTest, OutputNameHoldsSpaces) {
+  auto prog = from_aspif(
+      "asp 1 0 0\n"
+      "4 7 p(a, b) 0\n"
+      "0\n");
+  ASSERT_TRUE(prog.ok()) << prog.status();
+  ASSERT_EQ(prog->outputs.size(), 1u);
+  EXPECT_EQ(prog->outputs.front().name, "p(a, b)");
+}
+
+// Solving allocates atoms of its own, so the ids in use are spoken for.
+TEST(FromAspifTest, NextAtomIsPastEveryAtomNamed) {
+  auto prog = from_aspif(
+      "asp 1 0 0\n"
+      "1 0 1 7 0 1 -12\n"
+      "0\n");
+  ASSERT_TRUE(prog.ok()) << prog.status();
+  EXPECT_EQ(prog->next_atom, 13);
+}
+
+TEST(FromAspifTest, EmptyProgramIsHeaderAndTerminator) {
+  auto prog = from_aspif("asp 1 0 0\n0\n");
+  ASSERT_TRUE(prog.ok()) << prog.status();
+  EXPECT_TRUE(prog->rules.empty());
+  EXPECT_EQ(prog->next_atom, 1);
+}
+
+TEST(FromAspifTest, CommentIsSkipped) {
+  auto prog = from_aspif(
+      "asp 1 0 0\n"
+      "10 anything at all\n"
+      "1 0 1 1 0 0\n"
+      "0\n");
+  ASSERT_TRUE(prog.ok()) << prog.status();
+  EXPECT_EQ(prog->rules.size(), 1u);
+}
+
+// A one-literal assumption is how to_aspif writes a ground query.
+TEST(FromAspifTest, AssumptionBecomesTheQuery) {
+  auto prog = from_aspif(
+      "asp 1 0 0\n"
+      "1 0 1 1 0 0\n"
+      "6 1 1\n"
+      "0\n");
+  ASSERT_TRUE(prog.ok()) << prog.status();
+  ASSERT_TRUE(prog->query.has_value());
+  EXPECT_THAT(*prog->query, testing::ElementsAre(1));
+}
+
+TEST(FromAspifTest, AssumptionOfSeveralLiteralsIsRefused) {
+  auto prog = from_aspif(
+      "asp 1 0 0\n"
+      "6 2 1 2\n"
+      "0\n");
+  ASSERT_FALSE(prog.ok());
+  EXPECT_THAT(std::string(prog.status().message()),
+              HasSubstr("all of them at once"));
+}
+
+TEST(FromAspifTest, StatementTypeItCannotHonourIsRefused) {
+  // Statement 5, an external atom.
+  auto prog = from_aspif(
+      "asp 1 0 0\n"
+      "5 1 0\n"
+      "0\n");
+  ASSERT_FALSE(prog.ok());
+  EXPECT_THAT(std::string(prog.status().message()),
+              HasSubstr("statement type 5 is not supported"));
+}
+
+TEST(FromAspifTest, MalformedDocumentsAreRefused) {
+  EXPECT_FALSE(from_aspif("").ok());
+  // No header.
+  EXPECT_FALSE(from_aspif("1 0 1 1 0 0\n0\n").ok());
+  // An incremental document, which pgass has no way to solve in one go.
+  EXPECT_FALSE(from_aspif("asp 1 0 0 incremental\n0\n").ok());
+  // No terminator.
+  EXPECT_FALSE(from_aspif("asp 1 0 0\n1 0 1 1 0 0\n").ok());
+  // A statement after the terminator.
+  EXPECT_FALSE(from_aspif("asp 1 0 0\n0\n1 0 1 1 0 0\n").ok());
+  // A rule that stops in the middle.
+  EXPECT_FALSE(from_aspif("asp 1 0 0\n1 0 1 1 0\n0\n").ok());
+  // More fields than the statement asked for.
+  EXPECT_FALSE(from_aspif("asp 1 0 0\n1 0 1 1 0 0 9\n0\n").ok());
+  // 0 names no atom, and a head atom cannot be negative.
+  EXPECT_FALSE(from_aspif("asp 1 0 0\n1 0 1 1 0 1 0\n0\n").ok());
+  EXPECT_FALSE(from_aspif("asp 1 0 0\n1 0 1 -1 0 0\n0\n").ok());
+  // Counts cannot be negative.
+  EXPECT_FALSE(from_aspif("asp 1 0 0\n1 0 -1 0 0\n0\n").ok());
+  // Head and body types are 0 or 1.
+  EXPECT_FALSE(from_aspif("asp 1 0 0\n1 2 1 1 0 0\n0\n").ok());
+  EXPECT_FALSE(from_aspif("asp 1 0 0\n1 0 1 1 2 0\n0\n").ok());
+  // An output name longer than the line that holds it.
+  EXPECT_FALSE(from_aspif("asp 1 0 0\n4 9 p(1,2) 0\n0\n").ok());
+}
+
+TEST(ChoiceRulesTest, EachElementBecomesADisjunctionWithAFreshAtom) {
+  auto prog = from_aspif(
+      "asp 1 0 0\n"
+      "1 1 2 1 2 0 1 3\n"
+      "0\n");
+  ASSERT_TRUE(prog.ok()) << prog.status();
+  replace_choice_rules(*prog);
+
+  EXPECT_EQ(to_aspif(*prog),
+            "asp 1 0 0\n"
+            "1 0 2 1 4 0 1 3\n"
+            "1 0 2 2 5 0 1 3\n"
+            "0\n");
+}
+
+TEST(ChoiceRulesTest, WeightBodyIsCarriedToEachDisjunction) {
+  auto prog = from_aspif(
+      "asp 1 0 0\n"
+      "1 1 1 1 1 2 2 2 1 3 1\n"
+      "0\n");
+  ASSERT_TRUE(prog.ok()) << prog.status();
+  replace_choice_rules(*prog);
+
+  EXPECT_EQ(to_aspif(*prog),
+            "asp 1 0 0\n"
+            "1 0 2 1 4 1 2 2 2 1 3 1\n"
+            "0\n");
+}
+
+// A choice of no atoms derives nothing and rules nothing out.
+TEST(ChoiceRulesTest, EmptyChoiceHeadLeavesNoRule) {
+  auto prog = from_aspif(
+      "asp 1 0 0\n"
+      "1 1 0 0 1 1\n"
+      "0\n");
+  ASSERT_TRUE(prog.ok()) << prog.status();
+  replace_choice_rules(*prog);
+  EXPECT_TRUE(prog->rules.empty());
+}
+
+TEST(ChoiceRulesTest, DisjunctiveRuleIsLeftAlone) {
+  const std::string text =
+      "asp 1 0 0\n"
+      "1 0 2 1 2 0 1 -3\n"
+      "0\n";
+  auto prog = from_aspif(text);
+  ASSERT_TRUE(prog.ok()) << prog.status();
+  replace_choice_rules(*prog);
+  EXPECT_EQ(to_aspif(*prog), text);
 }
 
 }  // namespace

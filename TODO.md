@@ -6,4 +6,3 @@
 * Bind a variable that appears only inside an arithmetic term of a body atom,
   as in `move(C,N,T) :- atrobot(C,T-1)`, by inverting the term. Grounding
   refuses it today, saying T is not bound by the rule body.
-* Let pgass run a --solve only pass by reading in an ASPIF file

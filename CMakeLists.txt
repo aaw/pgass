@@ -109,6 +109,7 @@ target_include_directories(aspif_lib PUBLIC src)
 target_link_libraries(aspif_lib
   PUBLIC
     bigint_lib
+    absl::statusor
   PRIVATE
     absl::strings
 )

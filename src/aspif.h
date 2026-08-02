@@ -4,8 +4,10 @@
 #include <cstdint>
 #include <optional>
 #include <string>
+#include <string_view>
 #include <vector>
 
+#include "absl/status/statusor.h"
 #include "bigint.h"
 
 /* A ground program in the aspif intermediate format (Kaminski et al.,
@@ -92,6 +94,28 @@ struct Program {
 // Serializes prog as an aspif document: 'asp 1 0 0' header, one statement per
 // line, terminated by a line holding 0.
 std::string to_aspif(const Program& prog);
+
+// Reads an aspif document back into a Program, so that a program ground
+// elsewhere, by gringo or by another run of pgass, can be solved here. The
+// statement types read are the ones to_aspif writes: rules, minimize, output
+// and assumptions. A comment is skipped, and any other statement type is an
+// error, since passing over one would answer a different program.
+//
+// A one-literal assumption becomes the query, which is what to_aspif writes a
+// ground query as. Longer assumptions ask for all of their literals at once,
+// which no query means, so they are an error.
+//
+// Program::next_atom comes back past the largest atom the document names, so
+// the atoms solving allocates stay clear of the ones in use.
+absl::StatusOr<Program> from_aspif(std::string_view text);
+
+// Rewrites every choice rule of `prog` into the disjunctive rules solving
+// takes: '{a1; ...; an} :- B' becomes 'ai | chi :- B' for each element, where
+// chi is a fresh atom saying ai was passed over. Where B holds, a minimal
+// model takes exactly one of ai and chi, which is the free choice, and chi
+// appears nowhere else, so it restricts nothing. Normalization rewrites the
+// choice rules of an ASP program the same way.
+void replace_choice_rules(Program& prog);
 
 }  // namespace aspif
 

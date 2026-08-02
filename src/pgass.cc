@@ -14,6 +14,7 @@
 #include "absl/log/check.h"
 #include "absl/status/status.h"
 #include "absl/strings/str_cat.h"
+#include "aspif.h"
 #include "encode.h"
 #include "exit_code.h"
 #include "format.h"
@@ -26,6 +27,9 @@
 ABSL_FLAG(bool, format, false, "Format the program and print to stdout");
 ABSL_FLAG(bool, ground, false,
           "Ground the program, print it as aspif text, and exit");
+ABSL_FLAG(bool, solve, false,
+          "Read the input as aspif text rather than as an ASP program, so "
+          "that a program ground elsewhere can be solved here");
 ABSL_FLAG(int, models, 1,
           "How many answer sets to look for; 0 means all of them");
 ABSL_FLAG(std::string, encode, "",
@@ -102,13 +106,73 @@ void print_substitutions(const aspif::Program& prog,
   std::cout << "\n";
 }
 
+// Says what there is to say about a ground program: its encoding under
+// --encode, the answer to its query, or its answer sets. Returns the exit code
+// that stands for what was found.
+int report(const aspif::Program& prog, std::string_view encode,
+           const SolveOptions& options) {
+  if (!encode.empty()) {
+    auto script = encode_smtlib(prog);
+    if (!script.ok()) {
+      std::cerr << "pgass: encode error: " << script.status().message() << "\n";
+      return kNoRun;
+    }
+    std::cout << *script;
+    return kGrounded;
+  }
+
+  // A query asks a yes or no question about all the answer sets at once, so a
+  // program with one gets an answer instead of a list of answer sets. A yes is
+  // followed by the substitutions it holds under.
+  if (prog.query.has_value()) {
+    auto answer = answer_query(prog, options);
+    if (!answer.ok()) {
+      std::cerr << "pgass: solve error: " << answer.status().message() << "\n";
+      return kNoRun;
+    }
+    // A query is decided over every answer set at once, so its two outcomes are
+    // the true and false the standard asks a query to report.
+    if (answer->answer == QueryAnswer::kNo) {
+      std::cout << "no\n";
+      return kUnsatisfiable;
+    }
+    std::cout << "yes\n";
+    print_substitutions(prog, *answer);
+    return kSatisfiable;
+  }
+
+  auto solved = solve(prog, options);
+  if (!solved.ok()) {
+    std::cerr << "pgass: solve error: " << solved.status().message() << "\n";
+    return kNoRun;
+  }
+  if (solved->answer_sets.empty()) {
+    std::cout << "UNSATISFIABLE\n";
+    return kUnsatisfiable;
+  }
+  for (size_t i = 0; i < solved->answer_sets.size(); ++i) {
+    std::cout << "Answer: " << i + 1 << "\n";
+    print_answer_set(prog, solved->answer_sets[i]);
+  }
+  std::cout << "SATISFIABLE\n";
+
+  // Weak constraints are minimized before any answer set comes back, so every
+  // one of these is optimal. Having found them all is what ALLOPT reports, and
+  // having found some is already more than a plain satisfiable answer says.
+  const bool optimizing = !prog.minimize.empty();
+  if (optimizing) return solved->exhausted ? kAllOptima : kExhausted;
+  return solved->exhausted ? kExhausted : kSatisfiable;
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
   absl::SetProgramUsageMessage(
-      "Parse and ground an ASP program.\n"
-      "Usage: pgass [--format] [source_file ...]\n"
-      "  Files are concatenated; reads from stdin if none are given.");
+      "Parse, ground and solve an ASP program.\n"
+      "Usage: pgass [--format] [--ground] [--solve] [source_file ...]\n"
+      "  Files are concatenated; reads from stdin if none are given.\n"
+      "  --solve reads aspif text instead, so 'pgass prog.lp' and\n"
+      "  'pgass --ground prog.lp | pgass --solve' answer alike.");
   std::vector<char*> positional = absl::ParseCommandLine(argc, argv);
 
   const std::string encode = absl::GetFlag(FLAGS_encode);
@@ -128,6 +192,17 @@ int main(int argc, char** argv) {
                        absl::GetFlag(FLAGS_ground) + !encode.empty();
   if (printers > 1) {
     std::cerr << "pgass: --format, --ground, and --encode cannot be combined\n";
+    return kNoRun;
+  }
+
+  // --solve is handed a program that is already ground, so the two flags that
+  // work on program text have nothing left to do. --encode still does: it
+  // prints the encoding of the ground program.
+  const bool solve_aspif = absl::GetFlag(FLAGS_solve);
+  if (solve_aspif &&
+      (absl::GetFlag(FLAGS_format) || absl::GetFlag(FLAGS_ground))) {
+    std::cerr << "pgass: --solve reads a program that is already ground, so "
+                 "--format and --ground have nothing to do\n";
     return kNoRun;
   }
 
@@ -156,6 +231,24 @@ int main(int argc, char** argv) {
           absl::StrCat(source, std::string(std::istreambuf_iterator<char>(f),
                                            std::istreambuf_iterator<char>()));
     }
+  }
+
+  SolveOptions options;
+  options.max_answer_sets = absl::GetFlag(FLAGS_models);
+  options.optimizer = *optimizer;
+
+  // --solve is handed the ground program itself, so it skips the parsing and
+  // grounding below and goes straight to reporting.
+  if (solve_aspif) {
+    auto program = aspif::from_aspif(source);
+    if (!program.ok()) {
+      std::cerr << "pgass: aspif error: " << program.status().message() << "\n";
+      return kNoRun;
+    }
+    // gringo writes choice rules as choice rules. Grounding here has already
+    // rewritten them into the disjunctions solving takes.
+    aspif::replace_choice_rules(*program);
+    return report(*program, encode, options);
   }
 
   Parser parser(source);
@@ -201,59 +294,5 @@ int main(int argc, char** argv) {
     return kGrounded;
   }
 
-  if (!encode.empty()) {
-    auto script = encode_smtlib(*grounded);
-    if (!script.ok()) {
-      std::cerr << "pgass: encode error: " << script.status().message() << "\n";
-      return kNoRun;
-    }
-    std::cout << *script;
-    return kGrounded;
-  }
-
-  SolveOptions options;
-  options.max_answer_sets = absl::GetFlag(FLAGS_models);
-  options.optimizer = *optimizer;
-
-  // A query asks a yes or no question about all the answer sets at once, so a
-  // program with one gets an answer instead of a list of answer sets. A yes is
-  // followed by the substitutions it holds under.
-  if (grounded->query.has_value()) {
-    auto answer = answer_query(*grounded, options);
-    if (!answer.ok()) {
-      std::cerr << "pgass: solve error: " << answer.status().message() << "\n";
-      return kNoRun;
-    }
-    // A query is decided over every answer set at once, so its two outcomes are
-    // the true and false the standard asks a query to report.
-    if (answer->answer == QueryAnswer::kNo) {
-      std::cout << "no\n";
-      return kUnsatisfiable;
-    }
-    std::cout << "yes\n";
-    print_substitutions(*grounded, *answer);
-    return kSatisfiable;
-  }
-
-  auto solved = solve(*grounded, options);
-  if (!solved.ok()) {
-    std::cerr << "pgass: solve error: " << solved.status().message() << "\n";
-    return kNoRun;
-  }
-  if (solved->answer_sets.empty()) {
-    std::cout << "UNSATISFIABLE\n";
-    return kUnsatisfiable;
-  }
-  for (size_t i = 0; i < solved->answer_sets.size(); ++i) {
-    std::cout << "Answer: " << i + 1 << "\n";
-    print_answer_set(*grounded, solved->answer_sets[i]);
-  }
-  std::cout << "SATISFIABLE\n";
-
-  // Weak constraints are minimized before any answer set comes back, so every
-  // one of these is optimal. Having found them all is what ALLOPT reports, and
-  // having found some is already more than a plain satisfiable answer says.
-  const bool optimizing = !grounded->minimize.empty();
-  if (optimizing) return solved->exhausted ? kAllOptima : kExhausted;
-  return solved->exhausted ? kExhausted : kSatisfiable;
+  return report(*grounded, encode, options);
 }

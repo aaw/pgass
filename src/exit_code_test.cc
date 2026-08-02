@@ -106,6 +106,24 @@ TEST(ExitCode, PrintingRatherThanSolvingReportsGrounded) {
             kGrounded);
 }
 
+// Grounding and solving in two runs answers the way one run does.
+TEST(ExitCode, SolvingGroundOutputAnswersAsSolvingTheSourceDoes) {
+  const std::string pgass = PGASS_BINARY;
+  const std::string program = example("knapsack.lp");
+  const std::string piped = absl::StrCat(pgass, " --ground ", program, " | ",
+                                         pgass, " --solve --models=0 ",
+                                         ">/dev/null 2>&1");
+  const int status = std::system(piped.c_str());
+  ASSERT_TRUE(WIFEXITED(status));
+  EXPECT_EQ(WEXITSTATUS(status), kExhausted);
+  EXPECT_EQ(run_pgass({"--models=0", program}), kExhausted);
+}
+
+TEST(ExitCode, AspifThatCannotBeReadReportsNoRun) {
+  TempProgram document("asp 1 0 0\n1 0 1 1 0\n0\n");
+  EXPECT_EQ(run_pgass({"--solve", document.path()}), kNoRun);
+}
+
 TEST(ExitCode, ParseErrorReportsNoRun) {
   TempProgram program("a :-");
   EXPECT_EQ(run_pgass({program.path()}), kNoRun);
@@ -122,6 +140,16 @@ TEST(ExitCode, BadCommandLineReportsNoRun) {
   EXPECT_EQ(run_pgass({"--optimizer=nope", program.path()}), kNoRun);
   EXPECT_EQ(run_pgass({"--encode=sat", program.path()}), kNoRun);
   EXPECT_EQ(run_pgass({"--format", "--ground", program.path()}), kNoRun);
+  EXPECT_EQ(run_pgass({"--solve", "--ground", program.path()}), kNoRun);
+  EXPECT_EQ(run_pgass({"--solve", "--format", program.path()}), kNoRun);
+}
+
+// --encode prints the encoding of a ground program, and --solve is handed one,
+// so the two go together.
+TEST(ExitCode, EncodingAspifReportsGrounded) {
+  TempProgram document("asp 1 0 0\n1 0 1 1 0 0\n4 1 a 1 1\n0\n");
+  EXPECT_EQ(run_pgass({"--solve", "--encode=smtlib", document.path()}),
+            kGrounded);
 }
 
 TEST(ExitCode, MissingFileReportsNoRun) {
