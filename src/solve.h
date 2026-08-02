@@ -18,6 +18,18 @@ struct AnswerSet {
   std::vector<BigInt> costs;
 };
 
+// What a solve() call found.
+struct SolveResult {
+  std::vector<AnswerSet> answer_sets;
+  // Whether the search ran out of answer sets rather than stopping because it
+  // had already found options.max_answer_sets of them. Only an exhausted search
+  // proves that no further answer set exists.
+  //
+  // Weak constraints leave only optimal answer sets to find, so an exhausted
+  // search of a program with them has found every optimum.
+  bool exhausted = false;
+};
+
 struct SolveOptions {
   // How many answer sets to look for. 0 asks for all of them, which can be a
   // very large number. Under weak constraints only optimal answer sets count.
@@ -39,9 +51,10 @@ struct SolveOptions {
 // cvc5.
 //
 // Returns the answer sets in the order cvc5 produced them, so at most
-// options.max_answer_sets of them. A program with no answer sets returns an
-// empty vector. That is not the same as one AnswerSet holding no atoms, which
-// is what a program whose only answer set is the empty one returns.
+// options.max_answer_sets of them, along with whether the search was exhausted.
+// A program with no answer sets returns an empty vector. That is not the same as
+// one AnswerSet holding no atoms, which is what a program whose only answer set
+// is the empty one returns.
 //
 // Weak constraints are minimized level by level, most important level first,
 // before any answer set is returned. Every answer set returned is optimal.
@@ -56,8 +69,8 @@ struct SolveOptions {
 //
 // Choice rule heads return an UnimplementedError. Nothing produces one:
 // normalization rewrites choice rules into disjunctive ones.
-absl::StatusOr<std::vector<AnswerSet>> solve(const aspif::Program& prog,
-                                             const SolveOptions& options);
+absl::StatusOr<SolveResult> solve(const aspif::Program& prog,
+                                  const SolveOptions& options);
 
 // Whether a program's query holds.
 enum class QueryAnswer {

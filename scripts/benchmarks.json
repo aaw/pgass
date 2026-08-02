@@ -1,0 +1,424 @@
+{
+  "comment": "ASP Competition benchmark domains. Regenerate sizes with an HTTP HEAD against each url.",
+  "checkers_zip": {
+    "url": "http://aspcomp2015.dibris.unige.it/checkers.zip",
+    "size": 42537439
+  },
+  "domains": [
+    {
+      "name": "AbstractDialecticalFrameworksWell-foundedModel",
+      "year": 2015,
+      "url": "http://aspcomp2015.dibris.unige.it/AbstractDialecticalFrameworksWell-foundedModel.zip",
+      "size": 116822,
+      "checker": {
+        "source": "checkers.zip",
+        "dirs": [
+          "AbstractDialecticalFrameworksWell-foundedModel"
+        ]
+      },
+      "layout": "folder"
+    },
+    {
+      "name": "CQA",
+      "year": 2015,
+      "url": "http://aspcomp2015.dibris.unige.it/CQA.zip",
+      "size": 1725251809,
+      "checker": {
+        "source": "checkers.zip",
+        "dirs": [
+          "CQA-Q3",
+          "CQA-Q6",
+          "CQA-Q7"
+        ]
+      },
+      "subdomains": [
+        "CQA-Q3",
+        "CQA-Q6",
+        "CQA-Q7"
+      ],
+      "layout": "folder"
+    },
+    {
+      "name": "CombinedConfiguration",
+      "year": 2015,
+      "url": "http://aspcomp2015.dibris.unige.it/CombinedConfiguration.zip",
+      "size": 541094,
+      "checker": {
+        "source": "checkers.zip",
+        "dirs": [
+          "CombinedConfiguration"
+        ]
+      },
+      "layout": "folder"
+    },
+    {
+      "name": "ComplexOptimizationOfAnswerSets",
+      "year": 2015,
+      "url": "http://aspcomp2015.dibris.unige.it/ComplexOptimizationOfAnswerSets.zip",
+      "size": 21495570,
+      "checker": {
+        "source": "checkers.zip",
+        "dirs": [
+          "ComplexOptimizationOfAnswerSets"
+        ]
+      },
+      "layout": "folder"
+    },
+    {
+      "name": "ConnectedMaximim-densityStillLife",
+      "year": 2015,
+      "url": "http://aspcomp2015.dibris.unige.it/ConnectedMaximim-densityStillLife.zip",
+      "size": 37423,
+      "checker": {
+        "source": "checkers.zip",
+        "dirs": [
+          "ConnectedMaximim-densityStillLife"
+        ]
+      },
+      "layout": "folder"
+    },
+    {
+      "name": "CrossingMinimization",
+      "year": 2015,
+      "url": "http://aspcomp2015.dibris.unige.it/CrossingMinimization.zip",
+      "size": 49433,
+      "checker": {
+        "source": "checkers.zip",
+        "dirs": [
+          "CrossingMinimization"
+        ]
+      },
+      "layout": "folder"
+    },
+    {
+      "name": "GracefulGraphs",
+      "year": 2015,
+      "url": "http://aspcomp2015.dibris.unige.it/GracefulGraphs.zip",
+      "size": 21216,
+      "checker": {
+        "source": "checkers.zip",
+        "dirs": [
+          "GracefulGraphs"
+        ]
+      },
+      "layout": "folder"
+    },
+    {
+      "name": "GraphColouring",
+      "year": 2015,
+      "url": "http://aspcomp2015.dibris.unige.it/GraphColouring.zip",
+      "size": 254273,
+      "checker": {
+        "source": "checkers.zip",
+        "dirs": [
+          "GraphColouring"
+        ]
+      },
+      "layout": "folder"
+    },
+    {
+      "name": "IncrementalScheduling",
+      "year": 2015,
+      "url": "http://aspcomp2015.dibris.unige.it/IncrementalScheduling.zip",
+      "size": 661338,
+      "checker": {
+        "source": "checkers.zip",
+        "dirs": [
+          "IncrementalScheduling"
+        ]
+      },
+      "layout": "folder"
+    },
+    {
+      "name": "KnightTourWithHoles",
+      "year": 2015,
+      "url": "http://aspcomp2015.dibris.unige.it/KnightTourWithHoles.zip",
+      "size": 124252,
+      "checker": {
+        "source": "checkers.zip",
+        "dirs": [
+          "KnightTourWithHoles"
+        ]
+      },
+      "layout": "folder"
+    },
+    {
+      "name": "Labyrinth",
+      "year": 2015,
+      "url": "http://aspcomp2015.dibris.unige.it/Labyrinth.zip",
+      "size": 486894,
+      "checker": {
+        "source": "checkers.zip",
+        "dirs": [
+          "Labyrinth"
+        ]
+      },
+      "layout": "folder"
+    },
+    {
+      "name": "MaxSAT",
+      "year": 2015,
+      "url": "http://aspcomp2015.dibris.unige.it/MaxSAT.zip",
+      "size": 39979733,
+      "checker": {
+        "source": "checkers.zip",
+        "dirs": [
+          "MaxSAT"
+        ]
+      },
+      "layout": "folder"
+    },
+    {
+      "name": "MaximalCliqueProblem",
+      "year": 2015,
+      "url": "http://aspcomp2015.dibris.unige.it/MaximalCliqueProblem.zip",
+      "size": 726503482,
+      "checker": {
+        "source": "checkers.zip",
+        "dirs": [
+          "MaximalCliqueProblem"
+        ]
+      },
+      "layout": "folder"
+    },
+    {
+      "name": "MinimalDiagnosis",
+      "year": 2015,
+      "url": "http://aspcomp2015.dibris.unige.it/MinimalDiagnosis.zip",
+      "size": 1279088,
+      "checker": {
+        "source": "checkers.zip",
+        "dirs": [
+          "MinimalDiagnosis"
+        ]
+      },
+      "layout": "folder"
+    },
+    {
+      "name": "Nomistery",
+      "year": 2015,
+      "url": "http://aspcomp2015.dibris.unige.it/Nomistery.zip",
+      "size": 37921,
+      "checker": {
+        "source": "checkers.zip",
+        "dirs": [
+          "Nomistery"
+        ]
+      },
+      "layout": "folder"
+    },
+    {
+      "name": "PartnerUnits",
+      "year": 2015,
+      "url": "http://aspcomp2015.dibris.unige.it/PartnerUnits.zip",
+      "size": 100655,
+      "checker": {
+        "source": "checkers.zip",
+        "dirs": [
+          "PartnerUnits"
+        ]
+      },
+      "layout": "folder"
+    },
+    {
+      "name": "PermutationPatternMatching",
+      "year": 2015,
+      "url": "http://aspcomp2015.dibris.unige.it/PermutationPatternMatching.zip",
+      "size": 187511,
+      "checker": {
+        "source": "checkers.zip",
+        "dirs": [
+          "PermutationPatternMatching"
+        ]
+      },
+      "layout": "folder"
+    },
+    {
+      "name": "QualitativeSpatialReasoning",
+      "year": 2015,
+      "url": "http://aspcomp2015.dibris.unige.it/QualitativeSpatialReasoning.zip",
+      "size": 652240,
+      "checker": {
+        "source": "checkers.zip",
+        "dirs": [
+          "QualitativeSpatialReasoning"
+        ]
+      },
+      "layout": "folder"
+    },
+    {
+      "name": "Reachability",
+      "year": 2015,
+      "url": "http://aspcomp2015.dibris.unige.it/Reachability.zip",
+      "size": 2949622973,
+      "checker": {
+        "source": "checkers.zip",
+        "dirs": [
+          "Reachability"
+        ]
+      },
+      "layout": "folder"
+    },
+    {
+      "name": "RicochetRobots",
+      "year": 2015,
+      "url": "http://aspcomp2015.dibris.unige.it/RicochetRobots.zip",
+      "size": 117579,
+      "checker": {
+        "source": "checkers.zip",
+        "dirs": [
+          "RicochetRobots"
+        ]
+      },
+      "layout": "folder"
+    },
+    {
+      "name": "Sokoban",
+      "year": 2015,
+      "url": "http://aspcomp2015.dibris.unige.it/Sokoban.zip",
+      "size": 1833831,
+      "checker": {
+        "source": "checkers.zip",
+        "dirs": [
+          "Sokoban"
+        ]
+      },
+      "layout": "folder"
+    },
+    {
+      "name": "StableMarriage",
+      "year": 2015,
+      "url": "http://aspcomp2015.dibris.unige.it/StableMarriage.zip",
+      "size": 83504178,
+      "checker": {
+        "source": "checkers.zip",
+        "dirs": [
+          "StableMarriage"
+        ]
+      },
+      "layout": "folder"
+    },
+    {
+      "name": "SteinerTree",
+      "year": 2015,
+      "url": "http://aspcomp2015.dibris.unige.it/SteinerTree.zip",
+      "size": 16809,
+      "checker": {
+        "source": "checkers.zip",
+        "dirs": [
+          "SteinerTree"
+        ]
+      },
+      "layout": "folder"
+    },
+    {
+      "name": "StrategicCompanies",
+      "year": 2015,
+      "url": "http://aspcomp2015.dibris.unige.it/StrategicCompanies.zip",
+      "size": 6039218,
+      "checker": {
+        "source": "checkers.zip",
+        "dirs": [
+          "StrategicCompanies"
+        ]
+      },
+      "layout": "folder"
+    },
+    {
+      "name": "SystemSynthesis",
+      "year": 2015,
+      "url": "http://aspcomp2015.dibris.unige.it/SystemSynthesis.zip",
+      "size": 1135113,
+      "checker": {
+        "source": "checkers.zip",
+        "dirs": [
+          "SystemSynthesis"
+        ]
+      },
+      "layout": "folder"
+    },
+    {
+      "name": "ValvesLocationProblem",
+      "year": 2015,
+      "url": "http://aspcomp2015.dibris.unige.it/ValvesLocationProblem.zip",
+      "size": 350320,
+      "checker": {
+        "source": "checkers.zip",
+        "dirs": [
+          "ValvesLocationProblem"
+        ]
+      },
+      "layout": "folder"
+    },
+    {
+      "name": "VideoStreaming",
+      "year": 2015,
+      "url": "http://aspcomp2015.dibris.unige.it/VideoStreaming.zip",
+      "size": 524426,
+      "checker": {
+        "source": "checkers.zip",
+        "dirs": [
+          "VideoStreaming"
+        ]
+      },
+      "layout": "folder"
+    },
+    {
+      "name": "Visit-all",
+      "year": 2015,
+      "url": "http://aspcomp2015.dibris.unige.it/Visit-all.zip",
+      "size": 78481,
+      "checker": {
+        "source": "checkers.zip",
+        "dirs": [
+          "Visit-all"
+        ]
+      },
+      "layout": "folder"
+    },
+    {
+      "name": "BayesianNL",
+      "year": 2017,
+      "url": "http://aspcomp2017.dibris.unige.it/BayesianNL.zip",
+      "size": 436918,
+      "checker": {
+        "source": "http://aspcomp2017.dibris.unige.it/BayesianNL-checker.zip",
+        "size": 1673
+      },
+      "layout": "flat"
+    },
+    {
+      "name": "CrewAllocation",
+      "year": 2017,
+      "url": "http://aspcomp2017.dibris.unige.it/CrewAllocation.zip",
+      "size": 25549,
+      "checker": {
+        "source": "http://aspcomp2017.dibris.unige.it/CrewAllocation-checker.zip",
+        "size": 1661
+      },
+      "layout": "flat"
+    },
+    {
+      "name": "MarkovNL",
+      "year": 2017,
+      "url": "http://aspcomp2017.dibris.unige.it/MarkovNL.zip",
+      "size": 973645,
+      "checker": {
+        "source": "http://aspcomp2017.dibris.unige.it/MarkovNL-checker.zip",
+        "size": 1859
+      },
+      "layout": "flat"
+    },
+    {
+      "name": "Supertree",
+      "year": 2017,
+      "url": "http://aspcomp2017.dibris.unige.it/Supertree.zip",
+      "size": 23980,
+      "checker": {
+        "source": "http://aspcomp2017.dibris.unige.it/Supertree-checker.zip",
+        "size": 2802
+      },
+      "layout": "flat"
+    }
+  ]
+}

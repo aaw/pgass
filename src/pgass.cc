@@ -12,8 +12,10 @@
 #include "absl/flags/parse.h"
 #include "absl/flags/usage.h"
 #include "absl/log/check.h"
+#include "absl/status/status.h"
 #include "absl/strings/str_cat.h"
 #include "encode.h"
+#include "exit_code.h"
 #include "format.h"
 #include "ground.h"
 #include "normalize.h"
@@ -112,12 +114,12 @@ int main(int argc, char** argv) {
   const std::string encode = absl::GetFlag(FLAGS_encode);
   if (encode == "sat") {
     std::cerr << "pgass: --encode=sat is not implemented yet\n";
-    return 1;
+    return kNoRun;
   }
   if (!encode.empty() && encode != "smtlib") {
     std::cerr << "pgass: unknown --encode '" << encode
               << "'; expected 'smtlib'\n";
-    return 1;
+    return kNoRun;
   }
 
   // Each of these three prints something and stops, so at most one can be
@@ -126,7 +128,7 @@ int main(int argc, char** argv) {
                        absl::GetFlag(FLAGS_ground) + !encode.empty();
   if (printers > 1) {
     std::cerr << "pgass: --format, --ground, and --encode cannot be combined\n";
-    return 1;
+    return kNoRun;
   }
 
   const std::optional<SolveOptions::Optimizer> optimizer =
@@ -135,7 +137,7 @@ int main(int argc, char** argv) {
     std::cerr << "pgass: unknown --optimizer '"
               << absl::GetFlag(FLAGS_optimizer)
               << "'; expected 'linear' or 'bisect'\n";
-    return 1;
+    return kNoRun;
   }
 
   std::string source;
@@ -147,7 +149,7 @@ int main(int argc, char** argv) {
       std::ifstream f(positional[i]);
       if (!f) {
         std::cerr << "pgass: cannot open '" << positional[i] << "'\n";
-        return 1;
+        return kNoRun;
       }
       if (!source.empty()) source += '\n';
       source =
@@ -160,24 +162,24 @@ int main(int argc, char** argv) {
   auto program = parser.parse_program();
   if (!program.ok()) {
     std::cerr << "pgass: parse error: " << program.status().message() << "\n";
-    return 1;
+    return kNoRun;
   }
 
   if (absl::GetFlag(FLAGS_format)) {
     std::cout << format(**program);
-    return 0;
+    return kGrounded;
   }
 
   auto safety = verify_safe(**program);
   if (!safety.ok()) {
     std::cerr << "pgass: safety error: " << safety.message() << "\n";
-    return 1;
+    return kNoRun;
   }
 
   auto normal = normalize(**program);
   if (!normal.ok()) {
     std::cerr << "pgass: normalization error: " << normal.message() << "\n";
-    return 1;
+    return kNoRun;
   }
 
   std::vector<std::string> warnings;
@@ -186,24 +188,27 @@ int main(int argc, char** argv) {
   if (!grounded.ok()) {
     std::cerr << "pgass: grounding error: " << grounded.status().message()
               << "\n";
-    return 1;
+    // Running out of the ground atoms allowed is running out of a resource, not
+    // a complaint about the program, so it answers the way a run cut short by
+    // its time limit does.
+    return absl::IsResourceExhausted(grounded.status()) ? kInterrupted : kNoRun;
   }
   for (const std::string& warning : warnings) {
     std::cerr << "pgass: warning: " << warning << "\n";
   }
   if (absl::GetFlag(FLAGS_ground)) {
     std::cout << to_aspif(*grounded);
-    return 0;
+    return kGrounded;
   }
 
   if (!encode.empty()) {
     auto script = encode_smtlib(*grounded);
     if (!script.ok()) {
       std::cerr << "pgass: encode error: " << script.status().message() << "\n";
-      return 1;
+      return kNoRun;
     }
     std::cout << *script;
-    return 0;
+    return kGrounded;
   }
 
   SolveOptions options;
@@ -217,31 +222,38 @@ int main(int argc, char** argv) {
     auto answer = answer_query(*grounded, options);
     if (!answer.ok()) {
       std::cerr << "pgass: solve error: " << answer.status().message() << "\n";
-      return 1;
+      return kNoRun;
     }
+    // A query is decided over every answer set at once, so its two outcomes are
+    // the true and false the standard asks a query to report.
     if (answer->answer == QueryAnswer::kNo) {
       std::cout << "no\n";
-      return 0;
+      return kUnsatisfiable;
     }
     std::cout << "yes\n";
     print_substitutions(*grounded, *answer);
-    return 0;
+    return kSatisfiable;
   }
 
-  auto answer_sets = solve(*grounded, options);
-  if (!answer_sets.ok()) {
-    std::cerr << "pgass: solve error: " << answer_sets.status().message()
-              << "\n";
-    return 1;
+  auto solved = solve(*grounded, options);
+  if (!solved.ok()) {
+    std::cerr << "pgass: solve error: " << solved.status().message() << "\n";
+    return kNoRun;
   }
-  if (answer_sets->empty()) {
+  if (solved->answer_sets.empty()) {
     std::cout << "UNSATISFIABLE\n";
-    return 0;
+    return kUnsatisfiable;
   }
-  for (size_t i = 0; i < answer_sets->size(); ++i) {
+  for (size_t i = 0; i < solved->answer_sets.size(); ++i) {
     std::cout << "Answer: " << i + 1 << "\n";
-    print_answer_set(*grounded, (*answer_sets)[i]);
+    print_answer_set(*grounded, solved->answer_sets[i]);
   }
   std::cout << "SATISFIABLE\n";
-  return 0;
+
+  // Weak constraints are minimized before any answer set comes back, so every
+  // one of these is optimal. Having found them all is what ALLOPT reports, and
+  // having found some is already more than a plain satisfiable answer says.
+  const bool optimizing = !grounded->minimize.empty();
+  if (optimizing) return solved->exhausted ? kAllOptima : kExhausted;
+  return solved->exhausted ? kExhausted : kSatisfiable;
 }

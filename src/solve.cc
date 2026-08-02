@@ -457,8 +457,8 @@ absl::Status Session::start(const aspif::Program& prog,
 
 }  // namespace
 
-absl::StatusOr<std::vector<AnswerSet>> solve(const aspif::Program& prog,
-                                             const SolveOptions& options) {
+absl::StatusOr<SolveResult> solve(const aspif::Program& prog,
+                                  const SolveOptions& options) {
   if (options.max_answer_sets < 0) {
     return absl::InvalidArgumentError(
         "max_answer_sets cannot be negative; 0 asks for all answer sets");
@@ -468,23 +468,32 @@ absl::StatusOr<std::vector<AnswerSet>> solve(const aspif::Program& prog,
   RETURN_IF_ERROR(session.start(prog, options));
   Search& search = *session.search;
 
-  std::vector<AnswerSet> answer_sets;
+  SolveResult result;
   while (options.max_answer_sets == 0 ||
-         answer_sets.size() < static_cast<size_t>(options.max_answer_sets)) {
+         result.answer_sets.size() <
+             static_cast<size_t>(options.max_answer_sets)) {
     ASSIGN_OR_RETURN(const bool found, search.find());
-    if (!found) break;
+    if (!found) {
+      // Nothing left to find, so the search covered the whole space.
+      result.exhausted = true;
+      break;
+    }
 
     AnswerSet answer_set;
     answer_set.costs = session.costs;
     answer_set.atoms = search.model_atoms();
     search.block(answer_set.atoms);
-    answer_sets.push_back(std::move(answer_set));
+    result.answer_sets.push_back(std::move(answer_set));
 
     // A program with no atoms has the empty answer set and no other, and there
-    // is no clause to block it with, so stop before asking again.
-    if (prog.next_atom <= 1) break;
+    // is no clause to block it with, so stop before asking again. That one
+    // answer set is all of them.
+    if (prog.next_atom <= 1) {
+      result.exhausted = true;
+      break;
+    }
   }
-  return answer_sets;
+  return result;
 }
 
 absl::StatusOr<QueryResult> answer_query(const aspif::Program& prog,

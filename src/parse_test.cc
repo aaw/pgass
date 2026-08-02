@@ -32,6 +32,18 @@ TEST_F(ParserTest, LexerIgnoresWhitespaceAndComments) {
   EXPECT_EQ(lexer.next().type, TokenType::kEOF);
 }
 
+TEST_F(ParserTest, LexerIgnoresCarriageReturns) {
+  Lexer lexer("a(1).\r\nb :- a(1).\r\n");
+  for (TokenType expected :
+       {TokenType::kID, TokenType::kPAREN_OPEN, TokenType::kNUMBER,
+        TokenType::kPAREN_CLOSE, TokenType::kDOT, TokenType::kID,
+        TokenType::kCONS, TokenType::kID, TokenType::kPAREN_OPEN,
+        TokenType::kNUMBER, TokenType::kPAREN_CLOSE, TokenType::kDOT,
+        TokenType::kEOF}) {
+    EXPECT_EQ(lexer.next().type, expected);
+  }
+}
+
 TEST_F(ParserTest, LexString) {
   Lexer lexer("   \"hello, \\\"world\\\"!\"  ");
   EXPECT_THAT(lexer.next(),

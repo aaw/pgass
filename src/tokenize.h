@@ -80,7 +80,8 @@ class Lexer {
 
     last_token_start_ = pos_;
 
-    if (pos_ >= source_.size()) return Token{.type = TokenType::kEOF, .val = ""};
+    if (pos_ >= source_.size())
+      return Token{.type = TokenType::kEOF, .val = ""};
 
     // Consume/return any recognized tokens. First handle (possibly)
     // multi-character tokens.
@@ -196,7 +197,7 @@ class Lexer {
     while (did_work) {
       did_work = false;
       while (p < source_.size() && (source_[p] == ' ' || source_[p] == '\t' ||
-                                    source_[p] == '\n')) {
+                                    source_[p] == '\n' || source_[p] == '\r')) {
         did_work = true;
         ++p;
       }
@@ -229,7 +230,8 @@ class Lexer {
     size_t col = clamped - line_start;
     size_t line_end = line_start;
     while (line_end < source_.size() && source_[line_end] != '\n') ++line_end;
-    std::string_view line_text = source_.substr(line_start, line_end - line_start);
+    std::string_view line_text =
+        source_.substr(line_start, line_end - line_start);
     std::string caret(col, ' ');
     caret += '^';
     return absl::StrCat("line ", line, ", column ", col + 1, ":\n", line_text,

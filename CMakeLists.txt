@@ -320,6 +320,23 @@ target_link_libraries(graph_test
     GTest::gmock
 )
 
+# Runs the built binary to check the exit codes it returns, so it needs to know
+# where that binary and the examples it solves ended up.
+add_executable(exit_code_test src/exit_code_test.cc)
+target_compile_options(exit_code_test PRIVATE ${PGASS_WARNINGS})
+target_compile_definitions(exit_code_test
+  PRIVATE
+    PGASS_BINARY="$<TARGET_FILE:pgass>"
+    PGASS_SOURCE_DIR="${CMAKE_CURRENT_SOURCE_DIR}"
+)
+add_dependencies(exit_code_test pgass)
+target_link_libraries(exit_code_test
+  PRIVATE
+    absl::strings
+    GTest::gtest_main
+    GTest::gmock
+)
+
 include(GoogleTest)
 gtest_discover_tests(bigint_test)
 gtest_discover_tests(parse_test)
@@ -332,3 +349,4 @@ gtest_discover_tests(aspif_test)
 gtest_discover_tests(ground_test)
 gtest_discover_tests(solve_test)
 gtest_discover_tests(encode_test)
+gtest_discover_tests(exit_code_test)

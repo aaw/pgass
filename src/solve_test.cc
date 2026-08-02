@@ -47,12 +47,11 @@ absl::StatusOr<aspif::Program> ground_source(const std::string& source) {
 // tests compare them as an unordered collection of sorted strings.
 absl::StatusOr<std::vector<std::string>> render_solutions(
     const aspif::Program& grounded, const SolveOptions& options) {
-  ASSIGN_OR_RETURN(std::vector<AnswerSet> answer_sets,
-                   solve(grounded, options));
+  ASSIGN_OR_RETURN(SolveResult result, solve(grounded, options));
 
   std::vector<std::string> rendered;
-  rendered.reserve(answer_sets.size());
-  for (const AnswerSet& answer_set : answer_sets) {
+  rendered.reserve(result.answer_sets.size());
+  for (const AnswerSet& answer_set : result.answer_sets) {
     const absl::flat_hash_set<aspif::Atom> is_true(answer_set.atoms.begin(),
                                                    answer_set.atoms.end());
     std::vector<std::string> names;
