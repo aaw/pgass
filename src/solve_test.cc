@@ -883,4 +883,80 @@ TEST(SolveTest, OptimizationOverAPositiveCycle) {
   EXPECT_THAT(*out, UnorderedElementsAre("q | cost 0"));
 }
 
+// The tests below start from aspif, which is the only way a choice head reaches
+// the encoding: pgass normalization writes a choice rule as a disjunction.
+absl::StatusOr<std::vector<std::string>> solve_aspif(const std::string& text) {
+  ASSIGN_OR_RETURN(aspif::Program prog, aspif::from_aspif(text));
+  return render_solutions(prog, SolveOptions{.max_answer_sets = 0});
+}
+
+// '{a; b}.' Each atom of a choice is free on its own, which is four answer
+// sets rather than the two a disjunction would give.
+TEST(SolveTest, ChoiceHeadLeavesEveryCombination) {
+  auto out = solve_aspif(
+      "asp 1 0 0\n"
+      "1 1 2 1 2 0 0\n"
+      "4 1 a 1 1\n"
+      "4 1 b 1 2\n"
+      "0\n");
+  ASSERT_OK(out);
+  EXPECT_THAT(*out, UnorderedElementsAre("", "a", "b", "a b"));
+}
+
+// '{a}. b :- a. :- not b.' A choice atom still has to be supported to hold, and
+// what it supports in turn holds with it.
+TEST(SolveTest, ChoiceHeadSupportsWhatFollowsFromIt) {
+  auto out = solve_aspif(
+      "asp 1 0 0\n"
+      "1 1 1 1 0 0\n"
+      "1 0 1 2 0 1 1\n"
+      "1 0 0 0 1 -2\n"
+      "4 1 a 1 1\n"
+      "4 1 b 1 2\n"
+      "0\n");
+  ASSERT_OK(out);
+  EXPECT_THAT(*out, UnorderedElementsAre("a b"));
+}
+
+// '{a}. b :- a, c. c :- b. c :- a.' The cycle over b and c is reached only
+// through the choice, so choosing a is what lets either of them hold.
+TEST(SolveTest, ChoiceHeadReachesAPositiveCycle) {
+  auto out = solve_aspif(
+      "asp 1 0 0\n"
+      "1 1 1 1 0 0\n"
+      "1 0 1 2 0 2 1 3\n"
+      "1 0 1 3 0 1 2\n"
+      "1 0 1 3 0 1 1\n"
+      "4 1 a 1 1\n"
+      "4 1 b 1 2\n"
+      "4 1 c 1 3\n"
+      "0\n");
+  ASSERT_OK(out);
+  EXPECT_THAT(*out, UnorderedElementsAre("", "a b c"));
+}
+
+// 'a :- b. b :- a. a | b :- c. c :- not d. d :- not c. {z} :- d.' The head
+// cycle over a and b puts the minimality check in charge of them, and that
+// check reads every rule of the program, choice rules included. A choice
+// atom the model leaves out forces nothing, so {a, b, d} stays out: a and b
+// support only each other once d holds.
+TEST(SolveTest, ChoiceHeadLeftOutDoesNotExcuseTheMinimalityCheck) {
+  auto out = solve_aspif(
+      "asp 1 0 0\n"
+      "1 0 1 1 0 1 2\n"
+      "1 0 1 2 0 1 1\n"
+      "1 0 2 1 2 0 1 3\n"
+      "1 0 1 3 0 1 -4\n"
+      "1 0 1 4 0 1 -3\n"
+      "1 1 1 5 0 1 4\n"
+      "4 1 a 1 1\n"
+      "4 1 b 1 2\n"
+      "4 1 c 1 3\n"
+      "4 1 d 1 4\n"
+      "4 1 z 1 5\n"
+      "0\n");
+  ASSERT_OK(out);
+  EXPECT_THAT(*out, UnorderedElementsAre("a b c", "d", "d z"));
+}
+
 }  // namespace

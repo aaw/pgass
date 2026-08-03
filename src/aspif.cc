@@ -351,23 +351,164 @@ absl::StatusOr<Program> from_aspif(std::string_view text) {
   return prog;
 }
 
-void replace_choice_rules(Program& prog) {
-  std::vector<Rule> rewritten;
-  for (Rule& rule : prog.rules) {
-    if (rule.head_type == Rule::HeadType::kDisjunction) {
-      rewritten.push_back(std::move(rule));
-      continue;
+namespace {
+
+// What the rules settle about each atom without any search.
+struct Settled {
+  // Whether some rule states the atom as a fact, so it holds in every answer
+  // set.
+  std::vector<bool> fact;
+  // Whether any rule at all has the atom in its head. An atom with none holds
+  // in no answer set.
+  std::vector<bool> derivable;
+};
+
+// Whether the rule is the plainest statement of a fact, 'a.'. Such a rule is
+// what makes its atom a fact, so simplifying it against that fact would delete
+// the fact itself.
+bool states_a_fact(const Rule& rule) {
+  if (rule.head_type != Rule::HeadType::kDisjunction) return false;
+  if (rule.head.size() != 1) return false;
+  return rule.body_type == Rule::BodyType::kNormal ? rule.body.empty()
+                                                   : rule.lower_bound <= 0;
+}
+
+Settled settle(const Program& prog) {
+  Settled settled;
+  settled.fact.assign(prog.next_atom, false);
+  settled.derivable.assign(prog.next_atom, false);
+  for (const Rule& rule : prog.rules) {
+    for (Atom atom : rule.head) settled.derivable[atom] = true;
+    if (states_a_fact(rule)) settled.fact[rule.head.front()] = true;
+  }
+  return settled;
+}
+
+// How a settled atom decides a body literal.
+enum class LitFate { kKeep, kDrop, kKillsBody };
+
+LitFate fate_of(Lit lit, const Settled& settled) {
+  const Atom atom = std::abs(lit);
+  const bool holds = settled.fact[atom];
+  const bool impossible = !settled.derivable[atom];
+  if (lit > 0) {
+    if (holds) return LitFate::kDrop;
+    if (impossible) return LitFate::kKillsBody;
+  } else {
+    if (holds) return LitFate::kKillsBody;
+    if (impossible) return LitFate::kDrop;
+  }
+  return LitFate::kKeep;
+}
+
+// Rewrites one rule's body against `settled`. Returns false where the body can
+// hold in no answer set, which leaves the rule to be dropped.
+bool simplify_body(Rule& rule, const Settled& settled) {
+  if (rule.body_type == Rule::BodyType::kNormal) {
+    std::vector<Lit> kept;
+    kept.reserve(rule.body.size());
+    for (Lit lit : rule.body) {
+      switch (fate_of(lit, settled)) {
+        case LitFate::kKeep:
+          kept.push_back(lit);
+          break;
+        case LitFate::kDrop:
+          break;
+        case LitFate::kKillsBody:
+          return false;
+      }
     }
-    // One rule per element, so a choice of no atoms leaves nothing behind: it
-    // derives no atom and rules no model out.
-    for (Atom atom : rule.head) {
-      Rule one = rule;
-      one.head_type = Rule::HeadType::kDisjunction;
-      one.head = {atom, prog.new_atom()};
-      rewritten.push_back(std::move(one));
+    rule.body = std::move(kept);
+    return true;
+  }
+
+  // A settled literal of a weight body is worth its weight either way. One that
+  // holds pays into the bound, and one that cannot hold pays nothing, so both
+  // leave the body counting over fewer literals.
+  BigInt bound = rule.lower_bound;
+  BigInt reachable = 0;
+  std::vector<WeightedLit> kept;
+  kept.reserve(rule.weighted_body.size());
+  for (WeightedLit& weighted : rule.weighted_body) {
+    switch (fate_of(weighted.lit, settled)) {
+      case LitFate::kKeep:
+        reachable += weighted.weight;
+        kept.push_back(std::move(weighted));
+        break;
+      case LitFate::kDrop:
+        bound -= weighted.weight;
+        break;
+      case LitFate::kKillsBody:
+        break;
     }
   }
-  prog.rules = std::move(rewritten);
+  // A bound the remaining literals cannot reach however they fall.
+  if (reachable < bound) return false;
+  // A bound already paid for is a body that always holds, which is a normal
+  // body of no literals.
+  if (bound <= 0) {
+    rule.body_type = Rule::BodyType::kNormal;
+    rule.weighted_body.clear();
+    rule.lower_bound = 0;
+    return true;
+  }
+  rule.lower_bound = std::move(bound);
+  rule.weighted_body = std::move(kept);
+  return true;
+}
+
+// Rewrites one rule's head against `settled`. Returns false where the rule has
+// nothing left to say.
+bool simplify_head(Rule& rule, const Settled& settled) {
+  if (rule.head_type == Rule::HeadType::kChoice) {
+    // A choice over an atom that already holds chooses nothing, so the atom
+    // goes and the rest of the choice stands. An empty choice says nothing.
+    std::erase_if(rule.head,
+                  [&settled](Atom atom) { return settled.fact[atom]; });
+    return !rule.head.empty();
+  }
+  // A disjunction holding a fact is satisfied whatever its body does. It cannot
+  // support its other head atoms either: supporting one asks for every other to
+  // be false, and a fact never is.
+  for (Atom atom : rule.head) {
+    if (settled.fact[atom]) return false;
+  }
+  return true;
+}
+
+// The size of a program. A pass that leaves it alone has nothing left to
+// settle, since every decision rests on the facts and the underivable atoms,
+// and those follow from the rules that are left.
+size_t rule_and_literal_count(const Program& prog) {
+  size_t count = prog.rules.size();
+  for (const Rule& rule : prog.rules) {
+    count += rule.head.size() + rule.body.size() + rule.weighted_body.size();
+  }
+  return count;
+}
+
+}  // namespace
+
+void simplify(Program& prog) {
+  while (true) {
+    const size_t before = rule_and_literal_count(prog);
+    const Settled settled = settle(prog);
+
+    std::vector<Rule> kept;
+    kept.reserve(prog.rules.size());
+    for (Rule& rule : prog.rules) {
+      if (states_a_fact(rule)) {
+        kept.push_back(std::move(rule));
+        continue;
+      }
+      if (!simplify_head(rule, settled)) continue;
+      if (!simplify_body(rule, settled)) continue;
+      kept.push_back(std::move(rule));
+    }
+    prog.rules = std::move(kept);
+
+    if (rule_and_literal_count(prog) == before) return;
+  }
 }
 
 }  // namespace aspif

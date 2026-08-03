@@ -132,8 +132,11 @@ Ranking build_ranking(const aspif::Program& prog) {
   std::vector<int> component_size(ranking.component.size(), 0);
   for (int component : ranking.component) ++component_size[component];
 
-  // Two head atoms of one rule in one component are a head cycle.
+  // Two head atoms of one rule in one component are a head cycle. A choice
+  // head is exempt: it leaves each of its atoms free on its own, so no two of
+  // them ever have to hold together.
   for (const aspif::Rule& rule : prog.rules) {
+    if (rule.head_type == aspif::Rule::HeadType::kChoice) continue;
     absl::flat_hash_set<int> seen;
     for (aspif::Atom head : rule.head) {
       if (seen.insert(ranking.component[head]).second) continue;
@@ -154,20 +157,6 @@ Ranking build_ranking(const aspif::Program& prog) {
     ranking.needs_level[atom] = cyclic && !head_cyclic;
   }
   return ranking;
-}
-
-// Rejects the parts of aspif this translation does not cover, so that such a
-// program gets an error rather than a wrong answer.
-absl::Status check_supported(const aspif::Program& prog) {
-  for (const aspif::Rule& rule : prog.rules) {
-    // A choice head leaves its atoms free rather than deriving them, so the
-    // completion below would have to stop forcing them. Nothing produces one:
-    // normalization rewrites choice rules away.
-    if (rule.head_type == aspif::Rule::HeadType::kChoice) {
-      return absl::UnimplementedError("choice rule heads are not supported");
-    }
-  }
-  return absl::OkStatus();
 }
 
 // What to call each atom and each level variable, indexed by atom id. Slot 0 is
@@ -322,11 +311,15 @@ std::vector<std::vector<Support>> collect_supports(
   for (const aspif::Rule& rule : prog.rules) {
     if (rule.head.empty()) continue;
     const cvc5::Term body = body_term(tm, atom_var, rule);
+    const bool choice = rule.head_type == aspif::Rule::HeadType::kChoice;
     for (aspif::Atom head : rule.head) {
       std::vector<cvc5::Term> conjuncts = {body};
-      for (aspif::Atom other : rule.head) {
-        if (other == head) continue;
-        conjuncts.push_back(tm.mkTerm(cvc5::Kind::NOT, {atom_var[other]}));
+      // A choice head supports each of its atoms on the body alone.
+      if (!choice) {
+        for (aspif::Atom other : rule.head) {
+          if (other == head) continue;
+          conjuncts.push_back(tm.mkTerm(cvc5::Kind::NOT, {atom_var[other]}));
+        }
       }
       supports[head].push_back(
           Support{.body = conjunction(tm, conjuncts),
@@ -339,10 +332,14 @@ std::vector<std::vector<Support>> collect_supports(
 // Every rule is satisfied: where its body holds, one of its head atoms holds.
 // An integrity constraint is the same statement about a rule with no head,
 // whose empty disjunction is false, so it says the body cannot hold.
+//
+// A choice rule forces nothing, so it has no formula here. Its head atoms are
+// free, and support alone decides them.
 void rule_formulas(cvc5::TermManager& tm, const aspif::Program& prog,
                    const std::vector<cvc5::Term>& atom_var,
                    std::vector<cvc5::Term>& out) {
   for (const aspif::Rule& rule : prog.rules) {
+    if (rule.head_type == aspif::Rule::HeadType::kChoice) continue;
     std::vector<cvc5::Term> heads;
     heads.reserve(rule.head.size());
     for (aspif::Atom head : rule.head) heads.push_back(atom_var[head]);
@@ -510,11 +507,15 @@ std::string weak_constraint_block(const aspif::Program& prog,
       definitions, "(assert ", encoding.optimality->toString(), ")\n");
 }
 
-// One rule of the reduct, as an implication the subset has to satisfy.
+// One rule of the reduct, as a formula the subset has to satisfy.
 //
 // A rule whose body holds a 'not q' where the model holds q is not in the
 // reduct at all, so the 'not' literals read the model. The positive body atoms
 // and the head read the subset, which is what has to model the reduct.
+//
+// A choice head is '{a} :- B' for each of its atoms, which is 'a :- B, not not
+// a'. The reduct keeps that rule for the atoms the model holds and drops it for
+// the rest, so each atom is forced only where the model holds it.
 cvc5::Term reduct_rule(cvc5::TermManager& tm, const aspif::Rule& rule,
                        const std::vector<cvc5::Term>& atom_var,
                        const std::vector<cvc5::Term>& subset_var) {
@@ -543,6 +544,18 @@ cvc5::Term reduct_rule(cvc5::TermManager& tm, const aspif::Rule& rule,
     body = tm.mkTerm(
         cvc5::Kind::GEQ,
         {sum(tm, addends), tm.mkInteger(rule.lower_bound.to_string())});
+  }
+
+  if (rule.head_type == aspif::Rule::HeadType::kChoice) {
+    std::vector<cvc5::Term> kept;
+    kept.reserve(rule.head.size());
+    for (aspif::Atom head : rule.head) {
+      kept.push_back(tm.mkTerm(
+          cvc5::Kind::IMPLIES,
+          {tm.mkTerm(cvc5::Kind::AND, {body, atom_var[head]}),
+           subset_var[head]}));
+    }
+    return conjunction(tm, kept);
   }
 
   std::vector<cvc5::Term> heads;
@@ -826,8 +839,6 @@ cvc5::Term weighted_sum(cvc5::TermManager& tm,
 
 absl::StatusOr<Encoding> build_encoding(cvc5::TermManager& tm,
                                         const aspif::Program& prog) {
-  RETURN_IF_ERROR(check_supported(prog));
-
   const Ranking ranking = build_ranking(prog);
   Names names = choose_names(prog, ranking);
 

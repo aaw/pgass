@@ -245,55 +245,145 @@ TEST(FromAspifTest, MalformedDocumentsAreRefused) {
   EXPECT_FALSE(from_aspif("asp 1 0 0\n4 9 p(1,2) 0\n0\n").ok());
 }
 
-TEST(ChoiceRulesTest, EachElementBecomesADisjunctionWithAFreshAtom) {
-  auto prog = from_aspif(
-      "asp 1 0 0\n"
-      "1 1 2 1 2 0 1 3\n"
-      "0\n");
-  ASSERT_TRUE(prog.ok()) << prog.status();
-  replace_choice_rules(*prog);
-
-  EXPECT_EQ(to_aspif(*prog),
-            "asp 1 0 0\n"
-            "1 0 2 1 4 0 1 3\n"
-            "1 0 2 2 5 0 1 3\n"
-            "0\n");
-}
-
-TEST(ChoiceRulesTest, WeightBodyIsCarriedToEachDisjunction) {
-  auto prog = from_aspif(
-      "asp 1 0 0\n"
-      "1 1 1 1 1 2 2 2 1 3 1\n"
-      "0\n");
-  ASSERT_TRUE(prog.ok()) << prog.status();
-  replace_choice_rules(*prog);
-
-  EXPECT_EQ(to_aspif(*prog),
-            "asp 1 0 0\n"
-            "1 0 2 1 4 1 2 2 2 1 3 1\n"
-            "0\n");
-}
-
-// A choice of no atoms derives nothing and rules nothing out.
-TEST(ChoiceRulesTest, EmptyChoiceHeadLeavesNoRule) {
-  auto prog = from_aspif(
-      "asp 1 0 0\n"
-      "1 1 0 0 1 1\n"
-      "0\n");
-  ASSERT_TRUE(prog.ok()) << prog.status();
-  replace_choice_rules(*prog);
-  EXPECT_TRUE(prog->rules.empty());
-}
-
-TEST(ChoiceRulesTest, DisjunctiveRuleIsLeftAlone) {
-  const std::string text =
-      "asp 1 0 0\n"
-      "1 0 2 1 2 0 1 -3\n"
-      "0\n";
+// Each test below states its program in ASP, then the aspif it simplifies to.
+Program simplified(const std::string& text) {
   auto prog = from_aspif(text);
-  ASSERT_TRUE(prog.ok()) << prog.status();
-  replace_choice_rules(*prog);
-  EXPECT_EQ(to_aspif(*prog), text);
+  EXPECT_TRUE(prog.ok()) << prog.status();
+  simplify(*prog);
+  return *std::move(prog);
+}
+
+// 'a. b :- a.' The fact holds, so b's body is empty and b is a fact too.
+TEST(SimplifyTest, FactLeavesAPositiveBodyLiteral) {
+  EXPECT_EQ(to_aspif(simplified(
+                "asp 1 0 0\n"
+                "1 0 1 1 0 0\n"
+                "1 0 1 2 0 1 1\n"
+                "0\n")),
+            "asp 1 0 0\n"
+            "1 0 1 1 0 0\n"
+            "1 0 1 2 0 0\n"
+            "0\n");
+}
+
+// 'a. b :- not a.' No answer set holds 'not a', so b's rule goes and b with it.
+TEST(SimplifyTest, FactKillsANegatedBody) {
+  EXPECT_EQ(to_aspif(simplified(
+                "asp 1 0 0\n"
+                "1 0 1 1 0 0\n"
+                "1 0 1 2 0 1 -1\n"
+                "0\n")),
+            "asp 1 0 0\n"
+            "1 0 1 1 0 0\n"
+            "0\n");
+}
+
+// 'b :- a. c :- b.' Nothing derives a, so nothing derives b, and c falls with
+// it.
+TEST(SimplifyTest, AnUnderivableAtomTakesWhatDependsOnItAllTheWayDown) {
+  EXPECT_EQ(to_aspif(simplified(
+                "asp 1 0 0\n"
+                "1 0 1 2 0 1 1\n"
+                "1 0 1 3 0 1 2\n"
+                "0\n")),
+            "asp 1 0 0\n"
+            "0\n");
+}
+
+// 'b :- not a.' Nothing derives a, so 'not a' always holds and b is a fact.
+TEST(SimplifyTest, AnUnderivableAtomSatisfiesItsNegation) {
+  EXPECT_EQ(to_aspif(simplified(
+                "asp 1 0 0\n"
+                "1 0 1 2 0 1 -1\n"
+                "0\n")),
+            "asp 1 0 0\n"
+            "1 0 1 2 0 0\n"
+            "0\n");
+}
+
+// 'a. a | b :- c.' The disjunction is satisfied by the fact whatever c does,
+// and it cannot support b, since supporting b asks for a to be false.
+TEST(SimplifyTest, ADisjunctionHoldingAFactIsDropped) {
+  EXPECT_EQ(to_aspif(simplified(
+                "asp 1 0 0\n"
+                "1 0 1 1 0 0\n"
+                "1 0 2 1 2 0 1 3\n"
+                "1 0 1 3 0 0\n"
+                "0\n")),
+            "asp 1 0 0\n"
+            "1 0 1 1 0 0\n"
+            "1 0 1 3 0 0\n"
+            "0\n");
+}
+
+// 'a. {a; b}.' Choosing a is no choice, and b is still free.
+TEST(SimplifyTest, AChoiceKeepsTheAtomsThatAreStillFree) {
+  EXPECT_EQ(to_aspif(simplified(
+                "asp 1 0 0\n"
+                "1 0 1 1 0 0\n"
+                "1 1 2 1 2 0 0\n"
+                "0\n")),
+            "asp 1 0 0\n"
+            "1 0 1 1 0 0\n"
+            "1 1 1 2 0 0\n"
+            "0\n");
+}
+
+// 'a. {b}. :- a, not b.' A constraint has no head to lose, so it keeps the
+// literals that are still open, here 'not b', and drops the settled ones.
+TEST(SimplifyTest, AConstraintKeepsItsUnsettledLiterals) {
+  EXPECT_EQ(to_aspif(simplified(
+                "asp 1 0 0\n"
+                "1 0 1 1 0 0\n"
+                "1 1 1 2 0 0\n"
+                "1 0 0 0 2 1 -2\n"
+                "0\n")),
+            "asp 1 0 0\n"
+            "1 0 1 1 0 0\n"
+            "1 1 1 2 0 0\n"
+            "1 0 0 0 1 -2\n"
+            "0\n");
+}
+
+// 'a. b. c :- 2 <= { a = 1; d = 1 }.' The fact a pays 1 of the bound and d can
+// pay nothing, so the bound is out of reach and c's rule goes.
+TEST(SimplifyTest, AWeightBodyThatCannotReachItsBoundIsDropped) {
+  EXPECT_EQ(to_aspif(simplified(
+                "asp 1 0 0\n"
+                "1 0 1 1 0 0\n"
+                "1 0 1 3 1 2 2 1 1 4 1\n"
+                "0\n")),
+            "asp 1 0 0\n"
+            "1 0 1 1 0 0\n"
+            "0\n");
+}
+
+// 'a. c :- 1 <= { a = 1; d = 1 }.' The fact pays the bound on its own, which
+// leaves a body that always holds, so c is a fact.
+TEST(SimplifyTest, AWeightBodyItsFactsPayForBecomesAnEmptyBody) {
+  EXPECT_EQ(to_aspif(simplified(
+                "asp 1 0 0\n"
+                "1 0 1 1 0 0\n"
+                "1 0 1 3 1 1 2 1 1 4 1\n"
+                "0\n")),
+            "asp 1 0 0\n"
+            "1 0 1 1 0 0\n"
+            "1 0 1 3 0 0\n"
+            "0\n");
+}
+
+// 'a :- b. b :- a.' Each atom has a rule, so neither is settled here, even
+// though no answer set holds them. Deciding that takes the level ranking.
+TEST(SimplifyTest, APositiveCycleIsLeftForTheSolver) {
+  EXPECT_EQ(to_aspif(simplified(
+                "asp 1 0 0\n"
+                "1 0 1 1 0 1 2\n"
+                "1 0 1 2 0 1 1\n"
+                "0\n")),
+            "asp 1 0 0\n"
+            "1 0 1 1 0 1 2\n"
+            "1 0 1 2 0 1 1\n"
+            "0\n");
 }
 
 }  // namespace

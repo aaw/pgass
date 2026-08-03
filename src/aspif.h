@@ -99,6 +99,18 @@ struct Program {
 // line, terminated by a line holding 0.
 std::string to_aspif(const Program& prog);
 
+/* Drops the rules no answer set can use and the body literals whose truth is
+   already settled, repeating until nothing more falls away.
+
+   An atom some rule states as a fact holds in every answer set, and an atom no
+   rule derives holds in none. Either one decides every body literal over it:
+   the body is dead, or the literal is along for the ride and can go.
+
+   Atom numbers stay as they are, so outputs, minimize statements and the query
+   still name the atoms they named before.
+*/
+void simplify(Program& prog);
+
 // Reads an aspif document back into a Program, so that a program ground
 // elsewhere, by gringo or by another run of pgass, can be solved here. The
 // statement types read are the ones to_aspif writes: rules, minimize, output
@@ -112,14 +124,6 @@ std::string to_aspif(const Program& prog);
 // Program::next_atom comes back past the largest atom the document names, so
 // the atoms solving allocates stay clear of the ones in use.
 absl::StatusOr<Program> from_aspif(std::string_view text);
-
-// Rewrites every choice rule of `prog` into the disjunctive rules solving
-// takes: '{a1; ...; an} :- B' becomes 'ai | chi :- B' for each element, where
-// chi is a fresh atom saying ai was passed over. Where B holds, a minimal
-// model takes exactly one of ai and chi, which is the free choice, and chi
-// appears nowhere else, so it restricts nothing. Normalization rewrites the
-// choice rules of an ASP program the same way.
-void replace_choice_rules(Program& prog);
 
 }  // namespace aspif
 

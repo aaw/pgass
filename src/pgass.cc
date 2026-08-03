@@ -222,9 +222,8 @@ int main(int argc, char** argv) {
       std::cerr << "pgass: aspif error: " << program.status().message() << "\n";
       return kNoRun;
     }
-    // gringo writes choice rules as choice rules. Grounding here has already
-    // rewritten them into the disjunctions solving takes.
-    aspif::replace_choice_rules(*program);
+    // A program ground elsewhere gets the same going-over as one ground here.
+    aspif::simplify(*program);
     return report(*program, encode, options);
   }
 
@@ -266,6 +265,7 @@ int main(int argc, char** argv) {
   for (const std::string& warning : warnings) {
     std::cerr << "pgass: warning: " << warning << "\n";
   }
+  aspif::simplify(*grounded);
   if (absl::GetFlag(FLAGS_ground)) {
     std::cout << to_aspif(*grounded);
     return kGrounded;

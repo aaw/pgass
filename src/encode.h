@@ -112,9 +112,7 @@ struct Encoding {
 // them is an answer set, and every answer set is one of their models. A rule
 // with two head atoms on a common positive cycle takes a quantified minimality
 // assertion for that, which is a section of its own.
-//
-// Returns an UnimplementedError for a choice rule head. Nothing produces one:
-// normalization rewrites choice rules into disjunctive ones.
+
 absl::StatusOr<Encoding> build_encoding(cvc5::TermManager& tm,
                                         const aspif::Program& prog);
 
