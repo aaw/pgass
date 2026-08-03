@@ -90,8 +90,8 @@ TEST(ExitCode, FindingEveryAnswerSetReportsExhausted) {
 }
 
 TEST(ExitCode, ProvenOptimumReportsExhausted) {
-  // meeting-time.lp minimizes at two priority levels, and pgass settles those
-  // before returning any answer set, so one answer set is already one optimum.
+  // meeting-time.lp minimizes at two priority levels, and the encoding admits
+  // only optimal answer sets, so one answer set is already one optimum.
   EXPECT_EQ(run_pgass({"--models=1", example("meeting-time.lp")}), kExhausted);
 }
 
@@ -137,7 +137,6 @@ TEST(ExitCode, UnsafeProgramReportsNoRun) {
 
 TEST(ExitCode, BadCommandLineReportsNoRun) {
   TempProgram program("a.");
-  EXPECT_EQ(run_pgass({"--optimizer=nope", program.path()}), kNoRun);
   EXPECT_EQ(run_pgass({"--encode=sat", program.path()}), kNoRun);
   EXPECT_EQ(run_pgass({"--format", "--ground", program.path()}), kNoRun);
   EXPECT_EQ(run_pgass({"--solve", "--ground", program.path()}), kNoRun);

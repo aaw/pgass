@@ -15,7 +15,6 @@
 #include "absl/strings/str_cat.h"
 #include "absl/strings/str_join.h"
 #include "absl/strings/str_split.h"
-#include "absl/strings/substitute.h"
 #include "aspif.h"
 #include "graph.h"
 #include "macros.h"
@@ -31,10 +30,13 @@ namespace {
 // difference logic atom can say, and QF_IDL lets cvc5 decide such constraints
 // by looking for a negative cycle in a graph rather than running simplex.
 //
-// A weight body or a minimize statement adds up the weights of many literals at
-// once, which no difference logic atom can say, and costs the whole program the
-// more general QF_LIA. Every QF_IDL formula is also a QF_LIA formula, so
-// answering QF_LIA is never wrong, only slower.
+// A weight body adds up the weights of many literals at once, which no
+// difference logic atom can say, and costs the whole program the more general
+// QF_LIA. Every QF_IDL formula is also a QF_LIA formula, so answering QF_LIA is
+// never wrong, only slower.
+//
+// Weak constraints never reach here. Their costs come with the quantified
+// optimality assertion, which takes ALL whatever the rest of the program says.
 
 // Whether a weight body only counts its literals. #count writes every weight as
 // one, and so does the counting constraint a choice rule normalizes into, which
@@ -49,9 +51,6 @@ bool is_cardinality(const aspif::Rule& rule) {
 }
 
 const char* logic_for(const aspif::Program& prog) {
-  // A weighted sum is a weighted sum whether it comes from an aggregate or a
-  // weak constraint.
-  if (!prog.minimize.empty()) return "QF_LIA";
   for (const aspif::Rule& rule : prog.rules) {
     if (rule.body_type == aspif::Rule::BodyType::kWeight &&
         !is_cardinality(rule)) {
@@ -107,6 +106,10 @@ struct Ranking {
   // variable. False for every atom of a stratified program, which leaves the
   // translation as plain completion.
   std::vector<bool> needs_level;
+  // Whether a smaller model of the reduct could drop each atom, which is true
+  // exactly of the atoms on a positive cycle. A model described by minimality
+  // rather than by a ranking quantifies over these atoms and no others.
+  std::vector<bool> on_cycle;
   // Whether each component, indexed by component id, holds two head atoms of
   // one rule. Nothing in such a component is ranked. A ranking would throw away
   // answer sets like the {a, b} of 'a | b. a :- b. b :- a.', where a and b
@@ -123,6 +126,7 @@ Ranking build_ranking(const aspif::Program& prog) {
   Ranking ranking;
   ranking.component = strongly_connected_components(succ);
   ranking.needs_level.assign(prog.next_atom, false);
+  ranking.on_cycle.assign(prog.next_atom, false);
   ranking.head_cyclic.assign(ranking.component.size(), false);
 
   std::vector<int> component_size(ranking.component.size(), 0);
@@ -139,19 +143,15 @@ Ranking build_ranking(const aspif::Program& prog) {
   }
 
   for (aspif::Atom atom = 1; atom < prog.next_atom; ++atom) {
-    if (ranking.head_cyclic[ranking.component[atom]]) continue;
-    if (component_size[ranking.component[atom]] > 1) {
-      ranking.needs_level[atom] = true;
-      continue;
-    }
+    bool cyclic = component_size[ranking.component[atom]] > 1;
     // A component of one atom is still a cycle when that atom depends on
     // itself, as in 'a :- a, p.', so a self-edge counts too.
     for (int successor : succ[atom]) {
-      if (successor == atom) {
-        ranking.needs_level[atom] = true;
-        break;
-      }
+      if (successor == atom) cyclic = true;
     }
+    const bool head_cyclic = ranking.head_cyclic[ranking.component[atom]];
+    ranking.on_cycle[atom] = cyclic || head_cyclic;
+    ranking.needs_level[atom] = cyclic && !head_cyclic;
   }
   return ranking;
 }
@@ -481,10 +481,9 @@ std::vector<std::pair<BigInt, std::vector<aspif::WeightedLit>>> level_costs(
   return {by_priority.rbegin(), by_priority.rend()};
 }
 
-// The block naming the cost of each priority level, and the steps that bring
-// the script down to an optimal answer set. Nothing here is asserted.
-std::string weak_constraint_block(cvc5::TermManager& tm,
-                                  const aspif::Program& prog,
+// The block naming the cost of each priority level and asserting that no answer
+// set costs less, so that one check-sat lands on an optimal answer set.
+std::string weak_constraint_block(const aspif::Program& prog,
                                   const Encoding& encoding) {
   // Only the atom names can collide with a cost name. Every level name holds
   // parentheses, which no cost name does.
@@ -492,47 +491,23 @@ std::string weak_constraint_block(cvc5::TermManager& tm,
                                          encoding.atom_name.end());
   std::vector<std::string> names;
   std::string definitions;
+  size_t level = 0;
   for (const auto& [priority, lits] : level_costs(prog)) {
     names.push_back(
         fresh_name(taken, absl::StrCat("cost@", priority.to_string())));
     absl::StrAppend(&definitions, "(define-fun ", names.back(), " () Int ",
-                    weighted_sum(tm, encoding.atom_var, lits).toString(),
-                    ")\n");
+                    encoding.level_cost[level++].toString(), ")\n");
   }
 
-  // The steps are written out for the first level and the rest are named at the
-  // end, since every level takes the same four steps.
-  const std::string& first = names.front();
-  const std::string later_levels =
-      names.size() == 1
-          ? ""
-          : comment_lines(absl::StrCat(
-                "Then repeat the whole process for ",
-                absl::StrJoin(names.begin() + 1, names.end(), ", then "),
-                ", leaving the assertions from step 4 from previous levels."));
-
   return absl::StrCat(
-      absl::Substitute(
-          R"(; Every answer set of this program has a cost, and finding the least
-; cost takes several check-sats.
-;
-; To reach an answer set of the least cost, settle $0 first:
-;   1. Run the script. Read c, the value of $0, from the model.
-;   2. Add this line above the (check-sat) at the end, then run again:
-;        (assert (< $0 c))
-;   3. On sat, read the new c from the model and repeat step 2.
-;   4. On unsat, change that line to the following, for the last c that
-;      came back sat:
-;        (assert (= $0 c))
-)",
-          first),
-      later_levels,
-      "; The model of the last sat run is an optimal answer set.\n",
-      // A query asks about the optimal answer sets, not about all of them.
-      prog.query.has_value()
-          ? "; Ask the query below only after settling every level.\n"
-          : "",
-      definitions);
+      comment_lines(absl::StrCat(
+          "What a model costs at each priority level, most important level "
+          "first: ",
+          absl::StrJoin(names, ", "),
+          ". The assertion below says no answer set costs less, so the "
+          "check-sat at the end lands on an optimal one. cvc5 answers it far "
+          "faster under --sygus-inst.")),
+      definitions, "(assert ", encoding.optimality->toString(), ")\n");
 }
 
 // One rule of the reduct, as an implication the subset has to satisfy.
@@ -576,24 +551,22 @@ cvc5::Term reduct_rule(cvc5::TermManager& tm, const aspif::Rule& rule,
   return tm.mkTerm(cvc5::Kind::IMPLIES, {body, disjunction(tm, heads)});
 }
 
-// The minimality check as one formula: no proper subset of the atoms a model
-// holds is itself a model of the reduct under it. That is the second half of
-// the ASP-Core-2 definition of an answer set, and the subset being a bound
-// variable is what lets one formula stand for every candidate at once.
+// The minimality check as one formula: no proper subset of the atoms the model
+// `model_var` holds is itself a model of the reduct under it. That is the
+// second half of the ASP-Core-2 definition of an answer set, and the subset
+// being a bound variable is what lets one formula stand for every candidate at
+// once.
 //
-// Only the atoms of a head-cyclic component are quantified. Elsewhere the
-// subset is the model itself: those atoms are ranked, and a ranked atom cannot
-// be unfounded, so no smaller model of the reduct differs there. Holding an
-// atom too many costs the subset nothing, every rule of the reduct being an
-// implication.
-//
-// That restriction is what makes the formula usable. Quantifying over every
-// atom sent one 2-QBF instance of 55 atoms, 23 of them head-cyclic, from 0.03s
-// to over 45s.
+// `quantified` picks the atoms the subset may drop. Elsewhere the subset is the
+// model itself, which costs it nothing, every rule of the reduct being an
+// implication. Restricting the quantifier this way is what makes the formula
+// usable: quantifying over every atom sent one 2-QBF instance of 55 atoms, 23
+// of them head-cyclic, from 0.03s to over 45s.
 cvc5::Term minimality_term(cvc5::TermManager& tm, const aspif::Program& prog,
-                           const Encoding& encoding, const Ranking& ranking) {
-  absl::flat_hash_set<std::string> taken(encoding.atom_name.begin(),
-                                         encoding.atom_name.end());
+                           const std::vector<cvc5::Term>& model_var,
+                           const std::vector<std::string>& model_name,
+                           const std::vector<bool>& quantified,
+                           absl::flat_hash_set<std::string>& taken) {
   const cvc5::Sort bool_sort = tm.getBooleanSort();
   std::vector<cvc5::Term> subset_var(prog.next_atom);
   std::vector<cvc5::Term> bound_vars;
@@ -603,29 +576,97 @@ cvc5::Term minimality_term(cvc5::TermManager& tm, const aspif::Program& prog,
   // make it a proper subset. An atom standing for itself says neither.
   std::vector<cvc5::Term> dropped;
   for (aspif::Atom atom = 1; atom < prog.next_atom; ++atom) {
-    if (!ranking.head_cyclic[ranking.component[atom]]) {
-      subset_var[atom] = encoding.atom_var[atom];
+    if (!quantified[atom]) {
+      subset_var[atom] = model_var[atom];
       continue;
     }
     const cvc5::Term subset = tm.mkVar(
         bool_sort,
-        fresh_name(taken, absl::StrCat("sub(", encoding.atom_name[atom], ")")));
+        fresh_name(taken, absl::StrCat("sub(", model_name[atom], ")")));
     subset_var[atom] = subset;
     bound_vars.push_back(subset);
     conjuncts.push_back(
-        tm.mkTerm(cvc5::Kind::IMPLIES, {subset, encoding.atom_var[atom]}));
-    dropped.push_back(tm.mkTerm(
-        cvc5::Kind::AND,
-        {encoding.atom_var[atom], tm.mkTerm(cvc5::Kind::NOT, {subset})}));
+        tm.mkTerm(cvc5::Kind::IMPLIES, {subset, model_var[atom]}));
+    dropped.push_back(
+        tm.mkTerm(cvc5::Kind::AND,
+                  {model_var[atom], tm.mkTerm(cvc5::Kind::NOT, {subset})}));
   }
+  // With nothing to drop there is no proper subset to rule out, and the check
+  // holds of every model.
+  if (bound_vars.empty()) return tm.mkTrue();
+
   conjuncts.push_back(disjunction(tm, dropped));
   for (const aspif::Rule& rule : prog.rules) {
-    conjuncts.push_back(reduct_rule(tm, rule, encoding.atom_var, subset_var));
+    conjuncts.push_back(reduct_rule(tm, rule, model_var, subset_var));
   }
 
   return tm.mkTerm(cvc5::Kind::FORALL,
                    {tm.mkTerm(cvc5::Kind::VARIABLE_LIST, bound_vars),
                     tm.mkTerm(cvc5::Kind::NOT, {conjunction(tm, conjuncts)})});
+}
+
+// Whether the model `alt_var` costs lexicographically less than the model
+// `atom_var`. The levels are settled in turn, the most important first, so this
+// is one disjunct per level: every level above it costs the same, and that
+// level costs strictly less.
+cvc5::Term lower_cost_term(cvc5::TermManager& tm, const aspif::Program& prog,
+                           const std::vector<cvc5::Term>& atom_var,
+                           const std::vector<cvc5::Term>& alt_var) {
+  std::vector<cvc5::Term> disjuncts;
+  std::vector<cvc5::Term> equal_above;
+  for (const auto& [priority, lits] : level_costs(prog)) {
+    const cvc5::Term cost = weighted_sum(tm, atom_var, lits);
+    const cvc5::Term alt_cost = weighted_sum(tm, alt_var, lits);
+    std::vector<cvc5::Term> conjuncts = equal_above;
+    conjuncts.push_back(tm.mkTerm(cvc5::Kind::LT, {alt_cost, cost}));
+    disjuncts.push_back(conjunction(tm, conjuncts));
+    equal_above.push_back(tm.mkTerm(cvc5::Kind::EQUAL, {alt_cost, cost}));
+  }
+  return disjunction(tm, disjuncts);
+}
+
+// Optimality as one formula: no answer set costs less than this one. The other
+// answer set is a second Bool per atom, bound by a quantifier, so the formula
+// stands for every candidate at once the way the minimality check does.
+//
+// The rules, the support, and the minimality check are what say the bound atoms
+// are an answer set. The level ranking is left out on purpose: it would take an
+// Int per atom, and describing the other answer set by its reduct instead keeps
+// every bound variable Boolean. Only the costs stay arithmetic.
+cvc5::Term optimality_term(cvc5::TermManager& tm, const aspif::Program& prog,
+                           const Encoding& encoding, const Ranking& ranking) {
+  absl::flat_hash_set<std::string> taken(encoding.atom_name.begin(),
+                                         encoding.atom_name.end());
+  const cvc5::Sort bool_sort = tm.getBooleanSort();
+  std::vector<cvc5::Term> alt_var(prog.next_atom);
+  std::vector<std::string> alt_name(prog.next_atom);
+  std::vector<cvc5::Term> bound_vars;
+  bound_vars.reserve(prog.next_atom - 1);
+  for (aspif::Atom atom = 1; atom < prog.next_atom; ++atom) {
+    alt_name[atom] =
+        fresh_name(taken, absl::StrCat("alt(", encoding.atom_name[atom], ")"));
+    alt_var[atom] = tm.mkVar(bool_sort, alt_name[atom]);
+    bound_vars.push_back(alt_var[atom]);
+  }
+  // A program with no atoms has one answer set, so nothing can cost less.
+  if (bound_vars.empty()) return tm.mkTrue();
+
+  std::vector<cvc5::Term> is_answer_set;
+  rule_formulas(tm, prog, alt_var, is_answer_set);
+  support_formulas(tm, prog, alt_var,
+                   collect_supports(tm, prog, alt_var, ranking), is_answer_set);
+  const cvc5::Term minimal =
+      minimality_term(tm, prog, alt_var, alt_name, ranking.on_cycle, taken);
+  if (minimal != tm.mkTrue()) is_answer_set.push_back(minimal);
+
+  return tm.mkTerm(
+      cvc5::Kind::FORALL,
+      {tm.mkTerm(cvc5::Kind::VARIABLE_LIST, bound_vars),
+       tm.mkTerm(cvc5::Kind::IMPLIES,
+                 {conjunction(tm, is_answer_set),
+                  tm.mkTerm(cvc5::Kind::NOT,
+                            {lower_cost_term(tm, prog, encoding.atom_var,
+                                             alt_var)})})});
 }
 
 constexpr char kMinimalityComment[] =
@@ -791,9 +832,10 @@ absl::StatusOr<Encoding> build_encoding(cvc5::TermManager& tm,
   Names names = choose_names(prog, ranking);
 
   Encoding encoding;
-  // The minimality assertion below is quantified, which no quantifier free
-  // logic can hold.
-  encoding.logic = ranking.any_head_cycle ? "ALL" : logic_for(prog);
+  // The minimality and optimality assertions below are quantified, which no
+  // quantifier free logic can hold.
+  const bool quantified = ranking.any_head_cycle || !prog.minimize.empty();
+  encoding.logic = quantified ? "ALL" : logic_for(prog);
   encoding.atom_var = declare_constants(tm, tm.getBooleanSort(), names.atom);
   encoding.level_var = declare_constants(tm, tm.getIntegerSort(), names.level);
   encoding.atom_name = std::move(names.atom);
@@ -826,10 +868,26 @@ absl::StatusOr<Encoding> build_encoding(cvc5::TermManager& tm,
   encoding.sections.push_back(Section{.title = "Level ranking",
                                       .assertions = std::move(ranking_terms)});
   if (ranking.any_head_cycle) {
-    const cvc5::Term minimality = minimality_term(tm, prog, encoding, ranking);
+    absl::flat_hash_set<std::string> taken(encoding.atom_name.begin(),
+                                           encoding.atom_name.end());
+    // Only the atoms of a head-cyclic component are quantified. The rest are
+    // ranked, and a ranked atom cannot be unfounded, so no smaller model of the
+    // reduct differs there.
+    std::vector<bool> quantified(prog.next_atom, false);
+    for (aspif::Atom atom = 1; atom < prog.next_atom; ++atom) {
+      quantified[atom] = ranking.head_cyclic[ranking.component[atom]];
+    }
+    const cvc5::Term minimality = minimality_term(
+        tm, prog, encoding.atom_var, encoding.atom_name, quantified, taken);
     encoding.sections.push_back(Section{.title = "Minimality",
                                         .comment = kMinimalityComment,
                                         .assertions = {minimality}});
+  }
+  if (!prog.minimize.empty()) {
+    for (const auto& [priority, lits] : level_costs(prog)) {
+      encoding.level_cost.push_back(weighted_sum(tm, encoding.atom_var, lits));
+    }
+    encoding.optimality = optimality_term(tm, prog, encoding, ranking);
   }
   return encoding;
 }
@@ -841,14 +899,13 @@ absl::StatusOr<std::string> encode_smtlib(const aspif::Program& prog) {
   std::string script = absl::StrCat("; Generated by pgass --encode=smtlib.\n",
                                     symbol_table(prog, encoding));
 
-  // produce-models has to be set before the logic is, which SMT-LIB takes as
-  // the end of the preamble.
+  // Options are set before the logic is, which SMT-LIB takes as the end of the
+  // preamble.
   absl::StrAppend(&script, "(set-option :produce-models true)\n");
-  // cvc5 rejects the push a query of several atoms takes unless it has been
-  // told to solve incrementally. No other script asks twice in one run, and
-  // incremental solving costs cvc5 some of its preprocessing.
   if (encoding.query.size() > 1) {
-    absl::StrAppend(&script, "(set-option :incremental true)\n");
+    absl::StrAppend(&script,
+                    "; incremental: the query below asks several times.\n"
+                    "(set-option :incremental true)\n");
   }
   absl::StrAppend(&script, "(set-logic ", encoding.logic, ")\n");
 
@@ -874,7 +931,7 @@ absl::StatusOr<std::string> encode_smtlib(const aspif::Program& prog) {
 
   if (!prog.minimize.empty()) {
     append_block(script, "Weak constraints",
-                 weak_constraint_block(tm, prog, encoding));
+                 weak_constraint_block(prog, encoding));
   }
 
   if (encoding.query.size() > 1) {
@@ -907,7 +964,19 @@ absl::StatusOr<std::string> encode_smtlib(const aspif::Program& prog) {
   // A query of several atoms brought a check-sat per atom. Every other script
   // asks here.
   if (encoding.query.size() <= 1) {
-    absl::StrAppend(&script, "\n(check-sat)\n(get-model)\n");
+    // One check-sat finds one answer set. pgass goes on to the next by ruling
+    // this one out, and a reader does the same by hand.
+    if (!prog.query.has_value()) {
+      absl::StrAppend(
+          &script, "\n",
+          comment_lines(
+              "The model below is one answer set. For another, assert a clause "
+              "asking some atom to differ from it, as in "
+              "'(assert (or (not a) b))', and run again. Name only the "
+              "constants above, never a level variable: one answer set admits "
+              "many rankings."));
+    }
+    absl::StrAppend(&script, "(check-sat)\n(get-model)\n");
   }
   return script;
 }

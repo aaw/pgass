@@ -34,21 +34,14 @@ struct SolveOptions {
   // How many answer sets to look for. 0 asks for all of them, which can be a
   // very large number. Under weak constraints only optimal answer sets count.
   int max_answer_sets = 1;
-
-  // How to find the least cost of a weak-constraint priority level. Both settle
-  // on the same cost, so this only changes how long the search takes. solve.cc
-  // says when each one wins.
-  enum class Optimizer {
-    // Ask for a cost below the best one found so far until there is none.
-    kLinear,
-    // Halve the range the cost is known to lie in until it holds one value.
-    kBisect,
-  };
-  Optimizer optimizer = Optimizer::kLinear;
 };
 
 // Solves a ground program: builds the encoding of encode.h and hands it to
 // cvc5.
+//
+// Nothing here reasons about rules, cycles, or costs. That all lives in the
+// encoding, the one --encode=smtlib prints. What is left is asking cvc5 for a
+// model, reading it, and ruling it out to ask again.
 //
 // Returns the answer sets in the order cvc5 produced them, so at most
 // options.max_answer_sets of them, along with whether the search was exhausted.
@@ -56,8 +49,9 @@ struct SolveOptions {
 // one AnswerSet holding no atoms, which is what a program whose only answer set
 // is the empty one returns.
 //
-// Weak constraints are minimized level by level, most important level first,
-// before any answer set is returned. Every answer set returned is optimal.
+// Weak constraints are settled by the optimality assertion the encoding
+// carries, so every answer set returned is optimal and nothing here searches
+// for the least cost of a level.
 //
 // Every program, normal or disjunctive, is decided by one translation. A
 // disjunctive head with two atoms on a common positive cycle costs that
@@ -113,7 +107,6 @@ struct QueryResult {
 //
 // Weak constraints leave only the optimal answer sets, the ones solve()
 // returns, and the query is asked of those.
-absl::StatusOr<QueryResult> answer_query(const aspif::Program& prog,
-                                         const SolveOptions& options);
+absl::StatusOr<QueryResult> answer_query(const aspif::Program& prog);
 
 #endif  // SOLVE_H_

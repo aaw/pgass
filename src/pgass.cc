@@ -2,7 +2,6 @@
 #include <cstdlib>
 #include <fstream>
 #include <iostream>
-#include <optional>
 #include <string>
 #include <string_view>
 #include <vector>
@@ -38,19 +37,7 @@ ABSL_FLAG(std::string, encode, "",
 ABSL_FLAG(uint64_t, max_ground_atoms, 10000000,
           "Give up grounding after deriving this many ground atoms; 0 means "
           "no limit");
-ABSL_FLAG(
-    std::string, optimizer, "linear",
-    "How to minimize weak constraints: 'linear' asks for a cheaper answer "
-    "set until there is none, 'bisect' halves the range the cheapest cost "
-    "lies in. Both find the same cost");
-
 namespace {
-
-std::optional<SolveOptions::Optimizer> parse_optimizer(std::string_view name) {
-  if (name == "linear") return SolveOptions::Optimizer::kLinear;
-  if (name == "bisect") return SolveOptions::Optimizer::kBisect;
-  return std::nullopt;
-}
 
 // Prints one answer set the way clingo does: the names of the Output
 // statements whose condition holds, separated by spaces.
@@ -125,7 +112,7 @@ int report(const aspif::Program& prog, std::string_view encode,
   // program with one gets an answer instead of a list of answer sets. A yes is
   // followed by the substitutions it holds under.
   if (prog.query.has_value()) {
-    auto answer = answer_query(prog, options);
+    auto answer = answer_query(prog);
     if (!answer.ok()) {
       std::cerr << "pgass: solve error: " << answer.status().message() << "\n";
       return kNoRun;
@@ -156,9 +143,9 @@ int report(const aspif::Program& prog, std::string_view encode,
   }
   std::cout << "SATISFIABLE\n";
 
-  // Weak constraints are minimized before any answer set comes back, so every
-  // one of these is optimal. Having found them all is what ALLOPT reports, and
-  // having found some is already more than a plain satisfiable answer says.
+  // The encoding asserts that no answer set costs less, so every one of these
+  // is optimal. Having found them all is what ALLOPT reports, and having found
+  // some is already more than a plain satisfiable answer says.
   const bool optimizing = !prog.minimize.empty();
   if (optimizing) return solved->exhausted ? kAllOptima : kExhausted;
   return solved->exhausted ? kExhausted : kSatisfiable;
@@ -206,15 +193,6 @@ int main(int argc, char** argv) {
     return kNoRun;
   }
 
-  const std::optional<SolveOptions::Optimizer> optimizer =
-      parse_optimizer(absl::GetFlag(FLAGS_optimizer));
-  if (!optimizer.has_value()) {
-    std::cerr << "pgass: unknown --optimizer '"
-              << absl::GetFlag(FLAGS_optimizer)
-              << "'; expected 'linear' or 'bisect'\n";
-    return kNoRun;
-  }
-
   std::string source;
   if (positional.size() <= 1) {
     source = std::string(std::istreambuf_iterator<char>(std::cin),
@@ -235,7 +213,6 @@ int main(int argc, char** argv) {
 
   SolveOptions options;
   options.max_answer_sets = absl::GetFlag(FLAGS_models);
-  options.optimizer = *optimizer;
 
   // --solve is handed the ground program itself, so it skips the parsing and
   // grounding below and goes straight to reporting.

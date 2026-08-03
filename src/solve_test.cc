@@ -78,42 +78,19 @@ absl::StatusOr<std::vector<std::string>> render_solutions(
 
 // Parses, normalizes, grounds, and solves `source`, rendering the answer sets
 // as above.
-//
-// A program with weak constraints is solved twice, once under each optimizer,
-// and the two have to agree. An optimizer picks how to search for the cheapest
-// cost, not what the cheapest cost is. So every weak-constraint test below
-// covers both without saying so. The two are only comparable when all the
-// answer sets are asked for, because which of the equally cheap ones a limit
-// keeps is up to cvc5.
 absl::StatusOr<std::vector<std::string>> solve_source(const std::string& source,
                                                       int max_answer_sets = 0) {
   ASSIGN_OR_RETURN(aspif::Program grounded, ground_source(source));
 
   SolveOptions options;
   options.max_answer_sets = max_answer_sets;
-  options.optimizer = SolveOptions::Optimizer::kLinear;
-  ASSIGN_OR_RETURN(std::vector<std::string> linear,
-                   render_solutions(grounded, options));
-  if (grounded.minimize.empty() || max_answer_sets != 0) return linear;
-
-  options.optimizer = SolveOptions::Optimizer::kBisect;
-  ASSIGN_OR_RETURN(std::vector<std::string> bisected,
-                   render_solutions(grounded, options));
-
-  std::sort(linear.begin(), linear.end());
-  std::sort(bisected.begin(), bisected.end());
-  if (linear != bisected) {
-    return absl::InternalError(absl::StrCat(
-        "the optimizers disagree. linear found {", absl::StrJoin(linear, "; "),
-        "} and bisect found {", absl::StrJoin(bisected, "; "), "}"));
-  }
-  return linear;
+  return render_solutions(grounded, options);
 }
 
 // Grounds `source` and answers its query.
 absl::StatusOr<QueryResult> query_result(const std::string& source) {
   ASSIGN_OR_RETURN(aspif::Program grounded, ground_source(source));
-  return answer_query(grounded, SolveOptions());
+  return answer_query(grounded);
 }
 
 // Whether the query of `source` holds.
@@ -128,7 +105,7 @@ absl::StatusOr<QueryAnswer> query_source(const std::string& source) {
 absl::StatusOr<std::vector<std::string>> query_matches(
     const std::string& source) {
   ASSIGN_OR_RETURN(aspif::Program grounded, ground_source(source));
-  ASSIGN_OR_RETURN(QueryResult result, answer_query(grounded, SolveOptions()));
+  ASSIGN_OR_RETURN(QueryResult result, answer_query(grounded));
 
   const absl::flat_hash_set<aspif::Lit> answers(result.holds.begin(),
                                                 result.holds.end());
