@@ -393,3 +393,9 @@ std::string format(const Term& term) {
   format_term(&fmt, term);
   return fmt;
 }
+
+std::string format(const Query& query) {
+  std::string fmt;
+  format_query(&fmt, query);
+  return fmt;
+}

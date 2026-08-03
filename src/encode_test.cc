@@ -188,6 +188,26 @@ TEST(EncodeTest, AssertsTheNegatedQuery) {
   ASSERT_OK(script);
   EXPECT_THAT(comments(*script), Contains("; Query"));
   EXPECT_THAT(commands(*script), Contains("(assert (not |q(1)|))"));
+  // The comment names the query the way the program wrote it.
+  EXPECT_THAT(*script, HasSubstr("The query q(1)? holds where"));
+}
+
+// A program read as aspif carries the atoms its query matched but not the text
+// of the query, aspif having no query statement, so the comment says 'the
+// query' and the script is otherwise the same.
+TEST(EncodeTest, NamesTheQueryPlainlyWhereTheTextIsGone) {
+  aspif::Program prog;
+  const aspif::Atom a = prog.new_atom();
+  const aspif::Atom b = prog.new_atom();
+  prog.rules.push_back(aspif::Rule{.head = {a}, .body = {-b}});
+  prog.rules.push_back(aspif::Rule{.head = {b}, .body = {-a}});
+  prog.outputs.push_back(aspif::Output{.name = "a", .condition = {a}});
+  prog.query.emplace(std::vector<aspif::Lit>{a});
+
+  auto script = encode_smtlib(prog);
+  ASSERT_OK(script);
+  EXPECT_THAT(*script, HasSubstr("The query holds where"));
+  EXPECT_THAT(commands(*script), Contains("(assert (not a))"));
 }
 
 // A query no atom matched fails in every answer set, so there is nothing to
@@ -221,16 +241,74 @@ TEST(EncodeTest, IsUnsatWhereAQueryNoAtomMatchedHolds) {
   EXPECT_EQ(*answer, "unsat");
 }
 
-// Each atom a query matched is asked about under a negation of its own, and a
-// script has one check-sat to spend.
-TEST(EncodeTest, RefusesAQueryMatchingSeveralAtoms) {
+// Each atom a query matched is asked about under a negation of its own, so a
+// query of several atoms is several check-sats, each in a scope the next one
+// does not inherit.
+TEST(EncodeTest, AsksAboutEachAtomOfAQueryOnItsOwn) {
   auto script = encode_source(R"(
     p(1). p(2).
     p(X)?
   )");
-  EXPECT_EQ(script.status().code(), absl::StatusCode::kUnimplemented);
-  EXPECT_THAT(std::string(script.status().message()),
-              HasSubstr("a query matching 2 atoms"));
+  ASSERT_OK(script);
+  EXPECT_THAT(commands(*script),
+              ElementsAre("(set-option :produce-models true)",
+                          "(set-option :incremental true)",
+                          "(set-logic QF_IDL)", "(declare-const |p(1)| Bool)",
+                          "(declare-const |p(2)| Bool)",
+                          "(assert (=> true |p(1)|))",
+                          "(assert (=> true |p(2)|))",
+                          "(assert (=> |p(1)| true))",
+                          "(assert (=> |p(2)| true))",
+                          // One question per atom, and no question at the end.
+                          "(push 1)", "(assert (not |p(1)|))", "(check-sat)",
+                          "(pop 1)", "(push 1)", "(assert (not |p(2)|))",
+                          "(check-sat)", "(pop 1)"));
+  EXPECT_THAT(*script, HasSubstr("The query p(X)? matched 2 atoms"));
+}
+
+// A comment holds a name the program chose, of any length, so the lines are
+// wrapped rather than laid out by hand.
+TEST(EncodeTest, WrapsACommentAroundALongQuery) {
+  auto script = encode_source(R"(
+    connection(amsterdam, brussels). connection(brussels, cologne).
+    reachable(X, Y) :- connection(X, Y), not severed(X, Y).
+    severed(X, Y) :- connection(X, Y), not reachable(X, Y).
+    reachable(amsterdam, Destination)?
+  )");
+  ASSERT_OK(script);
+  for (const std::string& line : comments(*script)) {
+    EXPECT_LE(line.size(), 78u) << line;
+  }
+  EXPECT_THAT(*script,
+              HasSubstr("The query reachable(amsterdam, Destination)?"));
+}
+
+// Both atoms hold in the one answer set, so both questions come back unsat,
+// and both atoms answer the query.
+TEST(EncodeTest, CvcReadsBackAQueryOfSeveralAtoms) {
+  auto script = encode_source(R"(
+    p(1). p(2).
+    p(X)?
+  )");
+  ASSERT_OK(script);
+  auto output = run_script(*script);
+  ASSERT_OK(output);
+  EXPECT_EQ(*output, "unsat\nunsat\n");
+}
+
+// An atom that fails in some answer set is answered sat, and one that holds in
+// all of them is answered unsat, in the order the atoms were matched.
+TEST(EncodeTest, AnswersEachSubstitutionOfAQuery) {
+  auto script = encode_source(R"(
+    p(1).
+    p(2) :- not q.
+    q :- not p(2).
+    p(X)?
+  )");
+  ASSERT_OK(script);
+  auto output = run_script(*script);
+  ASSERT_OK(output);
+  EXPECT_EQ(*output, "unsat\nsat\n");
 }
 
 // A weight body whose weights all differ adds up literals, which no difference
@@ -262,8 +340,6 @@ TEST(EncodeTest, CountsWithoutArithmetic) {
                              Not(HasSubstr("(ite ")), Not(HasSubstr("(+ "))));
 }
 
-// The least cost of a priority level is only known once several queries have
-// been answered, and a script asks one question.
 // A #min or #max grounds to plain rules over one atom per element tuple, never
 // to a weight body, so difference logic still covers the program.
 TEST(EncodeTest, TranslatesAMinAggregate) {
@@ -276,28 +352,88 @@ TEST(EncodeTest, TranslatesAMinAggregate) {
                              HasSubstr("(assert (=> (not |p(1)|) q))")));
 }
 
-TEST(EncodeTest, RefusesWeakConstraints) {
+// No one script can state the least cost of a priority level, which takes
+// repeated queries under a falling bound, so the script names each level's cost
+// and leaves the walk down to its reader.
+TEST(EncodeTest, NamesTheCostOfEachPriorityLevel) {
   auto script = encode_source(R"(
     a :- not b.
     b :- not a.
     :~ a. [1@1]
+    :~ b. [2@2]
   )");
-  EXPECT_EQ(script.status().code(), absl::StatusCode::kUnimplemented);
-  EXPECT_THAT(std::string(script.status().message()),
-              HasSubstr("weak constraints"));
+  ASSERT_OK(script);
+  // A weak constraint's body becomes an atom of its own, which the program
+  // prints nothing for, so a cost adds up numbered atoms rather than a and b.
+  // The most important level comes first, and no cost is asserted.
+  EXPECT_THAT(commands(*script),
+              AllOf(Contains("(define-fun cost@2 () Int (ite a4 2 0))"),
+                    Contains("(define-fun cost@1 () Int (ite a3 1 0))"),
+                    Each(Not(AllOf(HasSubstr("assert"), HasSubstr("cost@")))),
+                    Contains("(check-sat)")));
+  EXPECT_THAT(comments(*script), Contains("; Weak constraints"));
+
+  auto answer = run_script(*script);
+  ASSERT_OK(answer);
+  EXPECT_THAT(*answer, HasSubstr("sat"));
 }
 
-// Where two head atoms of one rule lie on a common positive cycle, a model is
-// only a candidate, and ruling out the ones a smaller model of the reduct
-// undercuts takes a query per candidate.
-TEST(EncodeTest, RefusesAHeadCycle) {
+// Two minimize statements of one priority are one level, the cost of a level
+// being the total over its literals.
+TEST(EncodeTest, AddsUpOnePriorityLevelAtATime) {
+  auto script = encode_source(R"(
+    a :- not b.
+    b :- not a.
+    :~ a. [1@1]
+    :~ b. [3@1]
+  )");
+  ASSERT_OK(script);
+  EXPECT_THAT(commands(*script),
+              Contains("(define-fun cost@1 () Int (+ (ite a3 1 0) "
+                       "(ite a4 3 0)))"));
+}
+
+// Where two head atoms of one rule lie on a common positive cycle, the
+// completion admits models that are not answer sets, so the script asserts the
+// minimality check itself. It quantifies over subsets, which moves the script
+// out of a quantifier free logic.
+TEST(EncodeTest, AssertsMinimalityForAHeadCycle) {
   auto script = encode_source(R"(
     a | b.
     a :- b.
     b :- a.
   )");
-  EXPECT_EQ(script.status().code(), absl::StatusCode::kUnimplemented);
-  EXPECT_THAT(std::string(script.status().message()), HasSubstr("head cycle"));
+  ASSERT_OK(script);
+  EXPECT_THAT(commands(*script),
+              AllOf(Contains("(set-logic ALL)"),
+                    Contains(HasSubstr("(assert (forall ((|sub(a)| Bool) "
+                                       "(|sub(b)| Bool))"))));
+  EXPECT_THAT(comments(*script), Contains("; Minimality"));
+
+  // {a, b} passes the check, a and b holding each other up around the cycle,
+  // so it is the answer set and the script's only model.
+  auto output = run_script(*script);
+  ASSERT_OK(output);
+  EXPECT_THAT(*output, AllOf(HasSubstr("sat"),
+                             HasSubstr("(define-fun a () Bool true)"),
+                             HasSubstr("(define-fun b () Bool true)")));
+}
+
+// The check earns its place here: {y, ny, s} models the completion, and the
+// smaller {y} models the reduct under it, so it is no answer set. The answer
+// sets are {y} and {ny}, and s holds in neither.
+TEST(EncodeTest, MinimalityRulesOutAModelASubsetUndercuts) {
+  auto script = encode_source(R"(
+    y | ny.
+    s :- y, ny.
+    y :- s.
+    ny :- s.
+  )");
+  ASSERT_OK(script);
+  auto output = run_script(*script);
+  ASSERT_OK(output);
+  EXPECT_THAT(*output, AllOf(HasSubstr("sat"),
+                             HasSubstr("(define-fun s () Bool false)")));
 }
 
 TEST(EncodeTest, CvcReadsBackASatisfiableScript) {

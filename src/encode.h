@@ -93,6 +93,10 @@ struct Encoding {
   // what a head cycle leaves behind. Where this is false the assertions
   // describe the answer sets exactly.
   bool needs_reduct_check = false;
+  // Whether each atom, indexed by atom id, sits in a head-cyclic component.
+  // Those are the only atoms a minimality check has to vary: everywhere else
+  // the level ranking already rules an unfounded atom out.
+  std::vector<bool> in_head_cycle;
 };
 
 // Returns an UnimplementedError for a choice rule head. Nothing produces one:
@@ -100,10 +104,10 @@ struct Encoding {
 absl::StatusOr<Encoding> build_encoding(cvc5::TermManager& tm,
                                         const aspif::Program& prog);
 
-// The translation as an SMT-LIB script, ending in '(check-sat)' and
-// '(get-model)'. Its models are the answer sets of `prog`, one model each, and
-// a constant is named after the symbol the program prints for its atom, so that
-// a model reads back as an answer set.
+// The translation as an SMT-LIB script, asking '(check-sat)' and '(get-model)'
+// at the end. Its models are the answer sets of `prog`, one model each, and a
+// constant is named after the symbol the program prints for its atom, so that a
+// model reads back as an answer set.
 //
 // A program with a query asserts the query negated, so its script asks the
 // opposite question. A model of it is an answer set the query fails in, and
@@ -111,12 +115,17 @@ absl::StatusOr<Encoding> build_encoding(cvc5::TermManager& tm,
 // answer set can satisfy it, so 'unsat' there means the program has no answer
 // set, which is the one way such a query holds.
 //
-// Returns an UnimplementedError where one script cannot say what an answer set
-// is. A program with weak constraints is one, its optimal cost being known only
-// after several solver calls. So is a program with a head cycle, whose models
-// are candidates that a further call, against the reduct, still has to pass.
-// So is a query matching several atoms, each of which takes a check-sat under
-// a negation of its own.
+// Three programs take more than the plain check-sat above:
+//   - A head cycle, which asserts the minimality check as well. That assertion
+//     quantifies over subsets, so the script is in the ALL logic.
+//   - A query matching several atoms, which is one check-sat per atom, each
+//     under a negation of its own in a push and pop scope, in place of the one
+//     at the end.
+//   - Weak constraints, whose optimum is known only after several runs under a
+//     falling bound. The script names the cost of each priority level and the
+//     steps that walk it down.
+//
+// Returns an UnimplementedError only for what build_encoding refuses.
 absl::StatusOr<std::string> encode_smtlib(const aspif::Program& prog);
 
 #endif  // ENCODE_H_

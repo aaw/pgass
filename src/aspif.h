@@ -85,6 +85,10 @@ struct Program {
   // an assumption. A longer list does not print at all. An assumption asks for
   // all of its literals at once, which is not what these atoms mean.
   std::optional<std::vector<Lit>> query;
+  // The query as the program wrote it, e.g. "p(X)?", for anything that reports
+  // on the query rather than answering it. Empty where the program was read as
+  // aspif, which has no query statement to carry the text.
+  std::string query_text;
 
   // Atom ids are allocated here so rules and auxiliaries share one space.
   Atom next_atom = 1;

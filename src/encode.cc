@@ -7,12 +7,15 @@
 #include <utility>
 #include <vector>
 
+#include "absl/container/btree_map.h"
 #include "absl/container/flat_hash_set.h"
 #include "absl/log/check.h"
 #include "absl/status/status.h"
 #include "absl/status/statusor.h"
 #include "absl/strings/str_cat.h"
 #include "absl/strings/str_join.h"
+#include "absl/strings/str_split.h"
+#include "absl/strings/substitute.h"
 #include "aspif.h"
 #include "graph.h"
 #include "macros.h"
@@ -254,9 +257,10 @@ cvc5::Term body_term(cvc5::TermManager& tm,
   // at_least() answers it without reaching for arithmetic.
   if (is_cardinality(rule)) {
     // A bound past the number of literals is out of reach however they fall,
-    // and checking that first is what leaves the bound small enough to count to.
-    if (rule.lower_bound > BigInt(static_cast<int64_t>(
-                               rule.weighted_body.size()))) {
+    // and checking that first is what leaves the bound small enough to count
+    // to.
+    if (rule.lower_bound >
+        BigInt(static_cast<int64_t>(rule.weighted_body.size()))) {
       return tm.mkFalse();
     }
     std::vector<cvc5::Term> lits;
@@ -420,6 +424,22 @@ bool output_is_its_own_name(const aspif::Output& output,
          atom_name[output.condition.front()] == output.name;
 }
 
+// One paragraph of comment, wrapped to fit in 80 columns.
+std::string comment_lines(std::string_view text) {
+  constexpr size_t kWidth = 74;
+  std::string out;
+  std::string line = ";";
+  for (std::string_view word : absl::StrSplit(text, ' ', absl::SkipEmpty())) {
+    if (line.size() + 1 + word.size() > kWidth) {
+      absl::StrAppend(&out, line, "\n");
+      line = ";";
+    }
+    absl::StrAppend(&line, " ", word);
+  }
+  if (line != ";") absl::StrAppend(&out, line, "\n");
+  return out;
+}
+
 // Adds a headed block to the script, and nothing at all where `body` is empty.
 // A stratified program declares no level variables, and a program without a
 // query asserts none, so those blocks go missing rather than stand empty.
@@ -445,6 +465,214 @@ std::string output_line(const aspif::Output& output,
   }
   return absl::StrCat(";   ", output.name, " : ", absl::StrJoin(literals, " "),
                       "\n");
+}
+
+// The literals of each priority level, the most important level first, which is
+// the order the levels have to be settled in. Two minimize statements sharing a
+// priority are one level, the cost of a level being the total over its
+// literals.
+std::vector<std::pair<BigInt, std::vector<aspif::WeightedLit>>> level_costs(
+    const aspif::Program& prog) {
+  absl::btree_map<BigInt, std::vector<aspif::WeightedLit>> by_priority;
+  for (const aspif::Minimize& minimize : prog.minimize) {
+    std::vector<aspif::WeightedLit>& lits = by_priority[minimize.priority];
+    lits.insert(lits.end(), minimize.lits.begin(), minimize.lits.end());
+  }
+  return {by_priority.rbegin(), by_priority.rend()};
+}
+
+// The block naming the cost of each priority level, and the steps that bring
+// the script down to an optimal answer set. Nothing here is asserted.
+std::string weak_constraint_block(cvc5::TermManager& tm,
+                                  const aspif::Program& prog,
+                                  const Encoding& encoding) {
+  // Only the atom names can collide with a cost name. Every level name holds
+  // parentheses, which no cost name does.
+  absl::flat_hash_set<std::string> taken(encoding.atom_name.begin(),
+                                         encoding.atom_name.end());
+  std::vector<std::string> names;
+  std::string definitions;
+  for (const auto& [priority, lits] : level_costs(prog)) {
+    names.push_back(
+        fresh_name(taken, absl::StrCat("cost@", priority.to_string())));
+    absl::StrAppend(&definitions, "(define-fun ", names.back(), " () Int ",
+                    weighted_sum(tm, encoding.atom_var, lits).toString(),
+                    ")\n");
+  }
+
+  // The steps are written out for the first level and the rest are named at the
+  // end, since every level takes the same four steps.
+  const std::string& first = names.front();
+  const std::string later_levels =
+      names.size() == 1
+          ? ""
+          : comment_lines(absl::StrCat(
+                "Then repeat the whole process for ",
+                absl::StrJoin(names.begin() + 1, names.end(), ", then "),
+                ", leaving the assertions from step 4 from previous levels."));
+
+  return absl::StrCat(
+      absl::Substitute(
+          R"(; Every answer set of this program has a cost, and finding the least
+; cost takes several check-sats.
+;
+; To reach an answer set of the least cost, settle $0 first:
+;   1. Run the script. Read c, the value of $0, from the model.
+;   2. Add this line above the (check-sat) at the end, then run again:
+;        (assert (< $0 c))
+;   3. On sat, read the new c from the model and repeat step 2.
+;   4. On unsat, change that line to the following, for the last c that
+;      came back sat:
+;        (assert (= $0 c))
+)",
+          first),
+      later_levels,
+      "; The model of the last sat run is an optimal answer set.\n",
+      // A query asks about the optimal answer sets, not about all of them.
+      prog.query.has_value()
+          ? "; Ask the query below only after settling every level.\n"
+          : "",
+      definitions);
+}
+
+// One rule of the reduct, as an implication the subset has to satisfy.
+//
+// A rule whose body holds a 'not q' where the model holds q is not in the
+// reduct at all, so the 'not' literals read the model. The positive body atoms
+// and the head read the subset, which is what has to model the reduct.
+cvc5::Term reduct_rule(cvc5::TermManager& tm, const aspif::Rule& rule,
+                       const std::vector<cvc5::Term>& atom_var,
+                       const std::vector<cvc5::Term>& subset_var) {
+  cvc5::Term body;
+  if (rule.body_type == aspif::Rule::BodyType::kNormal) {
+    std::vector<cvc5::Term> conjuncts;
+    conjuncts.reserve(rule.body.size());
+    for (aspif::Lit lit : rule.body) {
+      conjuncts.push_back(lit > 0
+                              ? subset_var[lit]
+                              : tm.mkTerm(cvc5::Kind::NOT, {atom_var[-lit]}));
+    }
+    body = conjunction(tm, conjuncts);
+  } else {
+    const cvc5::Term zero = tm.mkInteger(0);
+    std::vector<cvc5::Term> addends;
+    addends.reserve(rule.weighted_body.size());
+    for (const aspif::WeightedLit& weighted : rule.weighted_body) {
+      const cvc5::Term weight = tm.mkInteger(weighted.weight.to_string());
+      const cvc5::Term holds =
+          weighted.lit > 0
+              ? subset_var[weighted.lit]
+              : tm.mkTerm(cvc5::Kind::NOT, {atom_var[-weighted.lit]});
+      addends.push_back(tm.mkTerm(cvc5::Kind::ITE, {holds, weight, zero}));
+    }
+    body = tm.mkTerm(
+        cvc5::Kind::GEQ,
+        {sum(tm, addends), tm.mkInteger(rule.lower_bound.to_string())});
+  }
+
+  std::vector<cvc5::Term> heads;
+  heads.reserve(rule.head.size());
+  for (aspif::Atom head : rule.head) heads.push_back(subset_var[head]);
+  return tm.mkTerm(cvc5::Kind::IMPLIES, {body, disjunction(tm, heads)});
+}
+
+// The minimality check as one formula: no proper subset of the atoms a model
+// holds is itself a model of the reduct under it. That is the second half of
+// the ASP-Core-2 definition of an answer set, and the subset being a bound
+// variable is what lets one formula stand for every candidate at once.
+//
+// Only the atoms of a head-cyclic component are quantified. Elsewhere the
+// subset is the model itself: those atoms are ranked, and a ranked atom cannot
+// be unfounded, so no smaller model of the reduct differs there. Holding an
+// atom too many costs the subset nothing, every rule of the reduct being an
+// implication.
+//
+// That restriction is what makes the formula usable. Quantifying over every
+// atom sent one 2-QBF instance of 55 atoms, 23 of them head-cyclic, from 0.03s
+// to over 45s.
+cvc5::Term minimality_term(cvc5::TermManager& tm, const aspif::Program& prog,
+                           const Encoding& encoding) {
+  absl::flat_hash_set<std::string> taken(encoding.atom_name.begin(),
+                                         encoding.atom_name.end());
+  const cvc5::Sort bool_sort = tm.getBooleanSort();
+  std::vector<cvc5::Term> subset_var(prog.next_atom);
+  std::vector<cvc5::Term> bound_vars;
+  std::vector<cvc5::Term> conjuncts;
+  // What the quantified atoms say about the subset: it holds nothing the model
+  // leaves out, and it leaves out something the model holds, which together
+  // make it a proper subset. An atom standing for itself says neither.
+  std::vector<cvc5::Term> dropped;
+  for (aspif::Atom atom = 1; atom < prog.next_atom; ++atom) {
+    if (!encoding.in_head_cycle[atom]) {
+      subset_var[atom] = encoding.atom_var[atom];
+      continue;
+    }
+    const cvc5::Term subset = tm.mkVar(
+        bool_sort,
+        fresh_name(taken, absl::StrCat("sub(", encoding.atom_name[atom], ")")));
+    subset_var[atom] = subset;
+    bound_vars.push_back(subset);
+    conjuncts.push_back(
+        tm.mkTerm(cvc5::Kind::IMPLIES, {subset, encoding.atom_var[atom]}));
+    dropped.push_back(tm.mkTerm(
+        cvc5::Kind::AND,
+        {encoding.atom_var[atom], tm.mkTerm(cvc5::Kind::NOT, {subset})}));
+  }
+  conjuncts.push_back(disjunction(tm, dropped));
+  for (const aspif::Rule& rule : prog.rules) {
+    conjuncts.push_back(reduct_rule(tm, rule, encoding.atom_var, subset_var));
+  }
+
+  return tm.mkTerm(cvc5::Kind::FORALL,
+                   {tm.mkTerm(cvc5::Kind::VARIABLE_LIST, bound_vars),
+                    tm.mkTerm(cvc5::Kind::NOT, {conjunction(tm, conjuncts)})});
+}
+
+std::string minimality_block(const cvc5::Term& minimality) {
+  constexpr char kComment[] =
+      R"(; A rule of this program has two head atoms on a common positive cycle,
+; so the assertions above admit models that are not answer sets. This one
+; rules those out. It says that no proper subset of the atoms the model holds
+; is itself a model of the reduct of the program under it, which is what makes
+; a model an answer set. The subset is a bound variable per atom, so the logic
+; is ALL rather than quantifier free.
+)";
+  return absl::StrCat(kComment, "(assert ", minimality.toString(), ")\n");
+}
+
+// How a comment names the query: as the program wrote it, or as 'the query'
+// where the text is gone, which is what a program read as aspif leaves.
+std::string query_name(const aspif::Program& prog) {
+  if (prog.query_text.empty()) return "The query";
+  return absl::StrCat("The query ", prog.query_text);
+}
+
+// The block asking about a query of several atoms. Each atom is asked about on
+// its own, under a negation of its own, so the block is several check-sats
+// rather than one.
+std::string several_queries_block(cvc5::TermManager& tm,
+                                  const aspif::Program& prog,
+                                  const Encoding& encoding) {
+  constexpr char kAnswers[] =
+      R"(;
+; The answers come back in the order the atoms appear below:
+;   unsat  that atom holds in every answer set, so it answers the query.
+;   sat    it does not. Add (get-model) after the check-sat to see an
+;          answer set where it fails.
+; The query holds if at least one answer is unsat.
+)";
+  std::string block = absl::StrCat(
+      comment_lines(absl::StrCat(
+          query_name(prog), " matched ", encoding.query.size(),
+          " atoms. Each is a separate question, so each gets a check-sat of "
+          "its own, under a negation of its own.")),
+      kAnswers);
+  for (const cvc5::Term& formula : encoding.query) {
+    absl::StrAppend(&block, "(push 1)\n(assert ",
+                    tm.mkTerm(cvc5::Kind::NOT, {formula}).toString(),
+                    ")\n(check-sat)\n(pop 1)\n");
+  }
+  return block;
 }
 
 // The table naming the symbols no constant is named after. A model spells out
@@ -574,6 +802,10 @@ absl::StatusOr<Encoding> build_encoding(cvc5::TermManager& tm,
   encoding.level_var = declare_constants(tm, tm.getIntegerSort(), names.level);
   encoding.atom_name = std::move(names.atom);
   encoding.needs_reduct_check = ranking.any_head_cycle;
+  encoding.in_head_cycle.assign(prog.next_atom, false);
+  for (aspif::Atom atom = 1; atom < prog.next_atom; ++atom) {
+    encoding.in_head_cycle[atom] = ranking.head_cyclic[ranking.component[atom]];
+  }
 
   const std::vector<std::vector<Support>> supports =
       collect_supports(tm, prog, encoding.atom_var, ranking);
@@ -606,44 +838,25 @@ absl::StatusOr<Encoding> build_encoding(cvc5::TermManager& tm,
 }
 
 absl::StatusOr<std::string> encode_smtlib(const aspif::Program& prog) {
-  // The bound that pins an optimal answer set down is only known once several
-  // queries have been answered. Writing the encoding without it would hand
-  // back a script whose models are not the answer sets asked for.
-  if (!prog.minimize.empty()) {
-    return absl::UnimplementedError(
-        "weak constraints cannot be encoded: finding the least cost of a "
-        "priority level takes repeated queries under a falling bound");
-  }
-
-  // A script has one check-sat, so it can only carry a query of one atom. A
-  // query of no atom needs no atom of its own: the assertions already say it,
-  // as the query block below explains.
-  if (prog.query.has_value() && prog.query->size() > 1) {
-    return absl::UnimplementedError(absl::StrCat(
-        "a query matching ", prog.query->size(),
-        " atoms cannot be encoded: each atom is asked about on its own, under "
-        "a negation of its own"));
-  }
-
   cvc5::TermManager tm;
   ASSIGN_OR_RETURN(const Encoding encoding, build_encoding(tm, prog));
-
-  // Under a head cycle a model is only a candidate, and ruling out the ones a
-  // smaller model of the reduct undercuts takes a query per candidate. solve.cc
-  // runs those. A script cannot.
-  if (encoding.needs_reduct_check) {
-    return absl::UnimplementedError(
-        "a head cycle cannot be encoded: telling an answer set from a model "
-        "takes a further query per model, against the reduct");
-  }
 
   std::string script = absl::StrCat("; Generated by pgass --encode=smtlib.\n",
                                     symbol_table(prog, encoding));
 
   // produce-models has to be set before the logic is, which SMT-LIB takes as
   // the end of the preamble.
-  absl::StrAppend(&script, "(set-option :produce-models true)\n(set-logic ",
-                  encoding.logic, ")\n");
+  absl::StrAppend(&script, "(set-option :produce-models true)\n");
+  // cvc5 rejects the push a query of several atoms takes unless it has been
+  // told to solve incrementally. No other script asks twice in one run, and
+  // incremental solving costs cvc5 some of its preprocessing.
+  if (encoding.query.size() > 1) {
+    absl::StrAppend(&script, "(set-option :incremental true)\n");
+  }
+  // The minimality check a head cycle takes is quantified, which no quantifier
+  // free logic can hold.
+  absl::StrAppend(&script, "(set-logic ",
+                  encoding.needs_reduct_check ? "ALL" : encoding.logic, ")\n");
 
   std::string constants;
   std::string levels;
@@ -665,25 +878,46 @@ absl::StatusOr<std::string> encode_smtlib(const aspif::Program& prog) {
     append_block(script, section.title, assertions);
   }
 
-  // The query goes in negated, so the script looks for an answer set the query
-  // fails in. That flips what 'unsat' means, so the script says so itself.
-  if (encoding.query.size() == 1) {
+  if (!prog.minimize.empty()) {
+    append_block(script, "Weak constraints",
+                 weak_constraint_block(tm, prog, encoding));
+  }
+  if (encoding.needs_reduct_check) {
+    append_block(script, "Minimality",
+                 minimality_block(minimality_term(tm, prog, encoding)));
+  }
+
+  if (encoding.query.size() > 1) {
+    append_block(script, "Query", several_queries_block(tm, prog, encoding));
+  } else if (encoding.query.size() == 1) {
+    // The query goes in negated, so the script looks for an answer set the
+    // query fails in. That flips what 'unsat' means, so the script says so
+    // itself.
     append_block(
         script, "Query",
         absl::StrCat(
-            "; The query holds where every answer set satisfies it, so it\n"
-            "; goes in negated. A model is an answer set the query fails in,\n"
-            "; and 'unsat' means the query holds.\n(assert ",
+            comment_lines(absl::StrCat(
+                query_name(prog),
+                " holds where every answer set satisfies it, so it goes in "
+                "negated. 'unsat' means it holds. 'sat' means it does not, and "
+                "the model is an answer set where it fails.")),
+            "(assert ",
             tm.mkTerm(cvc5::Kind::NOT, {encoding.query.front()}).toString(),
             ")\n"));
   } else if (prog.query.has_value()) {
     // A query no atom matched, as 'p(1). q(2)?' asks.
     append_block(
         script, "Query",
-        "; The query matched no atom. It is true only if the program has\n"
-        "; no answer set, which is what 'unsat' means.\n");
+        comment_lines(absl::StrCat(
+            query_name(prog),
+            " matched no atom, so nothing is asserted for it. It holds only "
+            "if the program has no answer set, which is what 'unsat' means.")));
   }
 
-  absl::StrAppend(&script, "\n(check-sat)\n(get-model)\n");
+  // A query of several atoms brought a check-sat per atom. Every other script
+  // asks here.
+  if (encoding.query.size() <= 1) {
+    absl::StrAppend(&script, "\n(check-sat)\n(get-model)\n");
+  }
   return script;
 }

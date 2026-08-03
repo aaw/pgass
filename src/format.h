@@ -13,4 +13,7 @@ std::string format(const Statement& statement);
 // One term on its own, e.g. "X + 1".
 std::string format(const Term& term);
 
+// The query as written, e.g. "p(X)?".
+std::string format(const Query& query);
+
 #endif  // FORMAT_H_

@@ -2674,6 +2674,7 @@ absl::StatusOr<aspif::Program> ground(const Program& prog,
   name_outputs(store, syms, result);
   if (prog.query != nullptr && prog.query->lit != nullptr) {
     RETURN_IF_ERROR(emit_query(*prog.query->lit, store, syms, result));
+    result.query_text = format(*prog.query);
   }
   return result;
 }
