@@ -67,103 +67,6 @@ absl::Status undecided(const cvc5::Result& result) {
                    "' rather than deciding the program"));
 }
 
-// One rule of the reduct, as a formula over `subset_var`. A null Term means the
-// rule is not in the reduct at all, because no subset of the candidate can
-// satisfy its body.
-//
-// A normal body drops its default-negated literals, which the candidate has
-// already settled. 'not q' where the candidate holds q is false, and takes the
-// rule with it. 'not q' where it does not hold q stays true however small the
-// subset, so it says nothing and goes. A positive atom outside the candidate is
-// false in every subset, and takes the rule too.
-//
-// A weight body keeps its shape, since which literals hold decides whether it
-// reaches its bound. Weights are positive, so an atom outside the subset only
-// lowers the sum. A default-negated literal contributes the constant weight the
-// candidate gives it.
-cvc5::Term reduct_body(cvc5::TermManager& tm, const aspif::Rule& rule,
-                       const absl::flat_hash_set<aspif::Atom>& candidate,
-                       const std::vector<cvc5::Term>& subset_var) {
-  if (rule.body_type == aspif::Rule::BodyType::kNormal) {
-    std::vector<cvc5::Term> conjuncts;
-    conjuncts.reserve(rule.body.size());
-    for (aspif::Lit lit : rule.body) {
-      if (lit < 0 && candidate.contains(-lit)) return cvc5::Term();
-      if (lit > 0 && !candidate.contains(lit)) return cvc5::Term();
-      if (lit > 0) conjuncts.push_back(subset_var[lit]);
-    }
-    return conjunction(tm, conjuncts);
-  }
-
-  const cvc5::Term zero = tm.mkInteger(0);
-  std::vector<cvc5::Term> addends;
-  addends.reserve(rule.weighted_body.size());
-  for (const aspif::WeightedLit& weighted : rule.weighted_body) {
-    const cvc5::Term weight = tm.mkInteger(weighted.weight.to_string());
-    if (weighted.lit < 0 && !candidate.contains(-weighted.lit)) {
-      addends.push_back(weight);
-    } else if (weighted.lit > 0 && candidate.contains(weighted.lit)) {
-      addends.push_back(
-          tm.mkTerm(cvc5::Kind::ITE, {subset_var[weighted.lit], weight, zero}));
-    }
-  }
-  return tm.mkTerm(
-      cvc5::Kind::GEQ,
-      {sum(tm, addends), tm.mkInteger(rule.lower_bound.to_string())});
-}
-
-// Whether some proper subset of `candidate` models the reduct of `prog` with
-// respect to `candidate`. That is how a candidate model fails to be an answer
-// set. ASP-Core-2 defines an answer set the same way: a model I of P such that
-// no proper subset of I models the reduct of P with respect to I.
-//
-// One Boolean per candidate atom stands for that subset. Atoms outside the
-// candidate are false in every subset of it, so they need no variable.
-//
-// This is the second solver call a head cycle costs. It asks for the absence
-// of a smaller model, which no search for a model can answer on its own.
-absl::StatusOr<bool> subset_models_reduct(
-    cvc5::TermManager& tm, const aspif::Program& prog, const char* logic,
-    const absl::flat_hash_set<aspif::Atom>& candidate) {
-  // The empty candidate has no proper subset.
-  if (candidate.empty()) return false;
-
-  cvc5::Solver checker(tm);
-  checker.setLogic(logic);
-
-  std::vector<cvc5::Term> subset_var(prog.next_atom);
-  const cvc5::Sort bool_sort = tm.getBooleanSort();
-  std::vector<cvc5::Term> dropped;
-  dropped.reserve(candidate.size());
-  for (aspif::Atom atom = 1; atom < prog.next_atom; ++atom) {
-    if (!candidate.contains(atom)) continue;
-    subset_var[atom] = tm.mkConst(bool_sort, absl::StrCat("s", atom));
-    dropped.push_back(tm.mkTerm(cvc5::Kind::NOT, {subset_var[atom]}));
-  }
-  // Proper: the subset leaves at least one candidate atom out.
-  checker.assertFormula(disjunction(tm, dropped));
-
-  for (const aspif::Rule& rule : prog.rules) {
-    const cvc5::Term body = reduct_body(tm, rule, candidate, subset_var);
-    if (body.isNull()) continue;
-    // Only head atoms the candidate holds can satisfy the rule, a subset of it
-    // holding no others. An empty head leaves an integrity constraint, which
-    // rules no subset out: its body is false under the candidate, which is a
-    // model, and stays false under anything smaller.
-    std::vector<cvc5::Term> heads;
-    for (aspif::Atom head : rule.head) {
-      if (candidate.contains(head)) heads.push_back(subset_var[head]);
-    }
-    checker.assertFormula(
-        tm.mkTerm(cvc5::Kind::IMPLIES, {body, disjunction(tm, heads)}));
-  }
-
-  const cvc5::Result result = checker.checkSat();
-  if (result.isSat()) return true;
-  if (result.isUnsat()) return false;
-  return undecided(result);
-}
-
 // Reads an integer the solver assigned. cvc5 prints one in decimal and works in
 // unbounded integers, as BigInt does, so no cost is too big to read back.
 absl::StatusOr<BigInt> cost_value(const cvc5::Term& value) {
@@ -176,29 +79,18 @@ absl::StatusOr<BigInt> cost_value(const cvc5::Term& value) {
   return *std::move(cost);
 }
 
-// The solver, and what looking for answer sets rather than models takes.
-//
-// Every search goes through find(). Where a component is head-cyclic, a model
-// of the assertions can fail to be an answer set. find() checks each model it
-// is handed and rules out the ones that fail, until it holds an answer set or
-// the solver runs out of models. Where no component is head-cyclic, the
-// assertions describe the answer sets exactly and find() is one checkSat().
+// The solver, and the enumeration of answer sets over it. The encoding
+// describes the answer sets exactly, so every model the solver hands back is an
+// answer set.
 struct Search {
   cvc5::TermManager& tm;
   cvc5::Solver& solver;
   const aspif::Program& prog;
   const std::vector<cvc5::Term>& atom_var;
-  // Whether a model has to pass the minimality check to count as an answer set.
-  bool check_reduct = false;
-  // The logic to check the reduct in, which is the one the program is solved
-  // in.
-  const char* logic = nullptr;
 
-  // Clauses ruling out the models already handed back, the answer sets and the
-  // failed candidates alike. Both are permanent. A model that is not an answer
-  // set never becomes one, and an answer set is reported once. pop() drops what
-  // its scope asserted, so they are kept here and asserted again on the way
-  // out.
+  // Clauses ruling out the answer sets already handed back, so that each is
+  // reported once. pop() drops what its scope asserted, so they are kept here
+  // and asserted again on the way out.
   std::vector<cvc5::Term> blocked;
   // Where in `blocked` each open push() scope began.
   std::vector<size_t> scopes;
@@ -265,25 +157,12 @@ void Search::pop() {
 }
 
 absl::StatusOr<bool> Search::find(const std::optional<cvc5::Term>& assumption) {
-  while (true) {
-    const cvc5::Result result = assumption.has_value()
-                                    ? solver.checkSatAssuming(*assumption)
-                                    : solver.checkSat();
-    if (result.isUnsat()) return false;
-    if (!result.isSat()) return undecided(result);
-    if (!check_reduct) return true;
-
-    const std::vector<aspif::Atom> atoms = model_atoms();
-    ASSIGN_OR_RETURN(const bool smaller,
-                     subset_models_reduct(tm, prog, logic,
-                                          absl::flat_hash_set<aspif::Atom>(
-                                              atoms.begin(), atoms.end())));
-    if (!smaller) return true;
-    // A model of the rules that a smaller model of its reduct undercuts is no
-    // answer set, whatever cost bound it was found under, so it is out for
-    // good.
-    block(atoms);
-  }
+  const cvc5::Result result = assumption.has_value()
+                                  ? solver.checkSatAssuming(*assumption)
+                                  : solver.checkSat();
+  if (result.isSat()) return true;
+  if (result.isUnsat()) return false;
+  return undecided(result);
 }
 
 // The least cost a level can take, or nullopt when the program has no answer
@@ -438,14 +317,10 @@ absl::Status Session::start(const aspif::Program& prog,
     }
   }
 
-  // The encoding settles everything but a head cycle, which is what turns the
-  // minimality check on.
   search.emplace(Search{.tm = tm,
                         .solver = *solver,
                         .prog = prog,
-                        .atom_var = encoding.atom_var,
-                        .check_reduct = encoding.needs_reduct_check,
-                        .logic = encoding.logic});
+                        .atom_var = encoding.atom_var});
 
   // A program with no minimize statements has no levels, so this comes back
   // with no cost and no solver call made.
@@ -527,12 +402,9 @@ absl::StatusOr<QueryResult> answer_query(const aspif::Program& prog,
   QueryResult result;
   for (const auto& [formula, atom] : standing) {
     // Asking about an atom means looking for an answer set without it. That
-    // goes in a scope of its own rather than as an assumption, because find()
-    // can make several solver calls and an assumption holds for one.
-    search.push();
-    search.solver.assertFormula(session.tm.mkTerm(cvc5::Kind::NOT, {formula}));
-    ASSIGN_OR_RETURN(const bool refuted, search.find());
-    search.pop();
+    // question belongs to this search alone, so it goes in as an assumption.
+    const cvc5::Term without = session.tm.mkTerm(cvc5::Kind::NOT, {formula});
+    ASSIGN_OR_RETURN(const bool refuted, search.find(without));
     // Every atom that holds is an answer, so the search runs to the end rather
     // than stopping at the first.
     if (!refuted) result.holds.push_back(atom);

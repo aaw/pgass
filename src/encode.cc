@@ -591,7 +591,7 @@ cvc5::Term reduct_rule(cvc5::TermManager& tm, const aspif::Rule& rule,
 // atom sent one 2-QBF instance of 55 atoms, 23 of them head-cyclic, from 0.03s
 // to over 45s.
 cvc5::Term minimality_term(cvc5::TermManager& tm, const aspif::Program& prog,
-                           const Encoding& encoding) {
+                           const Encoding& encoding, const Ranking& ranking) {
   absl::flat_hash_set<std::string> taken(encoding.atom_name.begin(),
                                          encoding.atom_name.end());
   const cvc5::Sort bool_sort = tm.getBooleanSort();
@@ -603,7 +603,7 @@ cvc5::Term minimality_term(cvc5::TermManager& tm, const aspif::Program& prog,
   // make it a proper subset. An atom standing for itself says neither.
   std::vector<cvc5::Term> dropped;
   for (aspif::Atom atom = 1; atom < prog.next_atom; ++atom) {
-    if (!encoding.in_head_cycle[atom]) {
+    if (!ranking.head_cyclic[ranking.component[atom]]) {
       subset_var[atom] = encoding.atom_var[atom];
       continue;
     }
@@ -628,17 +628,11 @@ cvc5::Term minimality_term(cvc5::TermManager& tm, const aspif::Program& prog,
                     tm.mkTerm(cvc5::Kind::NOT, {conjunction(tm, conjuncts)})});
 }
 
-std::string minimality_block(const cvc5::Term& minimality) {
-  constexpr char kComment[] =
-      R"(; A rule of this program has two head atoms on a common positive cycle,
-; so the assertions above admit models that are not answer sets. This one
-; rules those out. It says that no proper subset of the atoms the model holds
-; is itself a model of the reduct of the program under it, which is what makes
-; a model an answer set. The subset is a bound variable per atom, so the logic
-; is ALL rather than quantifier free.
+constexpr char kMinimalityComment[] =
+    R"(; A rule of this program has two head atoms on a common positive cycle,
+; so the assertions above admit models that are not answer sets. The
+; constraint below rules those out.
 )";
-  return absl::StrCat(kComment, "(assert ", minimality.toString(), ")\n");
-}
 
 // How a comment names the query: as the program wrote it, or as 'the query'
 // where the text is gone, which is what a program read as aspif leaves.
@@ -797,15 +791,12 @@ absl::StatusOr<Encoding> build_encoding(cvc5::TermManager& tm,
   Names names = choose_names(prog, ranking);
 
   Encoding encoding;
-  encoding.logic = logic_for(prog);
+  // The minimality assertion below is quantified, which no quantifier free
+  // logic can hold.
+  encoding.logic = ranking.any_head_cycle ? "ALL" : logic_for(prog);
   encoding.atom_var = declare_constants(tm, tm.getBooleanSort(), names.atom);
   encoding.level_var = declare_constants(tm, tm.getIntegerSort(), names.level);
   encoding.atom_name = std::move(names.atom);
-  encoding.needs_reduct_check = ranking.any_head_cycle;
-  encoding.in_head_cycle.assign(prog.next_atom, false);
-  for (aspif::Atom atom = 1; atom < prog.next_atom; ++atom) {
-    encoding.in_head_cycle[atom] = ranking.head_cyclic[ranking.component[atom]];
-  }
 
   const std::vector<std::vector<Support>> supports =
       collect_supports(tm, prog, encoding.atom_var, ranking);
@@ -834,6 +825,12 @@ absl::StatusOr<Encoding> build_encoding(cvc5::TermManager& tm,
       Section{.title = "Support", .assertions = std::move(support_terms)});
   encoding.sections.push_back(Section{.title = "Level ranking",
                                       .assertions = std::move(ranking_terms)});
+  if (ranking.any_head_cycle) {
+    const cvc5::Term minimality = minimality_term(tm, prog, encoding, ranking);
+    encoding.sections.push_back(Section{.title = "Minimality",
+                                        .comment = kMinimalityComment,
+                                        .assertions = {minimality}});
+  }
   return encoding;
 }
 
@@ -853,10 +850,7 @@ absl::StatusOr<std::string> encode_smtlib(const aspif::Program& prog) {
   if (encoding.query.size() > 1) {
     absl::StrAppend(&script, "(set-option :incremental true)\n");
   }
-  // The minimality check a head cycle takes is quantified, which no quantifier
-  // free logic can hold.
-  absl::StrAppend(&script, "(set-logic ",
-                  encoding.needs_reduct_check ? "ALL" : encoding.logic, ")\n");
+  absl::StrAppend(&script, "(set-logic ", encoding.logic, ")\n");
 
   std::string constants;
   std::string levels;
@@ -871,20 +865,16 @@ absl::StatusOr<std::string> encode_smtlib(const aspif::Program& prog) {
   append_block(script, "Level variables", levels);
 
   for (const Section& section : encoding.sections) {
-    std::string assertions;
+    std::string body = section.comment;
     for (const cvc5::Term& assertion : section.assertions) {
-      absl::StrAppend(&assertions, "(assert ", assertion.toString(), ")\n");
+      absl::StrAppend(&body, "(assert ", assertion.toString(), ")\n");
     }
-    append_block(script, section.title, assertions);
+    append_block(script, section.title, body);
   }
 
   if (!prog.minimize.empty()) {
     append_block(script, "Weak constraints",
                  weak_constraint_block(tm, prog, encoding));
-  }
-  if (encoding.needs_reduct_check) {
-    append_block(script, "Minimality",
-                 minimality_block(minimality_term(tm, prog, encoding)));
   }
 
   if (encoding.query.size() > 1) {

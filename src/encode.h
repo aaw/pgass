@@ -66,13 +66,17 @@ cvc5::Term at_least(cvc5::TermManager& tm, const std::vector<cvc5::Term>& lits,
 // reader can navigate by.
 struct Section {
   const char* title = nullptr;
+  // Comment lines the script prints above the assertions, each already led by
+  // a ';'. Empty where the title says enough.
+  const char* comment = "";
   std::vector<cvc5::Term> assertions;
 };
 
 // The whole translation of a ground program: the variables it declares and the
 // formulas that hold of them.
 struct Encoding {
-  // The SMT logic the formulas fit in, QF_IDL or the wider QF_LIA.
+  // The SMT logic the formulas fit in: QF_IDL, the wider QF_LIA, or ALL where
+  // a head cycle brings a quantifier.
   const char* logic = nullptr;
   // One Bool per atom, indexed by atom id. Slot 0 is a null Term, 0 being no
   // atom.
@@ -89,16 +93,13 @@ struct Encoding {
   // the sections above. Asking one takes a search for an answer set that
   // falsifies it, which solve.cc runs.
   std::vector<cvc5::Term> query;
-  // Whether a model of the assertions is only a candidate answer set, which is
-  // what a head cycle leaves behind. Where this is false the assertions
-  // describe the answer sets exactly.
-  bool needs_reduct_check = false;
-  // Whether each atom, indexed by atom id, sits in a head-cyclic component.
-  // Those are the only atoms a minimality check has to vary: everywhere else
-  // the level ranking already rules an unfounded atom out.
-  std::vector<bool> in_head_cycle;
 };
 
+// The sections together describe the answer sets exactly: a model of all of
+// them is an answer set, and every answer set is one of their models. A rule
+// with two head atoms on a common positive cycle takes a quantified minimality
+// assertion for that, which is a section of its own.
+//
 // Returns an UnimplementedError for a choice rule head. Nothing produces one:
 // normalization rewrites choice rules into disjunctive ones.
 absl::StatusOr<Encoding> build_encoding(cvc5::TermManager& tm,

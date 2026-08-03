@@ -59,10 +59,10 @@ struct SolveOptions {
 // Weak constraints are minimized level by level, most important level first,
 // before any answer set is returned. Every answer set returned is optimal.
 //
-// A disjunctive head costs a second solver call per candidate answer set, but
-// only where two of its atoms lie on a common positive cycle. Every other
-// program, normal or disjunctive, is decided by one translation. encode.cc says
-// why.
+// Every program, normal or disjunctive, is decided by one translation. A
+// disjunctive head with two atoms on a common positive cycle costs that
+// translation a quantifier, and so the ALL logic, rather than a solver call of
+// its own. encode.cc says why.
 //
 // A query asks about the answer sets rather than restricting them, so it does
 // not narrow what comes back here. answer_query() answers it.
