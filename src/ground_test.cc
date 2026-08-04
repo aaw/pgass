@@ -1131,6 +1131,44 @@ TEST(GroundTest, ArithmeticInComparison) {
             "0\n");
 }
 
+TEST(GroundTest, ArithmeticLiteralWaitsForTheLiteralThatBindsIt) {
+  // 'q(X+1)' binds nothing: it evaluates X + 1 and compares. So the join has
+  // to match q2(X) first, whatever order the two stand in.
+  auto out = ground_source("q(4). q2(3). p(X) :- q(X + 1), q2(X).");
+  ASSERT_OK(out);
+  EXPECT_THAT(*out, HasSubstr("p(3)"));
+}
+
+TEST(GroundTest, ArithmeticArgumentWaitsForOneThatBindsInTheSameLiteral) {
+  // The second argument binds X and the first reads it, so matching takes the
+  // arguments out of order: X is 3, and the stored 4 is the X + 1.
+  auto out = ground_source("q(4,3). q(9,3). p(X) :- q(X + 1, X).");
+  ASSERT_OK(out);
+  EXPECT_THAT(*out, HasSubstr("p(3)"));
+  // q(9,3) asks for 3 + 1 to be 9, which it is not.
+  EXPECT_THAT(*out, Not(HasSubstr("p(9)")));
+}
+
+TEST(GroundTest, ArithmeticLiteralWaitsForAnAssignment) {
+  // Nothing the join matches binds X. The assignment does, and it stands on
+  // its own, so it is made before the join rather than after it.
+  auto out = ground_source("q(3). p(X) :- q(X + 1), X = 2.");
+  ASSERT_OK(out);
+  EXPECT_THAT(*out, HasSubstr("p(2)"));
+}
+
+TEST(GroundTest, RecursiveArithmeticLiteralWaitsInTheDeltaPass) {
+  // equal/1 is recursive, so a derivation pass reads the atoms the pass before
+  // it derived at 'equal(N+1)' and joins the rest against those. That literal
+  // still cannot bind N, so target(P, N) goes first even there.
+  auto out = ground_source(R"(
+    target(a,3). equal(4).
+    equal(N) :- target(P, N), equal(N + 1).
+  )");
+  ASSERT_OK(out);
+  EXPECT_THAT(*out, HasSubstr("equal(3)"));
+}
+
 TEST(GroundTest, MultiplicationEvaluatesBeforeAddition) {
   auto out = ground_source("p(1). q(2 + X * 3) :- p(X).");
   ASSERT_OK(out);

@@ -422,18 +422,51 @@ absl::Status args_can_match(const ClassicalLiteral& literal,
   return absl::OkStatus();
 }
 
+// Whether `term` holds arithmetic anywhere, e.g. the 'f(X+1)' of 'p(f(X+1))'.
+// Matching such a term evaluates that part rather than binding it.
+bool holds_arithmetic(const Term& term) {
+  switch (term.kind) {
+    case Term::TermOperationKind:
+    case Term::NegatedTermKind:
+      return true;
+    case Term::AtomKind: {
+      const Atom& atom = static_cast<const Atom&>(term);
+      if (atom.args == nullptr) return false;
+      for (const auto& arg : *atom.args) {
+        if (holds_arithmetic(*arg)) return true;
+      }
+      return false;
+    }
+    case Term::AnonymousVariableKind:
+    case Term::VariableKind:
+    case Term::NumberKind:
+    case Term::StringKind:
+      return false;
+  }
+  return false;
+}
+
 // Tries to match `literal`'s arguments against a stored tuple, extending
 // `binding` with any variables the match binds and recording them in `trail`.
 // `tuple` has one value per argument: the store groups atoms by name and arity,
 // so every tuple stored under the literal's predicate has the literal's arity.
+//
+// The arguments that bind go first, whatever order they stand in, because the
+// arithmetic ones can only be evaluated once the variables they read have
+// values: matching 'q(X+1, X)' against a stored q(4, 3) takes the X from the
+// second argument and only then works out whether X + 1 is the 4.
 absl::StatusOr<bool> match_args(const ClassicalLiteral& literal,
                                 const Tuple& tuple, Binding& binding,
                                 BindingTrail& trail, Symbols& syms) {
   size_t n = literal.args ? literal.args->size() : 0;
-  for (size_t k = 0; k < n; ++k) {
-    ASSIGN_OR_RETURN(bool ok, match_term(*(*literal.args)[k], tuple[k], binding,
-                                         trail, syms));
-    if (!ok) return false;
+  for (bool arithmetic : {false, true}) {
+    for (size_t k = 0; k < n; ++k) {
+      const Term& arg = *(*literal.args)[k];
+      if (holds_arithmetic(arg) != arithmetic) continue;
+      ASSIGN_OR_RETURN(bool ok,
+                       match_term(arg, tuple[k], binding, trail, syms));
+      if (!ok) return false;
+    }
   }
   return true;
 }
@@ -840,19 +873,131 @@ AtomRange scan_range(const PredData& data, std::optional<size_t> delta_position,
   return {.begin = 0, .end = data.size_before_pass};
 }
 
-// The order a join visits a body's positive literals in. The delta literal goes
-// first: it reads only what the previous pass derived, which is usually a small
-// fraction of the store, so starting there keeps the partial instances the join
-// carries around few. Left to right, the join would instead start by building
-// one partial instance per atom of the first literal and only then discover
-// that the delta has nothing to join them with.
-std::vector<size_t> join_order(size_t count,
+// The variables of one positive literal, split by what matching does with
+// them. Matching binds a variable standing as a whole argument or inside a
+// function term, e.g. the X and Y of 'q(X, f(Y))'. A variable under arithmetic
+// is read instead of bound: matching 'q(X+1)' evaluates X + 1 and compares the
+// result, so something else has to bind X before the literal runs.
+struct LiteralVars {
+  absl::flat_hash_set<size_t> binds;
+  absl::flat_hash_set<size_t> needs;
+};
+
+void collect_literal_vars(const Term& term, bool under_arithmetic,
+                          const Binding& binding, LiteralVars& out) {
+  switch (term.kind) {
+    case Term::VariableKind: {
+      const size_t slot = binding.slot_of(static_cast<const Variable&>(term));
+      if (under_arithmetic) {
+        out.needs.insert(slot);
+      } else {
+        out.binds.insert(slot);
+      }
+      return;
+    }
+    case Term::AtomKind: {
+      const Atom& atom = static_cast<const Atom&>(term);
+      if (atom.args == nullptr) return;
+      for (const auto& arg : *atom.args) {
+        collect_literal_vars(*arg, under_arithmetic, binding, out);
+      }
+      return;
+    }
+    case Term::NegatedTermKind:
+      collect_literal_vars(*static_cast<const NegatedTerm&>(term).term,
+                           /*under_arithmetic=*/true, binding, out);
+      return;
+    case Term::TermOperationKind: {
+      const TermOperation& operation = static_cast<const TermOperation&>(term);
+      collect_literal_vars(*operation.left, /*under_arithmetic=*/true, binding,
+                           out);
+      collect_literal_vars(*operation.right, /*under_arithmetic=*/true, binding,
+                           out);
+      return;
+    }
+    case Term::AnonymousVariableKind:
+    case Term::NumberKind:
+    case Term::StringKind:
+      return;
+  }
+}
+
+LiteralVars literal_vars(const ClassicalLiteral& literal,
+                         const Binding& binding) {
+  LiteralVars vars;
+  if (literal.args == nullptr) return vars;
+  for (const auto& arg : *literal.args) {
+    collect_literal_vars(*arg, /*under_arithmetic=*/false, binding, vars);
+  }
+  return vars;
+}
+
+// The order a join visits a body's positive literals in.
+//
+// A literal waits for the variables its arithmetic reads, so
+// "p(X) :- q(X+1), r(X)." matches r(X) first and only then evaluates X + 1.
+// Source order would reach q(X+1) with X still unbound, which is not a term
+// grounding can evaluate.
+//
+// Among the literals whose turn it could be, the delta literal goes first: it
+// reads only what the previous pass derived, which is usually a small fraction
+// of the store, so starting there keeps the partial instances the join carries
+// around few. Left to right, the join would instead build one partial instance
+// per atom of the first literal and only then discover that the delta has
+// nothing to join them with.
+std::vector<size_t> join_order(const BodyParts& parts, const Binding& binding,
                                std::optional<size_t> delta_position) {
+  const size_t count = parts.positive.size();
+  std::vector<LiteralVars> vars;
+  vars.reserve(count);
+  absl::flat_hash_set<size_t> bound;
+  for (const ClassicalLiteral* literal : parts.positive) {
+    vars.push_back(literal_vars(*literal, binding));
+    for (size_t slot : vars.back().binds) {
+      if (binding.at(slot) != kNoSym) bound.insert(slot);
+    }
+    for (size_t slot : vars.back().needs) {
+      if (binding.at(slot) != kNoSym) bound.insert(slot);
+    }
+  }
+
+  // A literal's turn has come once every variable its arithmetic reads is
+  // bound, either by an earlier literal or by the literal itself, e.g. the X
+  // of 'q(X+1, X)', which match_args binds from the argument that can bind it.
+  auto is_ready = [&](size_t k) {
+    for (size_t slot : vars[k].needs) {
+      if (!bound.contains(slot) && !vars[k].binds.contains(slot)) return false;
+    }
+    return true;
+  };
+
   std::vector<size_t> order;
   order.reserve(count);
-  if (delta_position.has_value()) order.push_back(*delta_position);
-  for (size_t k = 0; k < count; ++k) {
-    if (!delta_position.has_value() || k != *delta_position) order.push_back(k);
+  std::vector<bool> taken(count, false);
+  while (order.size() < count) {
+    std::optional<size_t> pick;
+    if (delta_position.has_value() && !taken[*delta_position] &&
+        is_ready(*delta_position)) {
+      pick = *delta_position;
+    }
+    for (size_t k = 0; !pick.has_value() && k < count; ++k) {
+      if (!taken[k] && is_ready(k)) pick = k;
+    }
+    if (!pick.has_value()) {
+      // Nothing is ready, which means a variable is bound only by an
+      // assignment, e.g. the X of "p(X) :- q(X+1), X = 2.". Assignments are
+      // settled after the join, so take the literals as they come and let
+      // matching report the unbound variable.
+      for (size_t k = 0; k < count; ++k) {
+        if (!taken[k]) {
+          pick = k;
+          break;
+        }
+      }
+    }
+    taken[*pick] = true;
+    order.push_back(*pick);
+    bound.insert(vars[*pick].binds.begin(), vars[*pick].binds.end());
   }
   return order;
 }
@@ -1137,13 +1282,25 @@ absl::StatusOr<std::optional<std::string>> find_instances(
     const BodyParts& parts, const Store& store, Symbols& syms, Binding seed,
     const InstanceFn& emit,
     std::optional<size_t> delta_position = std::nullopt) {
+  Instance instance{.binding = std::move(seed), .matched = {}};
+
+  // The assignments that stand on their own, e.g. the 'X = 2' of
+  // "p(X) :- q(X+1), X = 2.", are made before the join, so that a literal
+  // reading X has it. The ones waiting on a variable the join binds are left
+  // to finish(). An assignment made here holds for every instance the join
+  // finds, so nothing undoes it.
+  BindingTrail trail(instance.binding);
+  absl::Status bound = bind_assignments(parts, instance.binding, trail, syms);
+  if (has_no_value(bound)) return std::optional(std::string(bound.message()));
+  RETURN_IF_ERROR(bound);
+  trail.keep();
+
   Join join{.parts = parts,
             .store = store,
             .syms = syms,
-            .order = join_order(parts.positive.size(), delta_position),
+            .order = join_order(parts, instance.binding, delta_position),
             .delta_position = delta_position};
   join.steps.resize(join.order.size());
-  Instance instance{.binding = std::move(seed), .matched = {}};
   RETURN_IF_ERROR(extend(join, 0, instance, emit));
   return join.no_value_seen;
 }
