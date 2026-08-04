@@ -191,7 +191,7 @@ target_link_libraries(solve_lib
     cvc5::cvc5
 )
 
-add_executable(pgass src/pgass.cc)
+add_executable(pgass src/pgass.cc src/platform.cc)
 target_compile_options(pgass PRIVATE ${PGASS_WARNINGS})
 target_link_libraries(pgass
   PRIVATE

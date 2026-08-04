@@ -22,6 +22,7 @@
 #include "parse.h"
 #include "safety.h"
 #include "solve.h"
+#include "platform.h"
 
 ABSL_FLAG(bool, format, false, "Format the program and print to stdout");
 ABSL_FLAG(bool, ground, false,
@@ -154,6 +155,7 @@ int report(const aspif::Program& prog, std::string_view encode,
 }  // namespace
 
 int main(int argc, char** argv) {
+  raise_stack_limit();
   absl::SetProgramUsageMessage(
       "Parse, ground and solve an ASP program.\n"
       "Usage: pgass [--format] [--ground] [--solve] [source_file ...]\n"
