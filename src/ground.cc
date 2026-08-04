@@ -547,6 +547,10 @@ struct RuleView {
   // settling an aggregate needs a store that is complete for what the aggregate
   // reads, and its own component is by definition still being derived.
   bool aggregate_in_own_component = false;
+  // Whether every 'not' literal of the body reads an earlier component, so
+  // that an atom missing from the store is missing for good. Such a rule can
+  // derive facts. See mark_settled_negation().
+  bool negation_is_settled = true;
   // Numbers every variable the rule mentions, head and body alike, including
   // the ones inside its aggregates. A rule's bindings all index by these.
   VarSlots slots;
@@ -606,17 +610,27 @@ absl::StatusOr<std::vector<RuleView>> make_rule_views(const Program& prog) {
   return rules;
 }
 
-// The positive predicate dependency graph with the predicates of each
-// disjunctive head joined into a cycle, so that they all land in one strongly
-// connected component.
+// The predicate dependency graph with the predicates of each disjunctive head
+// joined into a cycle, so that they all land in one strongly connected
+// component.
 //
 // Deriving runs one component at a time, in order, and one instance of
 // 'p(X) | q(X) :- dom(X).' derives an atom for p and one for q. Were p and q in
 // different components, the rule would run in the later one and add atoms to a
 // component already finished. The rules reading those atoms would never see
 // them.
+//
+// Negative edges count too, so a 'not q' reads a q that is already complete.
+// That is what orders last/1 before s/1 in 's(X + 1) :- s(X), not last(X).',
+// which needs a complete last/1 to stop counting upwards. Unstratified
+// negation makes a cycle of these edges, putting the predicates in one
+// component that no order could complete first.
 std::vector<std::vector<int>> derivation_succ(const PredGraph& graph) {
   std::vector<std::vector<int>> succ = graph.pos_succ;
+  for (size_t i = 0; i < graph.neg_succ.size(); ++i) {
+    succ[i].insert(succ[i].end(), graph.neg_succ[i].begin(),
+                   graph.neg_succ[i].end());
+  }
   for (const std::vector<int>& group : graph.head_groups) {
     for (size_t i = 0; i < group.size(); ++i) {
       succ[group[i]].push_back(group[(i + 1) % group.size()]);
@@ -643,6 +657,13 @@ bool reads_component(const Aggregate& aggregate, const PredGraph& graph,
         });
   }
   return reads;
+}
+
+// The component a rule derives into. Every literal of a disjunctive head sits
+// in the one component, so the first speaks for all. See derivation_succ().
+int head_component(const PredGraph& graph, const std::vector<int>& component,
+                   const RuleView& rule) {
+  return component[graph.id_of.at(pred_key(*rule.head[0]))];
 }
 
 // Marks the rules whose aggregates read a predicate from the rule's own
@@ -673,25 +694,41 @@ void mark_aggregates_in_own_component(const PredGraph& graph,
                                       std::vector<RuleView>& rules) {
   for (RuleView& rule : rules) {
     if (rule.head.empty()) continue;
-    const int head_component =
-        component[graph.id_of.at(pred_key(*rule.head[0]))];
+    const int own = head_component(graph, component, rule);
     for (const Aggregate* aggregate : rule.parts.aggregates) {
-      if (!reads_component(*aggregate, graph, component, head_component)) {
-        continue;
+      if (reads_component(*aggregate, graph, component, own)) {
+        rule.aggregate_in_own_component = true;
+        break;
       }
-      rule.aggregate_in_own_component = true;
-      break;
     }
   }
 }
 
-// Buckets rules by component[id_of[head predicate]], with the constraints,
-// which have no head and so no component, in one extra bucket at the end.
-// `rules` owns the RuleViews and must outlive the buckets.
+// Marks the rules whose 'not' literals all read earlier components, which is
+// what lets such a rule derive facts.
 //
-// `component` has to come from derivation_succ(), which is what puts every
-// predicate of a disjunctive head in the one component this picks by the head's
-// first literal.
+// Components derive in order, so an earlier one has every atom it will ever
+// get. An atom missing from it is missing from every answer set, and the 'not'
+// over it holds in all of them. Unstratified negation falls outside this, by
+// putting the 'not' in the rule's own component.
+void mark_settled_negation(const PredGraph& graph,
+                           const std::vector<int>& component,
+                           std::vector<RuleView>& rules) {
+  for (RuleView& rule : rules) {
+    if (rule.head.empty()) continue;
+    const int own = head_component(graph, component, rule);
+    for (const ClassicalLiteral* literal : rule.parts.negative) {
+      if (component[graph.id_of.at(pred_key(*literal))] >= own) {
+        rule.negation_is_settled = false;
+        break;
+      }
+    }
+  }
+}
+
+// Buckets rules by the component they derive into, with the constraints, which
+// have no head and so no component, in one extra bucket at the end. `rules`
+// owns the RuleViews and must outlive the buckets.
 std::vector<std::vector<const RuleView*>> bucket_rule_views(
     const PredGraph& graph, const std::vector<int>& component,
     const std::vector<RuleView>& rules) {
@@ -708,11 +745,11 @@ std::vector<std::vector<const RuleView*>> bucket_rule_views(
       constraints.push_back(&rv);
       continue;
     }
-    const int head_component = component[graph.id_of.at(pred_key(*rv.head[0]))];
+    const int own = head_component(graph, component, rv);
     for (const ClassicalLiteral* literal : rv.head) {
-      DCHECK_EQ(component[graph.id_of.at(pred_key(*literal))], head_component);
+      DCHECK_EQ(component[graph.id_of.at(pred_key(*literal))], own);
     }
-    bucket[head_component].push_back(&rv);
+    bucket[own].push_back(&rv);
   }
   return bucket;
 }
@@ -1360,6 +1397,44 @@ std::vector<aspif::Lit> without_facts(const std::vector<aspif::Lit>& matched,
   return lits;
 }
 
+// What the 'not' literals of a body come to against the store as it stands.
+enum class Negation {
+  // One of them is over a fact, so no answer set satisfies the body. An atom
+  // stays a fact once it is one, so a later pass never takes this back.
+  kFalse,
+  // One of them is over an atom the store holds but has not made a fact. The
+  // solver decides that one.
+  kOpen,
+  // None of them matches an atom the store holds. Whether that is final
+  // depends on the rule: see RuleView::negation_is_settled.
+  kTrue,
+};
+
+// Reads the 'not' literals of a body, which is what gives them their say in
+// which atoms can exist. `lits`, when given, collects the negation of every
+// atom still open, which is what an emitted rule body needs. A null `lits`
+// asks for the verdict alone and stops at the first fact.
+//
+// A literal that cannot match, e.g. 'not p(X / 0)', comes back kNoValue: the
+// rule instance does not exist at all, rather than existing without it.
+absl::StatusOr<Negation> negation_value(
+    const std::vector<const ClassicalLiteral*>& negative,
+    const Binding& binding, const Store& store, Symbols& syms,
+    std::vector<aspif::Lit>* lits = nullptr) {
+  Negation value = Negation::kTrue;
+  for (const ClassicalLiteral* literal : negative) {
+    RETURN_IF_ERROR(args_can_match(*literal, binding, syms));
+    ASSIGN_OR_RETURN(std::vector<aspif::Atom> matched,
+                     matching_atoms(*literal, binding, store, syms));
+    for (aspif::Atom atom : matched) {
+      if (store.is_fact(atom)) return Negation::kFalse;
+      value = Negation::kOpen;
+      if (lits != nullptr) lits->push_back(-atom);
+    }
+  }
+  return value;
+}
+
 // Negates each 'not p(...)' literal under `binding` into the literals the
 // emitted rule body needs. An atom the store never derived can never be true,
 // so it is dropped as trivially satisfied instead of being negated.
@@ -1369,25 +1444,14 @@ std::vector<aspif::Lit> without_facts(const std::vector<aspif::Lit>& matched,
 // negated.
 //
 // Returns nullopt when the body these literals belong to can hold in no answer
-// set, which is either of:
-//   - a 'not' over a fact, which no answer set can satisfy.
-//
-// A literal that cannot match, e.g. 'not p(X / 0)', comes back kNoValue
-// instead: the rule instance does not exist at all, rather than existing
-// without this literal.
+// set, which is a 'not' over a fact.
 absl::StatusOr<std::optional<std::vector<aspif::Lit>>> negative_lits(
     const std::vector<const ClassicalLiteral*>& negative,
     const Binding& binding, const Store& store, Symbols& syms) {
   std::vector<aspif::Lit> lits;
-  for (const ClassicalLiteral* literal : negative) {
-    RETURN_IF_ERROR(args_can_match(*literal, binding, syms));
-    ASSIGN_OR_RETURN(std::vector<aspif::Atom> matched,
-                     matching_atoms(*literal, binding, store, syms));
-    for (aspif::Atom atom : matched) {
-      if (store.is_fact(atom)) return std::nullopt;
-      lits.push_back(-atom);
-    }
-  }
+  ASSIGN_OR_RETURN(const Negation value,
+                   negation_value(negative, binding, store, syms, &lits));
+  if (value == Negation::kFalse) return std::nullopt;
   return lits;
 }
 
@@ -1538,10 +1602,9 @@ bool elements_use_negation(const Aggregate& agg) {
 //
 // Element conditions must be free of 'not' for any of this to hold. safety.cc
 // keeps an aggregate's un-negated predicates out of the rule's own component,
-// so their atoms and facts are settled before this rule is ever ground, but it
-// leaves negated ones alone: 'not q(X)' inside an element can point at a
-// predicate that has no atoms yet, which would read here as a support that
-// nothing can take away.
+// so their atoms and facts are settled before this rule is ever ground. A
+// negated one can still share that component, which unstratified negation
+// brings about, and would read here as a support that nothing can take away.
 bool set_is_settled(const Aggregate& agg, const std::vector<AggTuple>& tuples) {
   if (elements_use_negation(agg)) return false;
   for (const AggTuple& tuple : tuples) {
@@ -2149,12 +2212,11 @@ absl::StatusOr<std::optional<bool>> settle_aggregate(const Aggregate& agg,
                                                      const Binding& binding,
                                                      const Store& store,
                                                      Symbols& syms) {
-  // An aggregate under 'not' is the too-early case. Its element predicates
-  // reach the rule's head through negative dependency edges only, and those
-  // don't order components, so 'q :- not #count{ X : p(X) } >= 1.' can have q's
-  // component derived before p has a single atom. Counting there would find an
-  // empty set and read the negation as satisfied. emit_rules() runs once every
-  // component has derived and settles these safely.
+  // An aggregate under 'not' is the too-early case. Its element predicates can
+  // share the rule's own component, which unstratified negation brings about,
+  // so 'q :- not #count{ X : p(X) } >= 1.' can be counted while p is still
+  // being derived, over a set short of its final tuples. emit_rules() runs
+  // once every component has derived and settles these safely.
   if (agg.naf) return std::nullopt;
   // A 'not' inside an element points at a predicate the same way; see
   // settled_agg_value().
@@ -2396,20 +2458,6 @@ absl::Status agg_bounds_have_values(
   return absl::OkStatus();
 }
 
-// Checks the body parts derive_atoms() otherwise ignores: the arguments of
-// every 'not' literal and each aggregate's bounds. A term with no value there
-// means the rule has no ground instance under this binding, so its head atom
-// must not be derived either, e.g. "q(X) :- p(X), not r(4 / X)." derives no
-// q(0), because 'not r(4 / 0)' cannot be ground.
-absl::Status ignored_parts_are_well_formed(const BodyParts& parts,
-                                           const Binding& binding,
-                                           Symbols& syms) {
-  for (const ClassicalLiteral* literal : parts.negative) {
-    RETURN_IF_ERROR(args_can_match(*literal, binding, syms));
-  }
-  return agg_bounds_have_values(parts.aggregates, binding, syms);
-}
-
 // What a derivation pass changed, which is what decides whether another pass
 // is worth running and what it has to look at.
 struct Changes {
@@ -2442,8 +2490,9 @@ absl::StatusOr<bool> aggregates_settle_true(
 // An instance whose positive literals all matched facts derives its head atom
 // as a fact in turn: every one of those atoms holds in every answer set, so the
 // body does, so the head does. That is only sound for a rule whose body has
-// nothing else in it that can fail. A 'not q' is exactly such a thing, and this
-// phase ignores it (see derive_atoms), so a rule carrying one derives no facts.
+// nothing else in it that can fail. A 'not q' is such a thing unless grounding
+// settles it, so an instance derives a fact only when its negation came out
+// kTrue on a rule where that answer is final.
 // An aggregate is one only sometimes, so AggCache::settle() is asked about it,
 // last, once the cheap reasons not to bother have been ruled out.
 //
@@ -2462,17 +2511,25 @@ absl::Status derive_from_rule(const RuleView& rule,
                               std::optional<size_t> delta_position,
                               Store& store, Symbols& syms, AggCache& agg_cache,
                               aspif::Program& aspif_prog, Changes& changes) {
-  const bool derives_facts = rule.parts.negative.empty() &&
-                             rule.head.size() == 1 &&
-                             !rule.aggregate_in_own_component;
+  const bool derives_facts =
+      rule.negation_is_settled && rule.head.size() == 1 &&
+      !rule.aggregate_in_own_component;
   // Deriving runs a rule once per pass and per positive literal, so warning
   // here would repeat the same line. emit_rules() runs each rule once and
   // warns there.
   return find_instances(
              rule.parts, store, syms, Binding(rule.slots),
              [&](const Instance& instance) -> absl::Status {
-               RETURN_IF_ERROR(ignored_parts_are_well_formed(
-                   rule.parts, instance.binding, syms));
+               // The parts the join itself does not check. A term with no value
+               // in either means the rule has no ground instance under this
+               // binding, so its head atom is not derived either. That is why
+               // "q(X) :- p(X), not r(4 / X)." derives no q(0).
+               RETURN_IF_ERROR(agg_bounds_have_values(
+                   rule.parts.aggregates, instance.binding, syms));
+               ASSIGN_OR_RETURN(const Negation negation,
+                                negation_value(rule.parts.negative,
+                                               instance.binding, store, syms));
+               if (negation == Negation::kFalse) return absl::OkStatus();
 
                // A head term with no value means this instance has no ground
                // rule at all, so none of its head atoms is derived.
@@ -2497,7 +2554,7 @@ absl::Status derive_from_rule(const RuleView& rule,
                  RETURN_IF_ERROR(store.check_size(key));
                }
 
-               if (derives_facts &&
+               if (derives_facts && negation == Negation::kTrue &&
                    matched_all_facts(instance.matched, store)) {
                  ASSIGN_OR_RETURN(bool aggregates_hold,
                                   aggregates_settle_true(
@@ -2520,10 +2577,11 @@ absl::Status derive_from_rule(const RuleView& rule,
 // pass adds nothing new. Each new atom gets its ASPIF number from
 // `aspif_prog`.
 //
-// 'not' literals are ignored here. Given "p :- q, not r." with q and r both
-// collected, p is collected too. That is deliberate: this phase only decides
-// which atoms can exist at all; emit_rules() emits the rule with the 'not r'
-// still in it, and the solver decides whether p is true.
+// A 'not' literal only settles a body here when it is over a fact. See
+// negation_value(). Given "p :- q, not r." with r collected but not a fact, p
+// is collected too, since r is still open. That is deliberate. This phase only
+// decides which atoms can exist at all. emit_rules() emits the rule with the
+// 'not r' still in it, and the solver decides whether p is true.
 //
 // Aggregates are ignored the same way: a rule's aggregates are never checked
 // here, so a rule like 'p :- dom(X), #count{Y : q(X,Y)} >= 2.' derives p(x)
@@ -2796,16 +2854,16 @@ absl::StatusOr<aspif::Program> ground(const Program& prog,
       strongly_connected_components(derivation_succ(graph));
   ASSIGN_OR_RETURN(std::vector<RuleView> rules, make_rule_views(prog));
   mark_aggregates_in_own_component(graph, component, rules);
+  mark_settled_negation(graph, component, rules);
   std::vector<std::vector<const RuleView*>> rules_by_component =
       bucket_rule_views(graph, component, rules);
 
   // Two passes: derive every component, then emit every component. A
-  // component's positive body literals depend only on earlier components,
-  // so deriving in ascending order gets those right. Negation is different:
-  // a 'not q' can point at a later component, since negation edges don't
-  // constrain component order. So by the time any component is emitted, q's
-  // final atom set already exists, and emit_rules can correctly decide
-  // whether q is derivable.
+  // component's body literals, positive and negative alike, depend only on
+  // earlier components, so deriving in ascending order gets those right.
+  // Unstratified negation is the exception, pointing a 'not q' inside the
+  // rule's own component. Emitting only once every component has derived
+  // covers that too, since q's final atoms exist by then.
   //
   // The last bucket holds the constraints, which derive nothing and so are
   // emitted after every atom exists.

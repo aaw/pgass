@@ -686,8 +686,9 @@ TEST(SolveTest, WeakConstraintOnAnUnsatisfiableProgram) {
 TEST(SolveTest, UnviolatedWeakConstraintCostsZero) {
   auto out = solve_source(R"(
     p.
+    { q }.
+    :- q.
     :~ q. [1@0]
-    q :- p, not p.
   )");
   ASSERT_OK(out);
   EXPECT_THAT(*out, UnorderedElementsAre("p | cost 0"));

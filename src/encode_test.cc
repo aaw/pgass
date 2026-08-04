@@ -101,11 +101,11 @@ TEST(EncodeTest, TranslatesAChoiceOfTwoAtoms) {
   EXPECT_THAT(
       commands(*script),
       ElementsAre("(set-option :produce-models true)", "(set-logic QF_IDL)",
-                  "(declare-const b Bool)", "(declare-const a Bool)",
+                  "(declare-const a Bool)", "(declare-const b Bool)",
                   // Every rule is satisfied.
-                  "(assert (=> (not a) b))", "(assert (=> (not b) a))",
+                  "(assert (=> (not b) a))", "(assert (=> (not a) b))",
                   // Every atom that holds is supported.
-                  "(assert (=> b (not a)))", "(assert (=> a (not b)))",
+                  "(assert (=> a (not b)))", "(assert (=> b (not a)))",
                   "(check-sat)", "(get-model)"));
   // Every option says why it is set, and a section with nothing in it is left
   // out: this program has neither a ranking nor a query.
@@ -520,7 +520,8 @@ TEST(EncodeTest, TheModelOfTheScriptIsTheAnswerSet) {
   auto script = encode_source(R"(
     p.
     q :- p.
-    r :- not p.
+    { r }.
+    :- r.
   )");
   ASSERT_OK(script);
   auto output = run_script(*script);

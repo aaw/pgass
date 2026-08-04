@@ -84,12 +84,12 @@ TEST(GroundTest, NotOverAnonymousVariableNegatesEveryMatchingAtom) {
     q :- not r(_, 2).
   )");
   ASSERT_OK(out);
-  // The output statements below number r(1,2), r(3,2) and r(4,5) as atoms 2, 4
-  // and 6, so q rests on 'not 2' and 'not 4'. r(4,5) does not match.
-  EXPECT_THAT(*out, HasSubstr("1 0 1 1 0 2 -2 -4\n"));
-  EXPECT_THAT(*out, HasSubstr("4 6 r(1,2) 1 2\n"));
-  EXPECT_THAT(*out, HasSubstr("4 6 r(3,2) 1 4\n"));
-  EXPECT_THAT(*out, HasSubstr("4 6 r(4,5) 1 6\n"));
+  // The output statements below number r(1,2), r(3,2) and r(4,5) as atoms 1, 3
+  // and 5, so q rests on 'not 1' and 'not 3'. r(4,5) does not match.
+  EXPECT_THAT(*out, HasSubstr("1 0 1 7 0 2 -1 -3\n"));
+  EXPECT_THAT(*out, HasSubstr("4 6 r(1,2) 1 1\n"));
+  EXPECT_THAT(*out, HasSubstr("4 6 r(3,2) 1 3\n"));
+  EXPECT_THAT(*out, HasSubstr("4 6 r(4,5) 1 5\n"));
 }
 
 TEST(GroundTest, NotOverAnonymousVariableHoldsWhenNothingMatches) {
@@ -97,10 +97,10 @@ TEST(GroundTest, NotOverAnonymousVariableHoldsWhenNothingMatches) {
   ASSERT_OK(out);
   EXPECT_EQ(*out,
             "asp 1 0 0\n"
-            "1 0 1 1 0 0\n"  // nothing to rule out, so q is a fact
-            "1 0 1 2 0 0\n"
-            "4 1 q 1 1\n"
-            "4 6 r(1,3) 1 2\n"
+            "1 0 1 1 0 0\n"
+            "1 0 1 2 0 0\n"  // nothing to rule out, so q is a fact
+            "4 6 r(1,3) 1 1\n"
+            "4 1 q 1 2\n"
             "0\n");
 }
 
@@ -114,9 +114,9 @@ TEST(GroundTest, NotOverAnonymousVariableIsPerBinding) {
     q(X) :- p(X), not r(X, _).
   )");
   ASSERT_OK(out);
-  EXPECT_THAT(*out, HasSubstr("4 6 r(1,a) 1 5\n"));
-  EXPECT_THAT(*out, HasSubstr("1 0 1 3 0 1 -5\n"));  // q(1) :- not r(1,a)
-  EXPECT_THAT(*out, HasSubstr("1 0 1 4 0 0\n"));     // q(2), a fact itself
+  EXPECT_THAT(*out, HasSubstr("4 6 r(1,a) 1 3\n"));
+  EXPECT_THAT(*out, HasSubstr("1 0 1 5 0 1 -3\n"));  // q(1) :- not r(1,a)
+  EXPECT_THAT(*out, HasSubstr("1 0 1 6 0 0\n"));     // q(2), a fact itself
 }
 
 TEST(GroundTest, NotOverAnonymousVariableNestedInAFunctionTerm) {
@@ -126,24 +126,24 @@ TEST(GroundTest, NotOverAnonymousVariableNestedInAFunctionTerm) {
     b :- not p(h(_)).
   )");
   ASSERT_OK(out);
-  EXPECT_THAT(*out, HasSubstr("4 7 p(f(1)) 1 3\n"));
-  // p(f(1)) is a fact, so 'not p(f(1))' can never hold. a keeps its name but
-  // is left with no rule at all, which is how aspif says it is never true.
-  EXPECT_THAT(*out, HasSubstr("4 1 a 1 2\n"));
-  EXPECT_THAT(*out, Not(HasSubstr("1 0 1 2 ")));
-  EXPECT_THAT(*out, HasSubstr("1 0 1 1 0 0\n"));  // nothing matches h(_)
-  EXPECT_THAT(*out, HasSubstr("4 1 b 1 1\n"));
+  EXPECT_THAT(*out, HasSubstr("4 7 p(f(1)) 1 1\n"));
+  // p(f(1)) is a fact, so 'not p(f(1))' can never hold and a is never derived
+  // at all.
+  EXPECT_THAT(*out, Not(HasSubstr(" a ")));
+  EXPECT_THAT(*out, HasSubstr("1 0 1 3 0 0\n"));  // nothing matches h(_)
+  EXPECT_THAT(*out, HasSubstr("4 1 b 1 3\n"));
 }
 
 // An argument with no value at all is different from one matching no stored
 // atom: the rule instance does not exist, so its head is never derived.
 TEST(GroundTest, NotWithAnIllFormedArgumentDropsTheInstance) {
   auto out = ground_source(R"(
-    p(0). p(2). r(2).
+    p(0). p(2). r(1).
     q(X) :- p(X), not r(4 / X).
   )");
   ASSERT_OK(out);
   EXPECT_THAT(*out, Not(HasSubstr(" q(0) ")));
+  // X = 2 gives 'not r(2)', and r(2) was never derived, so q(2) holds.
   EXPECT_THAT(*out, HasSubstr(" q(2) "));
 }
 
@@ -395,16 +395,15 @@ TEST(GroundTest, NegationInsideAnElementLeavesTheAggregateToTheSolver) {
 }
 
 // An aggregate under 'not' is settled when its rule is emitted, by which time
-// every component has derived, but not while atoms are still being derived:
-// its element predicates reach the head through negative edges only, which do
-// not order components. So q comes out with an empty body, but a rule reading
-// q still carries it rather than becoming a fact of its own.
+// every component has derived, but not while atoms are still being derived.
+// So q comes out with an empty body, but a rule reading q still carries it
+// rather than becoming a fact of its own.
 TEST(GroundTest, AnAggregateUnderNotIsSettledOnlyWhenTheRuleIsEmitted) {
   auto out =
       ground_source("p(1). p(2). q :- not #count{ X : p(X) } >= 3. s :- q.");
   ASSERT_OK(out);
-  EXPECT_THAT(*out, HasSubstr("1 0 1 1 0 0\n"));    // q, with nothing left
-  EXPECT_THAT(*out, HasSubstr("1 0 1 2 0 1 1\n"));  // s :- q
+  EXPECT_THAT(*out, HasSubstr("1 0 1 3 0 0\n"));    // q, with nothing left
+  EXPECT_THAT(*out, HasSubstr("1 0 1 4 0 1 3\n"));  // s :- q
 }
 
 TEST(GroundTest, RecursionReachesFixpoint) {
@@ -430,6 +429,57 @@ TEST(GroundTest, RecursionReachesFixpoint) {
             "4 6 r(b,c) 1 4\n"
             "4 6 r(a,c) 1 5\n"
             "0\n");
+}
+
+// A 'not' over an earlier component is settled once that component has
+// derived, so a rule carrying one passes factness on. q/1 is complete and
+// never derived q(2), so 'not q(2)' holds in every answer set and s(1) is as
+// much a fact as p(1). t then settles on that in turn.
+TEST(GroundTest, NotOverACompleteComponentStillDerivesFacts) {
+  auto out = ground_source("p(1). q(2). s(X) :- p(X), not q(X). t :- s(1).");
+  ASSERT_OK(out);
+  // q(2)=1, p(1)=2, s(1)=3, t=4, all of them facts with no rule left.
+  EXPECT_EQ(*out,
+            "asp 1 0 0\n"
+            "1 0 1 1 0 0\n"
+            "1 0 1 2 0 0\n"
+            "1 0 1 3 0 0\n"
+            "1 0 1 4 0 0\n"
+            "4 4 q(2) 1 1\n"
+            "4 4 p(1) 1 2\n"
+            "4 4 s(1) 1 3\n"
+            "4 1 t 1 4\n"
+            "0\n");
+}
+
+// Unstratified negation puts the 'not' inside the rule's own component, where
+// a missing atom may still turn up on a later pass. Neither rule derives a
+// fact, so both keep their bodies and the solver picks between a and b.
+TEST(GroundTest, UnstratifiedNegationDerivesNoFacts) {
+  auto out = ground_source("a :- not b. b :- not a.");
+  ASSERT_OK(out);
+  EXPECT_EQ(*out,
+            "asp 1 0 0\n"
+            "1 0 1 1 0 1 -2\n"
+            "1 0 1 2 0 1 -1\n"
+            "4 1 a 1 1\n"
+            "4 1 b 1 2\n"
+            "0\n");
+}
+
+// s(X + 1) keeps giving this rule a larger X to read, so its only finite
+// grounding is the one the 'not last(X)' cuts off.
+TEST(GroundTest, NotOverAFactStopsARecursionCountingUpwards) {
+  auto out = ground_source(R"(
+    num(1). num(2). num(3).
+    last(X) :- #max{ N : num(N) } = X.
+    s(1).
+    s(X + 1) :- s(X), not last(X).
+  )");
+  ASSERT_OK(out);
+  // last(3) is a fact, so 'not last(3)' can never hold and s stops at s(3).
+  EXPECT_THAT(*out, HasSubstr(" s(3) "));
+  EXPECT_THAT(*out, Not(HasSubstr(" s(4) ")));
 }
 
 TEST(GroundTest, NonRecursiveRuleSeesFullRecursiveFixpoint) {
@@ -468,13 +518,11 @@ TEST(GroundTest, NonRecursiveRuleSeesFullRecursiveFixpoint) {
 }
 
 TEST(GroundTest, NegationAgainstUnrelatedRecursiveComponentSeesDerivedAtom) {
-  // r/2 is its own recursive component and has no positive-dependency link
-  // to p/1 or s/1; s only refers to r through 'not'. r(a, c) only shows up
-  // once the recursion reaches its second pass, so this checks that emission
-  // sees what that pass derived. Everything r rests on is a fact, so r(a, c)
-  // is a fact too, 'not r(a, c)' can never hold, and neither s rule survives.
-  // If rules were ever emitted before r's component had fully run, this would
-  // wrongly look like r(a, c) is underivable and emit the s rules instead.
+  // r/2 is its own recursive component, and s refers to it through 'not'
+  // alone. r(a, c) only shows up once the recursion reaches its second pass,
+  // so this pins down that s's component waits for all of it. Everything r
+  // rests on is a fact, so r(a, c) is a fact too, and 'not r(a, c)' can never
+  // hold.
   auto out = ground_source(R"(
     p(1). p(2).
     e(a, b). e(b, c).
@@ -483,10 +531,9 @@ TEST(GroundTest, NegationAgainstUnrelatedRecursiveComponentSeesDerivedAtom) {
     s(N) :- p(N), not r(a, c).
   )");
   ASSERT_OK(out);
-  // Components derive in topological order before anything is emitted, so e/r
-  // (r's component has no positive edge to p or s) derive before p/s:
-  // e(a,b)=1, e(b,c)=2, r(a,b)=3, r(b,c)=4, r(a,c)=5, p(1)=6, p(2)=7. s(1)=8
-  // and s(2)=9 keep their names but get no rule, so no answer set holds them.
+  // The 'not r(a, c)' puts r's component before s's, so e/r derive first:
+  // e(a,b)=1, e(b,c)=2, r(a,b)=3, r(b,c)=4, r(a,c)=5, p(1)=6, p(2)=7. No s
+  // atom exists at all.
   EXPECT_EQ(*out,
             "asp 1 0 0\n"
             "1 0 1 1 0 0\n"
@@ -503,20 +550,13 @@ TEST(GroundTest, NegationAgainstUnrelatedRecursiveComponentSeesDerivedAtom) {
             "4 6 r(a,c) 1 5\n"
             "4 4 p(1) 1 6\n"
             "4 4 p(2) 1 7\n"
-            "4 4 s(1) 1 8\n"
-            "4 4 s(2) 1 9\n"
             "0\n");
 }
 
-TEST(GroundTest, NegationAgainstLaterComponentSeesDerivedAtom) {
-  // c/2 is defined before q/1 and p/1 in the source, so its component id ends
-  // up *higher* than p's: p's component has no positive edge into c (only
-  // 'not c' references it), while q positively reaches p, pulling p's whole
-  // component earlier in topological order. If grounding ever emits a
-  // component's rules right after deriving that component, instead of
-  // deriving every component first, it would process p before c has any
-  // atoms and wrongly conclude 'not c(x, z)' can never fail, emitting the p
-  // rules instead of dropping them.
+// A 'not' is the only thing tying p to c here, and it is enough to put c's
+// whole recursive component ahead of p's. The positive edges pull the other
+// way, since q reaches p through one.
+TEST(GroundTest, NegationOrdersTheComponentItReads) {
   auto out = ground_source(R"(
     a(x, y). a(y, z).
     c(X, Y) :- a(X, Y).
@@ -525,52 +565,45 @@ TEST(GroundTest, NegationAgainstLaterComponentSeesDerivedAtom) {
     p(N) :- q(N), not c(x, z).
   )");
   ASSERT_OK(out);
-  // q's component (id 0) derives before p's (id 1), which derives before
-  // a/c's (ids 2-3): q(1)=1, q(2)=2, p(1)=3, p(2)=4, a(x,y)=5, a(y,z)=6,
-  // c(x,y)=7, c(y,z)=8, c(x,z)=9. c(x,z) is only derived on c's second pass,
-  // after p has already been derived, but since nothing is emitted until
-  // every component has derived, both p rules see it as the fact it is and
-  // are dropped: p(1) and p(2) are named but have no rule.
+  // q(1)=1, q(2)=2, a(x,y)=3, a(y,z)=4, c(x,y)=5, c(y,z)=6, c(x,z)=7. c(x,z)
+  // is only derived on c's second pass, and by the time p's component runs it
+  // is the fact it is, so both p rules are dropped and no p atom exists.
   EXPECT_EQ(*out,
             "asp 1 0 0\n"
             "1 0 1 1 0 0\n"
             "1 0 1 2 0 0\n"
+            "1 0 1 3 0 0\n"
+            "1 0 1 4 0 0\n"
             "1 0 1 5 0 0\n"
             "1 0 1 6 0 0\n"
             "1 0 1 7 0 0\n"
-            "1 0 1 8 0 0\n"
-            "1 0 1 9 0 0\n"
             "4 4 q(1) 1 1\n"
             "4 4 q(2) 1 2\n"
-            "4 4 p(1) 1 3\n"
-            "4 4 p(2) 1 4\n"
-            "4 6 a(x,y) 1 5\n"
-            "4 6 a(y,z) 1 6\n"
-            "4 6 c(x,y) 1 7\n"
-            "4 6 c(y,z) 1 8\n"
-            "4 6 c(x,z) 1 9\n"
+            "4 6 a(x,y) 1 3\n"
+            "4 6 a(y,z) 1 4\n"
+            "4 6 c(x,y) 1 5\n"
+            "4 6 c(y,z) 1 6\n"
+            "4 6 c(x,z) 1 7\n"
             "0\n");
 }
 
 TEST(GroundTest, NegationOverAFactKillsTheRuleOverAnUnderivableAtomGoesAway) {
   auto out = ground_source("p(1). p(2). q(1). s(X) :- p(X), not q(X).");
   ASSERT_OK(out);
-  // q/1 has no positive-dependency link to p/1 or s/1, so its singleton
-  // component derives before p's: q(1)=1, p(1)=2, p(2)=3, s(1)=4, s(2)=5.
-  // q(1) is a fact, so 'not q(1)' can never hold and s(1) gets no rule at
-  // all. q(2) is underivable, so 'not q(2)' is dropped as satisfied, leaving
-  // 's(2) :- p(2).', and p(2) is a fact, so s(2) is one too.
+  // The 'not q(X)' puts q's component before s's: q(1)=1, p(1)=2, p(2)=3,
+  // s(2)=4. q(1) is a fact, so 'not q(1)' can never hold and s(1) is never
+  // derived. q(2) is underivable, so 'not q(2)' is dropped as satisfied,
+  // leaving 's(2) :- p(2).', and p(2) is a fact, so s(2) is one too.
   EXPECT_EQ(*out,
             "asp 1 0 0\n"
             "1 0 1 1 0 0\n"
             "1 0 1 2 0 0\n"
             "1 0 1 3 0 0\n"
-            "1 0 1 5 0 0\n"
+            "1 0 1 4 0 0\n"
             "4 4 q(1) 1 1\n"
             "4 4 p(1) 1 2\n"
             "4 4 p(2) 1 3\n"
-            "4 4 s(1) 1 4\n"
-            "4 4 s(2) 1 5\n"
+            "4 4 s(2) 1 4\n"
             "0\n");
 }
 
@@ -579,22 +612,22 @@ TEST(GroundTest, NegationOverAFactKillsTheRuleOverAnUnderivableAtomGoesAway) {
 TEST(GroundTest, NegationKeptOverAnAtomThatIsOnlyPossible) {
   auto out = ground_source("{ q(1) }. p(1). p(2). s(X) :- p(X), not q(X).");
   ASSERT_OK(out);
-  // p(1)=1, p(2)=2, s(1)=3, s(2)=4, and the choice's disjunction
-  // 'q(1) | _cr0.' over q(1)=5 and _cr0=6, one of which has to hold.
+  // p(1)=1, p(2)=2, then the choice's disjunction 'q(1) | _cr0.' over q(1)=3
+  // and _cr0=4, one of which has to hold, then s(1)=5 and s(2)=6.
   // 's(1) :- p(1), not q(1).' keeps the negation and loses the fact p(1); s(2)
   // has nothing to rule out, since q(2) is underivable, so it is a fact.
   EXPECT_EQ(*out,
             "asp 1 0 0\n"
             "1 0 1 1 0 0\n"
             "1 0 1 2 0 0\n"
-            "1 0 1 3 0 1 -5\n"
-            "1 0 1 4 0 0\n"
-            "1 0 2 5 6 0 0\n"
+            "1 0 2 3 4 0 0\n"
+            "1 0 1 5 0 1 -3\n"
+            "1 0 1 6 0 0\n"
             "4 4 p(1) 1 1\n"
             "4 4 p(2) 1 2\n"
-            "4 4 s(1) 1 3\n"
-            "4 4 s(2) 1 4\n"
-            "4 4 q(1) 1 5\n"
+            "4 4 q(1) 1 3\n"
+            "4 4 s(1) 1 5\n"
+            "4 4 s(2) 1 6\n"
             "0\n");
 }
 
@@ -648,15 +681,12 @@ TEST(GroundTest, ConstraintHasNoHead) {
 TEST(GroundTest, ZeroArityAtoms) {
   auto out = ground_source("p. q :- not p.");
   ASSERT_OK(out);
-  // p and q are each singleton components with no positive edge between
-  // them ('not p' doesn't count), so q's component happens to derive first:
-  // q=1, p=2. p is a fact, so 'not p' can never hold and q keeps its name but
-  // gets no rule.
+  // The 'not p' puts p's component first, so p=1. p is a fact, so 'not p' can
+  // never hold and q is never derived.
   EXPECT_EQ(*out,
             "asp 1 0 0\n"
-            "1 0 1 2 0 0\n"
-            "4 1 q 1 1\n"
-            "4 1 p 1 2\n"
+            "1 0 1 1 0 0\n"
+            "4 1 p 1 1\n"
             "0\n");
 }
 
@@ -1013,7 +1043,7 @@ TEST(GroundTest, NotMinAggregate) {
   // resting on 'not p(1)'.
   auto out = ground_source("{ p(1) }. q :- not #min{ X : p(X) } < 3.");
   ASSERT_OK(out);
-  EXPECT_THAT(*out, HasSubstr("1 0 1 1 0 1 -2\n"));
+  EXPECT_THAT(*out, HasSubstr("1 0 1 3 0 1 -1\n"));
 }
 
 TEST(GroundTest, NonNumericBoundIsComparedByTermOrder) {
@@ -1512,20 +1542,20 @@ TEST(GroundTest, AssignmentBoundVariableUsedByALaterLiteral) {
   ASSERT_OK(out);
   // X = 1 gives Y = 2, and the choice leaves r(2) open, so q(1) keeps 'not
   // r(2)' in its body. X = 2 gives Y = 3, which r/1 never derived, so q(2) is
-  // a fact. p(1)=1, p(2)=2, q(1)=3, q(2)=4, and the choice's disjunction
-  // 'r(2) | _cr0.' over r(2)=5 and _cr0=6.
+  // a fact. p(1)=1, p(2)=2, then the choice's disjunction 'r(2) | _cr0.' over
+  // r(2)=3 and _cr0=4, then q(1)=5 and q(2)=6.
   EXPECT_EQ(*out,
             "asp 1 0 0\n"
             "1 0 1 1 0 0\n"
             "1 0 1 2 0 0\n"
-            "1 0 1 3 0 1 -5\n"
-            "1 0 1 4 0 0\n"
-            "1 0 2 5 6 0 0\n"
+            "1 0 2 3 4 0 0\n"
+            "1 0 1 5 0 1 -3\n"
+            "1 0 1 6 0 0\n"
             "4 4 p(1) 1 1\n"
             "4 4 p(2) 1 2\n"
-            "4 4 q(1) 1 3\n"
-            "4 4 q(2) 1 4\n"
-            "4 4 r(2) 1 5\n"
+            "4 4 r(2) 1 3\n"
+            "4 4 q(1) 1 5\n"
+            "4 4 q(2) 1 6\n"
             "0\n");
 }
 
