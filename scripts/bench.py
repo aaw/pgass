@@ -234,6 +234,8 @@ def instance_roots(cache, domain):
     bases = [os.path.join(root, s) for s in domain.get("subdomains", [])] or [root]
     roots = []
     for base in bases:
+        if not os.path.isdir(base):
+            continue
         for name in ("instances", "asp_insts"):
             nested = os.path.join(base, name)
             if os.path.isdir(nested):
@@ -502,15 +504,41 @@ def domain_status(cache, domain, instances):
     return "needs " + ", ".join(blocking) if blocking else "runnable"
 
 
+def match_instances(instances, pattern):
+    """The instances whose name the pattern picks out. Naming an instance in
+    full is a mouthful, so any part of the name will do, as will a glob."""
+    if not any(c in pattern for c in "*?["):
+        pattern = f"*{pattern}*"
+    return [i for i in instances if fnmatch.fnmatch(os.path.basename(i), pattern)]
+
+
 def list_instances(args, domain):
-    """The instances of one domain, which is what naming a domain asks for."""
+    """The instances of one domain, which is what naming a domain asks for.
+    Paths are printed in full, next to the encoding each one is solved with, so
+    that a line can be pasted straight into a pgass command."""
+    if not os.path.isdir(domain_dir(args.cache, domain)):
+        sys.exit(f"bench: {domain['name']} is not fetched. "
+                 f"Try 'bench.py fetch {domain['name']}'.")
+
     instances = instances_of(args.cache, domain,
                              selected_only=not args.all_instances)
     if not instances:
-        sys.exit(f"bench: {domain['name']} is not fetched. "
-                 f"Try 'bench.py fetch {domain['name']}'.")
+        sys.exit(f"bench: {domain['name']} has no instances")
+    if args.instance:
+        instances = match_instances(instances, args.instance)
+        if not instances:
+            sys.exit(f"bench: no instance of {domain['name']} matches "
+                     f"'{args.instance}'")
+
+    width = max(len(p) for p in instances)
     for path in instances:
-        print(f"{os.path.basename(path):<52} {human(os.path.getsize(path)):>9}")
+        print(f"{path:<{width}} {human(os.path.getsize(path)):>9}")
+
+    encodings = sorted({encoding_of(args.cache, domain, i) for i in instances})
+    for path in encodings:
+        if os.path.exists(path):
+            print(f"\nencoding: {path}")
+
     scored = "" if args.all_instances else ", the ones the competition scored"
     print(f"\n{len(instances)} instances of {domain['name']}{scored}.")
 
@@ -566,13 +594,7 @@ def cmd_run(args):
 
     instances = instances_of(args.cache, domain, selected_only=not args.all_instances)
     if args.instance:
-        # Naming an instance in full is a mouthful, so any part of the name will
-        # do, as will a glob.
-        pattern = args.instance
-        if not any(c in pattern for c in "*?["):
-            pattern = f"*{pattern}*"
-        instances = [i for i in instances
-                     if fnmatch.fnmatch(os.path.basename(i), pattern)]
+        instances = match_instances(instances, args.instance)
         if not instances:
             sys.exit(f"bench: no instance of {domain['name']} matches "
                      f"'{args.instance}'")
@@ -649,6 +671,8 @@ def main():
 
     p = sub.add_parser("ls", help="list the domains, or the instances of one")
     p.add_argument("domain", nargs="?", help="list this domain's instances")
+    p.add_argument("instance", nargs="?",
+                   help="any part of an instance name, or a glob")
     p.add_argument("--fetched", action="store_true", help="only what is downloaded")
     p.add_argument("--all-instances", action="store_true",
                    help="every instance, not just the ones the competition scored")
