@@ -610,15 +610,24 @@ def cmd_run(args):
     # One at a time, so that the seconds reported mean something. Solvers racing
     # each other for the same cores would not be timing anything.
     records = []
+    interrupted = False
     for instance in instances:
         # The name goes out before the instance is solved, leaving the line open
         # for its result. A run sitting on a hard instance for its whole timeout
         # then says which one it is.
         print(f"{os.path.basename(instance):<44} ", end="", flush=True)
-        record = run_one(args, domain, instance, args.cache)
+        try:
+            record = run_one(args, domain, instance, args.cache)
+        except KeyboardInterrupt:
+            print("\nCancelled.", flush=True)
+            interrupted = True
+            break
         records.append(record)
         report_row(record, args.compare)
-    summarize(records)
+    if records:
+        summarize(records)
+    if interrupted:
+        sys.exit(130)
 
 
 def timing(status, seconds):
@@ -700,7 +709,11 @@ def main():
     args = parser.parse_args()
     if getattr(args, "compare", None) and not shutil.which(args.compare):
         sys.exit(f"bench: --compare asked for '{args.compare}', which is not installed")
-    args.func(args)
+    try:
+        args.func(args)
+    except KeyboardInterrupt:
+        print("\nCancelled.", file=sys.stderr)
+        sys.exit(130)
 
 
 if __name__ == "__main__":
