@@ -542,8 +542,9 @@ struct RuleView {
   std::vector<const ClassicalLiteral*> head;
   BodyParts parts;
   // Whether one of the rule's aggregates reads a predicate from the rule's own
-  // component, which only a disjunctive head can bring about; see
-  // mark_aggregates_in_own_component(). Such a rule derives no facts, because
+  // component, which only a disjunctive head can bring about. See
+  // mark_aggregates_in_own_component(). Deriving atoms settles no aggregate of
+  // such a rule, neither to drop an instance nor to mark a fact, because
   // settling an aggregate needs a store that is complete for what the aggregate
   // reads, and its own component is by definition still being derived.
   bool aggregate_in_own_component = false;
@@ -667,7 +668,7 @@ int head_component(const PredGraph& graph, const std::vector<int>& component,
 }
 
 // Marks the rules whose aggregates read a predicate from the rule's own
-// component, which stops those rules from deriving facts.
+// component, which stops deriving from settling those aggregates at all.
 //
 // verify_safe() enforces the ASP-Core-2 rule that no predicate inside an
 // aggregate shares a positive component with the head of the rule holding that
@@ -679,16 +680,15 @@ int head_component(const PredGraph& graph, const std::vector<int>& component,
 //   p :- #count{ X : q(X) } <= 0.
 //   p | q(1) :- r.
 //
-// Deriving facts is what that breaks. settled_agg_value() takes an aggregate's
-// value from the store as it stands, to decide whether the atom the aggregate
-// feeds holds in every answer set. A predicate with no atoms derived yet has no
-// tuples, so the count above settles at 0 while q(1) does not exist. That would
-// make a fact of p and lose the answer set {r, q(1)}.
+// settled_agg_value() takes an aggregate's value from the store as it stands. A
+// predicate with no atoms derived yet has no tuples, so the count above settles
+// at 0 while q(1) does not exist. Deriving would read that as a settled '<= 0',
+// make a fact of p, and lose the answer set {r, q(1)}.
 //
 // The rest of the rule needs nothing. Its head atoms are derived with the
-// aggregate ignored, as every rule's are, and the aggregate reaches the solver
-// through emit_rules(), which runs once every component has been derived and so
-// reads a complete store.
+// aggregate ignored, and the aggregate reaches the solver through emit_rules(),
+// which runs once every component has been derived and so reads a complete
+// store.
 void mark_aggregates_in_own_component(const PredGraph& graph,
                                       const std::vector<int>& component,
                                       std::vector<RuleView>& rules) {
@@ -1397,16 +1397,14 @@ std::vector<aspif::Lit> without_facts(const std::vector<aspif::Lit>& matched,
   return lits;
 }
 
-// What the 'not' literals of a body come to against the store as it stands.
-enum class Negation {
-  // One of them is over a fact, so no answer set satisfies the body. An atom
-  // stays a fact once it is one, so a later pass never takes this back.
+// What one group of body items comes to against the store as it stands. The
+// 'not' literals of a body have one of these and its aggregates another.
+enum class BodyValue {
+  // No answer set satisfies them, so neither does the body.
   kFalse,
-  // One of them is over an atom the store holds but has not made a fact. The
-  // solver decides that one.
+  // The solver has the say.
   kOpen,
-  // None of them matches an atom the store holds. Whether that is final
-  // depends on the rule: see RuleView::negation_is_settled.
+  // They hold in every answer set, so they ask nothing of the body.
   kTrue,
 };
 
@@ -1415,20 +1413,26 @@ enum class Negation {
 // atom still open, which is what an emitted rule body needs. A null `lits`
 // asks for the verdict alone and stops at the first fact.
 //
-// A literal that cannot match, e.g. 'not p(X / 0)', comes back kNoValue: the
-// rule instance does not exist at all, rather than existing without it.
-absl::StatusOr<Negation> negation_value(
+// kFalse is a 'not' over a fact. An atom stays a fact once it is one, so a
+// later pass never takes that answer back. kTrue is a 'not' matching no atom
+// the store holds, which is final only for some rules: see
+// RuleView::negation_is_settled.
+//
+// A literal that cannot match, e.g. 'not p(X / 0)', comes back a no-value
+// status: the rule instance does not exist at all, rather than existing
+// without it.
+absl::StatusOr<BodyValue> negation_value(
     const std::vector<const ClassicalLiteral*>& negative,
     const Binding& binding, const Store& store, Symbols& syms,
     std::vector<aspif::Lit>* lits = nullptr) {
-  Negation value = Negation::kTrue;
+  BodyValue value = BodyValue::kTrue;
   for (const ClassicalLiteral* literal : negative) {
     RETURN_IF_ERROR(args_can_match(*literal, binding, syms));
     ASSIGN_OR_RETURN(std::vector<aspif::Atom> matched,
                      matching_atoms(*literal, binding, store, syms));
     for (aspif::Atom atom : matched) {
-      if (store.is_fact(atom)) return Negation::kFalse;
-      value = Negation::kOpen;
+      if (store.is_fact(atom)) return BodyValue::kFalse;
+      value = BodyValue::kOpen;
       if (lits != nullptr) lits->push_back(-atom);
     }
   }
@@ -1449,9 +1453,9 @@ absl::StatusOr<std::optional<std::vector<aspif::Lit>>> negative_lits(
     const std::vector<const ClassicalLiteral*>& negative,
     const Binding& binding, const Store& store, Symbols& syms) {
   std::vector<aspif::Lit> lits;
-  ASSIGN_OR_RETURN(const Negation value,
+  ASSIGN_OR_RETURN(const BodyValue value,
                    negation_value(negative, binding, store, syms, &lits));
-  if (value == Negation::kFalse) return std::nullopt;
+  if (value == BodyValue::kFalse) return std::nullopt;
   return lits;
 }
 
@@ -2469,17 +2473,24 @@ struct Changes {
   bool facts = false;
 };
 
-// Whether grounding settles every aggregate in a body and finds them all
-// satisfied, which is what lets an instance carrying aggregates derive a fact.
-absl::StatusOr<bool> aggregates_settle_true(
+// Reads the aggregates of a body, which is what lets grounding stop at a
+// recursion an aggregate cuts off. kOpen is an aggregate whose value grounding
+// cannot work out on its own. See AggCache::settle() for why the other two
+// answers hold for the rest of the run.
+absl::StatusOr<BodyValue> aggregates_value(
     const std::vector<const Aggregate*>& aggregates, const Binding& binding,
     const Store& store, Symbols& syms, AggCache& agg_cache) {
+  BodyValue value = BodyValue::kTrue;
   for (const Aggregate* aggregate : aggregates) {
     ASSIGN_OR_RETURN(std::optional<bool> holds,
                      agg_cache.settle(*aggregate, binding, store, syms));
-    if (!holds.has_value() || !*holds) return false;
+    if (!holds.has_value()) {
+      value = BodyValue::kOpen;
+    } else if (!*holds) {
+      return BodyValue::kFalse;
+    }
   }
-  return true;
+  return value;
 }
 
 // Runs one rule against the store and adds the head atoms of every instance it
@@ -2487,22 +2498,25 @@ absl::StatusOr<bool> aggregates_settle_true(
 // positive literal to read the previous pass's atoms from (see
 // find_instances), or nullopt to read the whole store.
 //
+// An aggregate grounding settles false takes the body with it, so the instance
+// derives nothing. That is what ends the recursion in "s(X+1) :- s(X), #count{
+// N : num(N), N > X } >= 1.": the count is 0 once X reaches the largest num.
+//
 // An instance whose positive literals all matched facts derives its head atom
 // as a fact in turn: every one of those atoms holds in every answer set, so the
 // body does, so the head does. That is only sound for a rule whose body has
 // nothing else in it that can fail. A 'not q' is such a thing unless grounding
 // settles it, so an instance derives a fact only when its negation came out
-// kTrue on a rule where that answer is final.
-// An aggregate is one only sometimes, so AggCache::settle() is asked about it,
-// last, once the cheap reasons not to bother have been ruled out.
+// kTrue on a rule where that answer is final. An aggregate is one unless
+// grounding settles it true.
 //
 // A disjunctive head derives no fact either, however solid its body: 'a | b.'
 // says one of a and b holds, and neither of them holds in every answer set. Its
 // atoms are only possible ones, which is exactly what this phase collects.
 //
-// Nor does a rule whose aggregate reads its own component. Settling such an
-// aggregate would read a store still being filled. See
-// mark_aggregates_in_own_component().
+// A rule whose aggregate reads its own component settles none of its aggregates
+// here, neither to drop an instance nor to derive a fact. Settling one would
+// read a store still being filled. See mark_aggregates_in_own_component().
 //
 // This is where 'p(1).' becomes a fact, and where a rule over facts alone, like
 // the second rule of "edge(a, b). reachable(X, Y) :- edge(X, Y).", passes
@@ -2511,9 +2525,7 @@ absl::Status derive_from_rule(const RuleView& rule,
                               std::optional<size_t> delta_position,
                               Store& store, Symbols& syms, AggCache& agg_cache,
                               aspif::Program& aspif_prog, Changes& changes) {
-  const bool derives_facts =
-      rule.negation_is_settled && rule.head.size() == 1 &&
-      !rule.aggregate_in_own_component;
+  const bool derives_facts = rule.negation_is_settled && rule.head.size() == 1;
   // Deriving runs a rule once per pass and per positive literal, so warning
   // here would repeat the same line. emit_rules() runs each rule once and
   // warns there.
@@ -2524,12 +2536,21 @@ absl::Status derive_from_rule(const RuleView& rule,
                // in either means the rule has no ground instance under this
                // binding, so its head atom is not derived either. That is why
                // "q(X) :- p(X), not r(4 / X)." derives no q(0).
-               RETURN_IF_ERROR(agg_bounds_have_values(
-                   rule.parts.aggregates, instance.binding, syms));
-               ASSIGN_OR_RETURN(const Negation negation,
+               RETURN_IF_ERROR(agg_bounds_have_values(rule.parts.aggregates,
+                                                      instance.binding, syms));
+               ASSIGN_OR_RETURN(const BodyValue negation,
                                 negation_value(rule.parts.negative,
                                                instance.binding, store, syms));
-               if (negation == Negation::kFalse) return absl::OkStatus();
+               if (negation == BodyValue::kFalse) return absl::OkStatus();
+
+               BodyValue aggregates = BodyValue::kOpen;
+               if (!rule.aggregate_in_own_component) {
+                 ASSIGN_OR_RETURN(
+                     aggregates,
+                     aggregates_value(rule.parts.aggregates, instance.binding,
+                                      store, syms, agg_cache));
+                 if (aggregates == BodyValue::kFalse) return absl::OkStatus();
+               }
 
                // A head term with no value means this instance has no ground
                // rule at all, so none of its head atoms is derived.
@@ -2554,13 +2575,9 @@ absl::Status derive_from_rule(const RuleView& rule,
                  RETURN_IF_ERROR(store.check_size(key));
                }
 
-               if (derives_facts && negation == Negation::kTrue &&
+               if (derives_facts && negation == BodyValue::kTrue &&
+                   aggregates == BodyValue::kTrue &&
                    matched_all_facts(instance.matched, store)) {
-                 ASSIGN_OR_RETURN(bool aggregates_hold,
-                                  aggregates_settle_true(
-                                      rule.parts.aggregates, instance.binding,
-                                      store, syms, agg_cache));
-                 if (!aggregates_hold) return absl::OkStatus();
                  const bool newly_fact = store.mark_fact(heads.front().atom);
                  // Marking an atom the store already held is the one change a
                  // delta pass cannot carry; see derive_atoms().
@@ -2583,13 +2600,11 @@ absl::Status derive_from_rule(const RuleView& rule,
 // decides which atoms can exist at all. emit_rules() emits the rule with the
 // 'not r' still in it, and the solver decides whether p is true.
 //
-// Aggregates are ignored the same way: a rule's aggregates are never checked
-// here, so a rule like 'p :- dom(X), #count{Y : q(X,Y)} >= 2.' derives p(x)
-// for every x in dom regardless of the count. safety.cc guarantees an
-// aggregate's own predicates can't be recursive with the rule's head, so by
-// the time this rule's component is emitted, the store for those predicates
-// is already complete and the real weight-body encoding constrains the
-// solver correctly.
+// An aggregate settles a body here only when grounding can work its value out.
+// Otherwise it is ignored, so 'p :- dom(X), #count{Y : q(X,Y)} >= 2.' derives
+// p(x) for every x in dom while the solver still has a say in q. emit_rules()
+// then gives the solver the real weight-body encoding, which rules out the p(x)
+// whose count falls short.
 //
 // A rule only sees atoms from passes before the current one, so a rule that
 // feeds on its own head, like 'reachable(X, Z) :- reachable(X, Y), edge(Y,

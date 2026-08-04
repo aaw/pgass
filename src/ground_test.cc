@@ -3,6 +3,7 @@
 #include <gmock/gmock.h>
 #include <gtest/gtest.h>
 
+#include <cstddef>
 #include <string>
 #include <vector>
 
@@ -18,11 +19,13 @@ using ::testing::Not;
 namespace {
 
 // Parses, normalizes, and grounds `source`, returning the aspif text.
-absl::StatusOr<std::string> ground_source(const std::string& source) {
+absl::StatusOr<std::string> ground_source(const std::string& source,
+                                          size_t max_ground_atoms = 0) {
   Parser parser(source);
   ASSIGN_OR_RETURN(auto program, parser.parse_program());
   RETURN_IF_ERROR(normalize(*program));
-  ASSIGN_OR_RETURN(aspif::Program grounded, ground(*program));
+  ASSIGN_OR_RETURN(aspif::Program grounded,
+                   ground(*program, nullptr, max_ground_atoms));
   return to_aspif(grounded);
 }
 
@@ -42,10 +45,7 @@ absl::StatusOr<std::vector<std::string>> ground_warnings(
 // returning how grounding ended.
 absl::Status ground_under_limit(const std::string& source,
                                 size_t max_ground_atoms) {
-  Parser parser(source);
-  ASSIGN_OR_RETURN(auto program, parser.parse_program());
-  RETURN_IF_ERROR(normalize(*program));
-  return ground(*program, nullptr, max_ground_atoms).status();
+  return ground_source(source, max_ground_atoms).status();
 }
 
 TEST(GroundTest, Facts) {
@@ -297,12 +297,25 @@ TEST(GroundTest, AnAggregateOverFactsDerivesAFact) {
 }
 
 // The same value settles the other way when it misses the bound: the rule can
-// hold in no answer set, so it is not emitted at all.
-TEST(GroundTest, AnAggregateOverFactsThatMissesItsBoundDropsTheRule) {
+// hold in no answer set, so q is not derived at all.
+TEST(GroundTest, AnAggregateOverFactsThatMissesItsBoundDerivesNothing) {
   auto out = ground_source("p(1). p(2). q :- #count{ X : p(X) } >= 5. s.");
   ASSERT_OK(out);
-  EXPECT_THAT(*out, HasSubstr("4 1 q 1 4\n"));
-  EXPECT_THAT(*out, Not(HasSubstr("1 0 1 4 ")));
+  EXPECT_THAT(*out, HasSubstr("4 1 s 1 1\n"));
+  EXPECT_THAT(*out, Not(HasSubstr(" q ")));
+}
+
+// A recursion an aggregate cuts off reaches a fixpoint: the instance that would
+// derive the next s is the one whose count has run out.
+TEST(GroundTest, AnAggregateThatSettlesFalseEndsARecursion) {
+  auto out = ground_source(R"(
+    num(1). num(2). num(3). s(1).
+    s(X + 1) :- s(X), #count{ N : num(N), N > X } >= 1.
+  )",
+                           /*max_ground_atoms=*/100);
+  ASSERT_OK(out);
+  EXPECT_THAT(*out, HasSubstr("4 4 s(3) "));
+  EXPECT_THAT(*out, Not(HasSubstr("s(4)")));
 }
 
 // An aggregate that mentions none of the rule's variables reads the same way
@@ -351,9 +364,8 @@ TEST(GroundTest, AggregateElementWithNoConditionCountsUnconditionally) {
   ASSERT_OK(out);
   EXPECT_EQ(*out,
             "asp 1 0 0\n"
-            "1 0 1 2 0 0\n"
-            "4 1 s 1 1\n"
-            "4 1 r 1 2\n"
+            "1 0 1 1 0 0\n"
+            "4 1 r 1 1\n"
             "0\n");
 }
 
@@ -364,9 +376,8 @@ TEST(GroundTest, AggregateWithNoElementsCountsZero) {
   ASSERT_OK(out);
   EXPECT_EQ(*out,
             "asp 1 0 0\n"
-            "1 0 1 2 0 0\n"
-            "4 1 z 1 1\n"
-            "4 1 q 1 2\n"
+            "1 0 1 1 0 0\n"
+            "4 1 q 1 1\n"
             "0\n");
 }
 
@@ -1284,7 +1295,7 @@ TEST(GroundTest, IllFormedNegativeLiteralDropsTheInstance) {
 
 TEST(GroundTest, IllFormedAggregateBoundDropsTheInstance) {
   auto out = ground_source(
-      "d(0). d(2). p(1). q(X) :- d(X), #count{ Y : p(Y) } >= 4 / X.");
+      "d(0). d(2). p(1). p(2). q(X) :- d(X), #count{ Y : p(Y) } >= 4 / X.");
   ASSERT_OK(out);
   // X = 0 makes the bound '4 / 0' ill-formed, so no q(0) is derived at all.
   EXPECT_THAT(*out, HasSubstr("q(2)"));
