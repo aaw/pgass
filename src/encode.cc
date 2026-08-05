@@ -35,16 +35,16 @@ namespace {
 // QF_LIA. Every QF_IDL formula is also a QF_LIA formula, so answering QF_LIA is
 // never wrong, only slower.
 //
-// Weak constraints never reach here. Their costs come with the quantified
-// optimality assertion, which takes ALL whatever the rest of the program says.
+// A weak constraint costs QF_LIA too. Its level's cost is named as an Int, and
+// that is a sum whatever the weights are.
 
-// Whether a weight body only counts its literals. #count writes every weight as
-// one, and so does the counting constraint a choice rule normalizes into, which
-// makes this the common weight body by far. at_least() says it without
-// arithmetic, so it leaves the logic alone.
-bool is_cardinality(const aspif::Rule& rule) {
-  if (rule.body_type != aspif::Rule::BodyType::kWeight) return false;
-  for (const aspif::WeightedLit& weighted : rule.weighted_body) {
+// Whether every weight is one. Then the total is just how many literals hold,
+// and at_least() can say that without arithmetic.
+//
+// This is the common case. #count writes every weight as one, and so does the
+// counting constraint a choice rule normalizes into.
+bool all_unit_weights(const std::vector<aspif::WeightedLit>& lits) {
+  for (const aspif::WeightedLit& weighted : lits) {
     if (weighted.weight != BigInt(1)) return false;
   }
   return true;
@@ -53,10 +53,11 @@ bool is_cardinality(const aspif::Rule& rule) {
 const char* logic_for(const aspif::Program& prog) {
   for (const aspif::Rule& rule : prog.rules) {
     if (rule.body_type == aspif::Rule::BodyType::kWeight &&
-        !is_cardinality(rule)) {
+        !all_unit_weights(rule.weighted_body)) {
       return "QF_LIA";
     }
   }
+  if (!prog.minimize.empty()) return "QF_LIA";
   return "QF_IDL";
 }
 
@@ -244,7 +245,7 @@ cvc5::Term body_term(cvc5::TermManager& tm,
   }
   // A body that only counts is a question about the literals themselves, and
   // at_least() answers it without reaching for arithmetic.
-  if (is_cardinality(rule)) {
+  if (all_unit_weights(rule.weighted_body)) {
     // A bound past the number of literals is out of reach however they fall,
     // and checking that first is what leaves the bound small enough to count
     // to.
@@ -478,33 +479,92 @@ std::vector<std::pair<BigInt, std::vector<aspif::WeightedLit>>> level_costs(
   return {by_priority.rbegin(), by_priority.rend()};
 }
 
-// The block naming the cost of each priority level and asserting that no answer
-// set costs less, so that one check-sat lands on an optimal answer set.
-std::string weak_constraint_block(const aspif::Program& prog,
-                                  const Encoding& encoding) {
-  // Only the atom names can collide with a cost name. Every level name holds
-  // parentheses, which no cost name does.
+// What a script calls each priority level's cost, the most important first.
+// The names are made fresh against the atom names, an atom being the only
+// thing that could already be called cost@0.
+std::vector<std::string> cost_names(const Encoding& encoding) {
   absl::flat_hash_set<std::string> taken(encoding.atom_name.begin(),
                                          encoding.atom_name.end());
   std::vector<std::string> names;
-  std::string definitions;
-  size_t level = 0;
-  for (const auto& [priority, lits] : level_costs(prog)) {
+  names.reserve(encoding.levels.size());
+  for (const Level& level : encoding.levels) {
     names.push_back(
-        fresh_name(taken, absl::StrCat("cost@", priority.to_string())));
-    absl::StrAppend(&definitions, "(define-fun ", names.back(), " () Int ",
-                    encoding.level_cost[level++].toString(), ")\n");
+        fresh_name(taken, absl::StrCat("cost@", level.priority.to_string())));
+  }
+  return names;
+}
+
+// The block naming the cost of each priority level, and the recipe for
+// bringing those costs down to the least.
+//
+// A script without a query ends in a check-sat the recipe can use. One with a
+// query spends its check-sats on the query, and asks it of whatever the
+// assertions leave, so the cost gets a check-sat of its own here and settles
+// before the query runs.
+std::string weak_constraint_block(const Encoding& encoding, bool has_query) {
+  const std::vector<std::string> names = cost_names(encoding);
+  std::string definitions;
+  for (size_t i = 0; i < names.size(); ++i) {
+    absl::StrAppend(&definitions, "(define-fun ", names[i], " () Int ",
+                    encoding.levels[i].cost.toString(), ")\n");
   }
 
-  return absl::StrCat(
+  // The steps are written out for the first level, that being the one to
+  // settle first, and the rest go the same way. Prose is wrapped, and the
+  // lines the reader copies are left alone.
+  const std::string& first = names.front();
+  const bool one_level = names.size() == 1;
+  const std::string what_it_costs =
+      one_level ? absl::StrCat(first, " is what an answer set costs.")
+                : absl::StrCat("An answer set costs ",
+                               absl::StrJoin(names, ", then "), ", in that ",
+                               "order of importance, so ", first,
+                               " settles first.");
+
+  std::string recipe = comment_lines(absl::StrCat(
+      what_it_costs, " The check-sat ",
+      has_query ? "just below prints " : "at the end prints ",
+      one_level ? "it." : "them all.",
+      has_query
+          ? " The query further down asks about every answer set, and settling"
+            " the costs first is what makes it ask about the cheapest ones."
+          : absl::StrCat(" That may already be the cheapest",
+                         one_level ? "" : absl::StrCat(" ", first),
+                         ", but nothing has proved it yet. To find the"
+                         " cheapest:")));
+  absl::StrAppend(
+      &recipe, ";\n",
+      comment_lines(
+          absl::StrCat("  1. Run the script. Note the cost it prints for ",
+                       first, ".")),
+      comment_lines("  2. Add this line below the cost definitions, with N "
+                    "set to that cost:"),
+      ";\n;       (assert (< ", first, " N))\n;\n",
+      comment_lines("  3. Run again. While the answer is sat, set N to the "
+                    "new cost each time."),
+      ";\n",
       comment_lines(absl::StrCat(
-          "What a model costs at each priority level, most important level "
-          "first: ",
-          absl::StrJoin(names, ", "),
-          ". The assertion below says no answer set costs less, so the "
-          "check-sat at the end lands on an optimal one. cvc5 answers it far "
-          "faster under --sygus-inst.")),
-      definitions, "(assert ", encoding.optimality->toString(), ")\n");
+          "The first unsat means the cost before it was the cheapest. Change "
+          "that '<' to '='",
+          has_query ? ". Then delete the check-sat and get-value below, and "
+                      "the query answers about the optimal answer sets."
+          : one_level ? " and run once more to see an optimal answer set."
+                      : ".")));
+
+  if (!one_level && !has_query) {
+    std::string next = absl::StrCat("Then repeat from step 1 for ", names[1]);
+    if (names.size() > 2) absl::StrAppend(&next, ", and each level after it");
+    absl::StrAppend(&next,
+                    ", keeping the assertions already added. Once every level "
+                    "is settled, the model printed is an optimal answer set.");
+    absl::StrAppend(&recipe, ";\n", comment_lines(next));
+  }
+  // A query spends the script's check-sats on itself, so the cost gets one of
+  // its own here, before the query is asked.
+  if (has_query) {
+    absl::StrAppend(&definitions, "(check-sat)\n(get-value (", first, "))\n");
+  }
+  return absl::StrCat(recipe, definitions);
 }
 
 // One rule of the reduct, as a formula the subset has to satisfy.
@@ -616,70 +676,6 @@ cvc5::Term minimality_term(cvc5::TermManager& tm, const aspif::Program& prog,
   return tm.mkTerm(cvc5::Kind::FORALL,
                    {tm.mkTerm(cvc5::Kind::VARIABLE_LIST, bound_vars),
                     tm.mkTerm(cvc5::Kind::NOT, {conjunction(tm, conjuncts)})});
-}
-
-// Whether the model `alt_var` costs lexicographically less than the model
-// `atom_var`. The levels are settled in turn, the most important first, so this
-// is one disjunct per level: every level above it costs the same, and that
-// level costs strictly less.
-cvc5::Term lower_cost_term(cvc5::TermManager& tm, const aspif::Program& prog,
-                           const std::vector<cvc5::Term>& atom_var,
-                           const std::vector<cvc5::Term>& alt_var) {
-  std::vector<cvc5::Term> disjuncts;
-  std::vector<cvc5::Term> equal_above;
-  for (const auto& [priority, lits] : level_costs(prog)) {
-    const cvc5::Term cost = weighted_sum(tm, atom_var, lits);
-    const cvc5::Term alt_cost = weighted_sum(tm, alt_var, lits);
-    std::vector<cvc5::Term> conjuncts = equal_above;
-    conjuncts.push_back(tm.mkTerm(cvc5::Kind::LT, {alt_cost, cost}));
-    disjuncts.push_back(conjunction(tm, conjuncts));
-    equal_above.push_back(tm.mkTerm(cvc5::Kind::EQUAL, {alt_cost, cost}));
-  }
-  return disjunction(tm, disjuncts);
-}
-
-// Optimality as one formula: no answer set costs less than this one. The other
-// answer set is a second Bool per atom, bound by a quantifier, so the formula
-// stands for every candidate at once the way the minimality check does.
-//
-// The rules, the support, and the minimality check are what say the bound atoms
-// are an answer set. The level ranking is left out on purpose: it would take an
-// Int per atom, and describing the other answer set by its reduct instead keeps
-// every bound variable Boolean. Only the costs stay arithmetic.
-cvc5::Term optimality_term(cvc5::TermManager& tm, const aspif::Program& prog,
-                           const Encoding& encoding, const Ranking& ranking) {
-  absl::flat_hash_set<std::string> taken(encoding.atom_name.begin(),
-                                         encoding.atom_name.end());
-  const cvc5::Sort bool_sort = tm.getBooleanSort();
-  std::vector<cvc5::Term> alt_var(prog.next_atom);
-  std::vector<std::string> alt_name(prog.next_atom);
-  std::vector<cvc5::Term> bound_vars;
-  bound_vars.reserve(prog.next_atom - 1);
-  for (aspif::Atom atom = 1; atom < prog.next_atom; ++atom) {
-    alt_name[atom] =
-        fresh_name(taken, absl::StrCat("alt(", encoding.atom_name[atom], ")"));
-    alt_var[atom] = tm.mkVar(bool_sort, alt_name[atom]);
-    bound_vars.push_back(alt_var[atom]);
-  }
-  // A program with no atoms has one answer set, so nothing can cost less.
-  if (bound_vars.empty()) return tm.mkTrue();
-
-  std::vector<cvc5::Term> is_answer_set;
-  rule_formulas(tm, prog, alt_var, is_answer_set);
-  support_formulas(tm, prog, alt_var,
-                   collect_supports(tm, prog, alt_var, ranking), is_answer_set);
-  const cvc5::Term minimal =
-      minimality_term(tm, prog, alt_var, alt_name, ranking.on_cycle, taken);
-  if (minimal != tm.mkTrue()) is_answer_set.push_back(minimal);
-
-  return tm.mkTerm(
-      cvc5::Kind::FORALL,
-      {tm.mkTerm(cvc5::Kind::VARIABLE_LIST, bound_vars),
-       tm.mkTerm(cvc5::Kind::IMPLIES,
-                 {conjunction(tm, is_answer_set),
-                  tm.mkTerm(cvc5::Kind::NOT,
-                            {lower_cost_term(tm, prog, encoding.atom_var,
-                                             alt_var)})})});
 }
 
 constexpr char kMinimalityComment[] =
@@ -837,16 +833,33 @@ cvc5::Term weighted_sum(cvc5::TermManager& tm,
   return sum(tm, addends);
 }
 
+cvc5::Term cost_at_most(cvc5::TermManager& tm, const Level& level,
+                        const BigInt& bound) {
+  if (!all_unit_weights(level.lits)) {
+    return tm.mkTerm(cvc5::Kind::LEQ,
+                     {level.cost, tm.mkInteger(bound.to_string())});
+  }
+  // Unit weights put the cost between none of the literals and all of them, so
+  // a bound outside that range settles the question on its own. Checking it
+  // first is also what leaves the bound small enough to count to.
+  if (bound < BigInt(0)) return tm.mkFalse();
+  const BigInt count(static_cast<std::int64_t>(level.lits.size()));
+  if (bound >= count) return tm.mkTrue();
+  // Costing at most the bound is holding no more literals than it names.
+  return tm.mkTerm(
+      cvc5::Kind::NOT,
+      {at_least(tm, level.lit_terms, bound.to_int64().value() + 1)});
+}
+
 absl::StatusOr<Encoding> build_encoding(cvc5::TermManager& tm,
                                         const aspif::Program& prog) {
   const Ranking ranking = build_ranking(prog);
   Names names = choose_names(prog, ranking);
 
   Encoding encoding;
-  // The minimality and optimality assertions below are quantified, which no
-  // quantifier free logic can hold.
-  const bool quantified = ranking.any_head_cycle || !prog.minimize.empty();
-  encoding.logic = quantified ? "ALL" : logic_for(prog);
+  // The minimality assertion below is quantified, which no quantifier free
+  // logic can hold.
+  encoding.logic = ranking.any_head_cycle ? "ALL" : logic_for(prog);
   encoding.atom_var = declare_constants(tm, tm.getBooleanSort(), names.atom);
   encoding.level_var = declare_constants(tm, tm.getIntegerSort(), names.level);
   encoding.atom_name = std::move(names.atom);
@@ -894,11 +907,15 @@ absl::StatusOr<Encoding> build_encoding(cvc5::TermManager& tm,
                                         .comment = kMinimalityComment,
                                         .assertions = {minimality}});
   }
-  if (!prog.minimize.empty()) {
-    for (const auto& [priority, lits] : level_costs(prog)) {
-      encoding.level_cost.push_back(weighted_sum(tm, encoding.atom_var, lits));
+  for (auto& [priority, lits] : level_costs(prog)) {
+    Level level{.priority = priority, .lits = std::move(lits)};
+    level.lit_terms.reserve(level.lits.size());
+    for (const aspif::WeightedLit& weighted : level.lits) {
+      level.lit_terms.push_back(
+          literal_term(tm, encoding.atom_var, weighted.lit));
     }
-    encoding.optimality = optimality_term(tm, prog, encoding, ranking);
+    level.cost = weighted_sum(tm, encoding.atom_var, level.lits);
+    encoding.levels.push_back(std::move(level));
   }
   return encoding;
 }
@@ -913,10 +930,11 @@ absl::StatusOr<std::string> encode_smtlib(const aspif::Program& prog) {
   // Options are set before the logic is, which SMT-LIB takes as the end of the
   // preamble.
   absl::StrAppend(&script, "(set-option :produce-models true)\n");
-  if (encoding.query.size() > 1) {
-    absl::StrAppend(&script,
-                    "; incremental: the query below asks several times.\n"
-                    "(set-option :incremental true)\n");
+  // A query asks once per atom. Weak constraints alongside a query add one
+  // more check-sat, for the cost, ahead of those.
+  if (encoding.query.size() > 1 ||
+      (prog.query.has_value() && !encoding.levels.empty())) {
+    absl::StrAppend(&script, "(set-option :incremental true)\n");
   }
   absl::StrAppend(&script, "(set-logic ", encoding.logic, ")\n");
 
@@ -940,9 +958,9 @@ absl::StatusOr<std::string> encode_smtlib(const aspif::Program& prog) {
     append_block(script, section.title, body);
   }
 
-  if (!prog.minimize.empty()) {
+  if (!encoding.levels.empty()) {
     append_block(script, "Weak constraints",
-                 weak_constraint_block(prog, encoding));
+                 weak_constraint_block(encoding, prog.query.has_value()));
   }
 
   if (encoding.query.size() > 1) {
@@ -987,7 +1005,13 @@ absl::StatusOr<std::string> encode_smtlib(const aspif::Program& prog) {
               "constants above, never a level variable: one answer set admits "
               "many rankings."));
     }
-    absl::StrAppend(&script, "(check-sat)\n(get-model)\n");
+    absl::StrAppend(&script, "(check-sat)\n");
+    // Printing the costs is step 1 of the recipe above, so the script does it
+    // rather than asking for an edit before the first run.
+    for (const std::string& name : cost_names(encoding)) {
+      absl::StrAppend(&script, "(get-value (", name, "))\n");
+    }
+    absl::StrAppend(&script, "(get-model)\n");
   }
   return script;
 }

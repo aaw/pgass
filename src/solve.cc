@@ -27,21 +27,9 @@ absl::StatusOr<bool> decided(const cvc5::Result& result) {
                    "' rather than deciding the program"));
 }
 
-// Reads an integer the solver assigned. cvc5 prints one in decimal and works in
-// unbounded integers, as BigInt does, so no cost is too big to read back.
-absl::StatusOr<BigInt> cost_value(const cvc5::Term& value) {
-  const std::string text = value.getIntegerValue();
-  std::optional<BigInt> cost = BigInt::from_decimal(text);
-  if (!cost.has_value()) {
-    return absl::InternalError(absl::StrCat("cvc5 gave a cost of '", text,
-                                            "', which is not a number"));
-  }
-  return *std::move(cost);
-}
-
 // One search over one ground program. The encoding describes the answer sets
 // exactly, so every model the solver returns is an answer set, and an optimal
-// one where the program has weak constraints.
+// one once settle_costs() has bounded the levels.
 //
 // Every member holds terms of `tm`, so `tm` is declared first and destroyed
 // last.
@@ -50,15 +38,12 @@ struct Search {
   const aspif::Program* prog = nullptr;
   Encoding encoding;
   std::optional<cvc5::Solver> solver;
-  // Clauses ruling out the answer sets already handed back, so that each is
-  // reported once. A fresh solver takes them along with the encoding.
-  std::vector<cvc5::Term> blocked;
 
   // Builds the encoding of `program`. Nothing is asked of cvc5 until find().
   absl::Status start(const aspif::Program& program);
 
-  // Whether the program has an answer set none of `blocked` rules out.
-  // `question`, where given, holds for this search alone.
+  // Whether the program has an answer set nothing asserted so far rules out.
+  // `question`, where given, holds for this call alone.
   absl::StatusOr<bool> find(
       const std::optional<cvc5::Term>& question = std::nullopt);
 
@@ -67,22 +52,28 @@ struct Search {
 
   // What that model cost at each priority level, most important level first.
   // Empty for a program with no weak constraints.
-  absl::StatusOr<std::vector<BigInt>> model_costs() const;
+  std::vector<BigInt> model_costs() const;
+
+  // Brings every priority level down to its least cost and asserts a bound
+  // holding it there, so every model found afterwards is an optimal answer
+  // set. Does nothing for a program with no weak constraints, or one with no
+  // answer set.
+  //
+  // A level comes down a model at a time. Ask for an answer set costing less
+  // than the one in hand, then take its cost as the new one to beat. When
+  // nothing cheaper is left, the cost in hand is the least. The most
+  // important level settles first and is bounded before the next one starts,
+  // which is what makes the levels lexicographic.
+  //
+  // Bisecting would aim most of its calls just under the least cost. There
+  // cvc5 has to prove nothing exists rather than find something, and those
+  // calls are the slow ones. Walking pays for one.
+  absl::Status settle_costs();
 
   // Rules the model out of every later find().
   void block(const std::vector<aspif::Atom>& atoms);
 
-  // Whether each find() builds a solver of its own. The optimality assertion
-  // is only affordable under cvc5's sygus-inst, 2s against 77s on a vertex
-  // cover of 30 nodes, and cvc5 refuses that option alongside incremental
-  // solving. Every other program keeps its solver and the work it has done,
-  // which is what makes enumeration affordable: 200 answer sets of a
-  // head-cyclic program take 0.08s that way and over 200s the other.
-  bool one_solver_per_question() const {
-    return encoding.optimality.has_value();
-  }
-
-  // A solver holding the encoding and everything blocked so far.
+  // A solver holding the encoding.
   void load();
 };
 
@@ -97,34 +88,19 @@ void Search::load() {
   solver->setLogic(encoding.logic);
   solver->setOption("produce-models", "true");
   solver->setOption("sat-solver", "cadical");
-  // cvc5 solves incrementally unless told otherwise, and refuses sygus-inst
-  // there, so a solver that answers one question has to say so.
-  solver->setOption("incremental",
-                    one_solver_per_question() ? "false" : "true");
-  if (one_solver_per_question()) solver->setOption("sygus-inst", "true");
 
   for (const Section& section : encoding.sections) {
     for (const cvc5::Term& assertion : section.assertions) {
       solver->assertFormula(assertion);
     }
   }
-  // Asserting optimality is what leaves only optimal answer sets to find, so
-  // nothing here searches for the least cost of a level.
-  if (encoding.optimality.has_value()) {
-    solver->assertFormula(*encoding.optimality);
-  }
-  for (const cvc5::Term& clause : blocked) solver->assertFormula(clause);
 }
 
 absl::StatusOr<bool> Search::find(const std::optional<cvc5::Term>& question) {
-  if (!solver.has_value() || one_solver_per_question()) load();
+  if (!solver.has_value()) load();
   if (!question.has_value()) return decided(solver->checkSat());
-  // A question holds for this find() alone. A solver that is thrown away after
-  // it can simply assert it, and one that stays takes it as an assumption.
-  if (one_solver_per_question()) {
-    solver->assertFormula(*question);
-    return decided(solver->checkSat());
-  }
+  // A question holds for this call alone, so it goes in as an assumption
+  // rather than an assertion.
   return decided(solver->checkSatAssuming(*question));
 }
 
@@ -138,14 +114,51 @@ std::vector<aspif::Atom> Search::model_atoms() const {
   return atoms;
 }
 
-absl::StatusOr<std::vector<BigInt>> Search::model_costs() const {
+// Adds up the weights of the true literals, level by level. Level::cost says
+// the same thing as a term, but reading that back would mean parsing the
+// decimal cvc5 prints for it.
+std::vector<BigInt> Search::model_costs() const {
   std::vector<BigInt> costs;
-  costs.reserve(encoding.level_cost.size());
-  for (const cvc5::Term& cost : encoding.level_cost) {
-    ASSIGN_OR_RETURN(BigInt value, cost_value(solver->getValue(cost)));
-    costs.push_back(std::move(value));
+  costs.reserve(encoding.levels.size());
+  for (const Level& level : encoding.levels) {
+    BigInt total;
+    for (size_t i = 0; i < level.lits.size(); ++i) {
+      if (solver->getValue(level.lit_terms[i]).getBooleanValue()) {
+        total += level.lits[i].weight;
+      }
+    }
+    costs.push_back(std::move(total));
   }
   return costs;
+}
+
+absl::Status Search::settle_costs() {
+  if (encoding.levels.empty()) return absl::OkStatus();
+  ASSIGN_OR_RETURN(const bool found, find());
+  if (!found) return absl::OkStatus();
+
+  std::vector<BigInt> costs = model_costs();
+  for (size_t i = 0; i < encoding.levels.size(); ++i) {
+    const Level& level = encoding.levels[i];
+    // A negative weight pays to be violated, so a level bottoms out at all of
+    // its negative weights at once, not at zero. Stopping there keeps the walk
+    // from asking about a cost nothing can reach.
+    BigInt least;
+    for (const aspif::WeightedLit& weighted : level.lits) {
+      if (weighted.weight < BigInt(0)) least += weighted.weight;
+    }
+
+    while (costs[i] > least) {
+      ASSIGN_OR_RETURN(const bool cheaper,
+                       find(cost_at_most(tm, level, costs[i] - 1)));
+      if (!cheaper) break;
+      costs = model_costs();
+    }
+    // Holds the level at its least cost, so the levels after it settle under
+    // it and every answer set reported still costs that.
+    solver->assertFormula(cost_at_most(tm, level, costs[i]));
+  }
+  return absl::OkStatus();
 }
 
 void Search::block(const std::vector<aspif::Atom>& atoms) {
@@ -166,10 +179,7 @@ void Search::block(const std::vector<aspif::Atom>& atoms) {
             ? tm.mkTerm(cvc5::Kind::NOT, {encoding.atom_var[atom]})
             : encoding.atom_var[atom]);
   }
-  blocked.push_back(disjunction(tm, literals));
-  // The solver in hand keeps searching, so it hears about the clause now. A
-  // fresh one picks it up from `blocked`.
-  if (!one_solver_per_question()) solver->assertFormula(blocked.back());
+  solver->assertFormula(disjunction(tm, literals));
 }
 
 }  // namespace
@@ -183,6 +193,8 @@ absl::StatusOr<SolveResult> solve(const aspif::Program& prog,
 
   Search search;
   RETURN_IF_ERROR(search.start(prog));
+  // Settling first is what leaves only optimal answer sets below.
+  RETURN_IF_ERROR(search.settle_costs());
 
   SolveResult result;
   while (options.max_answer_sets == 0 ||
@@ -196,7 +208,7 @@ absl::StatusOr<SolveResult> solve(const aspif::Program& prog,
     }
 
     AnswerSet answer_set;
-    ASSIGN_OR_RETURN(answer_set.costs, search.model_costs());
+    answer_set.costs = search.model_costs();
     answer_set.atoms = search.model_atoms();
     search.block(answer_set.atoms);
     result.answer_sets.push_back(std::move(answer_set));
@@ -215,6 +227,8 @@ absl::StatusOr<SolveResult> solve(const aspif::Program& prog,
 absl::StatusOr<QueryResult> answer_query(const aspif::Program& prog) {
   Search search;
   RETURN_IF_ERROR(search.start(prog));
+  // The query asks about the optimal answer sets, so the costs settle first.
+  RETURN_IF_ERROR(search.settle_costs());
 
   // A program with no answer set holds every query. Looking for an answer set
   // first is also what tells that case apart from a query that holds, since

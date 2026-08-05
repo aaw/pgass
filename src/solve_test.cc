@@ -695,8 +695,8 @@ TEST(SolveTest, UnviolatedWeakConstraintCostsZero) {
 }
 
 // A negative weight makes violating a weak constraint a reward, so the cheapest
-// answer set is the one that violates it. This is the case where bisecting
-// cannot start its range at zero.
+// answer set is the one that violates it. This is the case where the walk down
+// the costs cannot stop at zero.
 TEST(SolveTest, NegativeWeightIsWorthViolating) {
   auto out = solve_source(R"(
     p :- not q.

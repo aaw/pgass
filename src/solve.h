@@ -39,9 +39,9 @@ struct SolveOptions {
 // Solves a ground program: builds the encoding of encode.h and hands it to
 // cvc5.
 //
-// Nothing here reasons about rules, cycles, or costs. That all lives in the
-// encoding, the one --encode=smtlib prints. What is left is asking cvc5 for a
-// model, reading it, and ruling it out to ask again.
+// Nothing here reasons about rules or cycles. That lives in the encoding, the
+// one --encode=smtlib prints. What is left is asking cvc5 for a model,
+// reading it, and ruling it out to ask again.
 //
 // Returns the answer sets in the order cvc5 produced them, so at most
 // options.max_answer_sets of them, along with whether the search was exhausted.
@@ -49,9 +49,11 @@ struct SolveOptions {
 // one AnswerSet holding no atoms, which is what a program whose only answer set
 // is the empty one returns.
 //
-// Weak constraints are settled by the optimality assertion the encoding
-// carries, so every answer set returned is optimal and nothing here searches
-// for the least cost of a level.
+// Weak constraints settle before the first answer set comes back. Each
+// priority level is brought down one answer set at a time until nothing
+// cheaper is left, and its least cost is then asserted, so every answer set
+// returned is optimal. The script --encode=smtlib prints does the same walk,
+// written out as steps for a reader to follow by hand.
 //
 // Every program, normal or disjunctive, is decided by one translation. A
 // disjunctive head with two atoms on a common positive cycle costs that

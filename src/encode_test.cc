@@ -12,6 +12,7 @@
 
 #include "absl/status/status.h"
 #include "absl/status/statusor.h"
+#include "absl/strings/str_cat.h"
 #include "absl/strings/str_split.h"
 #include "aspif.h"
 #include "ground.h"
@@ -358,10 +359,9 @@ TEST(EncodeTest, TranslatesAMinAggregate) {
                              HasSubstr("(assert (=> (not |p(1)|) q))")));
 }
 
-// The script names the cost of each priority level and asserts that no answer
-// set costs less, so one check-sat lands on an optimal answer set. Reaching b
-// costs 2 at the more important level, so a is the optimum.
-TEST(EncodeTest, AssertsThatNoAnswerSetCostsLess) {
+// The script names the cost of each priority level, most important first, and
+// carries the recipe that brings those costs down.
+TEST(EncodeTest, NamesEachLevelCostAndHowToSettleIt) {
   auto script = encode_source(R"(
     a :- not b.
     b :- not a.
@@ -371,46 +371,31 @@ TEST(EncodeTest, AssertsThatNoAnswerSetCostsLess) {
   ASSERT_OK(script);
   // A weak constraint's body becomes an atom of its own, which the program
   // prints nothing for, so a cost adds up numbered atoms rather than a and b.
-  // The most important level comes first.
   EXPECT_THAT(commands(*script),
               AllOf(Contains("(define-fun cost@2 () Int (ite a4 2 0))"),
                     Contains("(define-fun cost@1 () Int (ite a3 1 0))"),
-                    Contains("(set-logic ALL)"), Contains("(check-sat)")));
-  EXPECT_THAT(comments(*script), Contains("; Weak constraints"));
+                    Contains("(set-logic QF_LIA)"), Contains("(check-sat)")));
+  // The recipe names the level to settle first and the one line that does it.
+  EXPECT_THAT(comments(*script),
+              AllOf(Contains("; Weak constraints"),
+                    Contains("; An answer set costs cost@2, then cost@1, in "
+                             "that order of importance, so"),
+                    Contains(";       (assert (< cost@2 N))"),
+                    Contains("; Then repeat from step 1 for cost@1, keeping "
+                             "the assertions already")));
 
+  // The script prints a cost without being edited, which is step 1.
+  EXPECT_THAT(commands(*script), Contains("(get-value (cost@2))"));
   auto answer = run_script(*script);
   ASSERT_OK(answer);
-  EXPECT_THAT(*answer,
-              AllOf(HasSubstr("sat"), HasSubstr("(define-fun a () Bool true)"),
-                    HasSubstr("(define-fun b () Bool false)")));
+  EXPECT_THAT(*answer, AllOf(HasSubstr("sat"), HasSubstr("(cost@2 ")));
 }
 
-// The optimality assertion says what the levels mean, so nothing outside it has
-// to: the levels are settled in one run, and a query then asks about the
-// optimal answer sets rather than about all of them. q(1) is the cheapest way
-// to satisfy the constraint, so it holds in every optimal answer set and q(2)
-// does not, though both hold in some answer set.
-TEST(EncodeTest, ComposesAQueryWithWeakConstraints) {
-  auto script = encode_source(R"(
-    p(1). p(2).
-    q(X) :- p(X), not r(X).
-    r(X) :- p(X), not q(X).
-    :- not q(1), not q(2).
-    :~ q(1). [1@1]
-    :~ q(2). [2@1]
-    q(X)?
-  )");
-  ASSERT_OK(script);
-  auto output = run_script(*script);
-  ASSERT_OK(output);
-  EXPECT_EQ(*output, "unsat\nsat\n");
-}
-
-// The other answer set the assertion quantifies over is described by its
-// reduct, not by a ranking, so a positive cycle cannot pass for an answer set
-// under it. Without that check {y, a, b} would look like an answer set costing
-// nothing, and the script would come back unsat.
-TEST(EncodeTest, WeighsOnlyRealAnswerSetsAgainstThisOne) {
+// Following the recipe reaches the optimum. The walk has to weigh only real
+// answer sets: {y, a, b} satisfies the rules but holds a and b up on nothing
+// more than their positive cycle, so the ranking rules it out and the cheapest
+// answer set is {x, a, b} at 1 rather than something costing nothing.
+TEST(EncodeTest, FollowingTheRecipeReachesTheOptimum) {
   auto script = encode_source(R"(
     x :- not y.
     y :- not x.
@@ -422,16 +407,60 @@ TEST(EncodeTest, WeighsOnlyRealAnswerSetsAgainstThisOne) {
     :~ c. [2@1]
   )");
   ASSERT_OK(script);
-  // The subset variables of the inner check are named after the atoms of the
-  // other answer set, which are themselves named after the atoms.
-  EXPECT_THAT(*script, HasSubstr("|sub(alt(a))|"));
 
-  // {x, a, b} costs 1 and {y, c} costs 2, so the script's model holds x.
-  auto output = run_script(*script);
-  ASSERT_OK(output);
-  EXPECT_THAT(*output,
+  // Step 2 of the recipe, an assertion the reader adds above the check-sat.
+  auto with_bound = [&script](int bound) {
+    const size_t at = script->rfind("(check-sat)");
+    return absl::StrCat(script->substr(0, at), "(assert (< cost@1 ", bound,
+                        "))\n", script->substr(at));
+  };
+
+  // {y, c} costs 2 and {x, a, b} costs 1, so the walk stops at 1.
+  auto cheaper = run_script(with_bound(2));
+  ASSERT_OK(cheaper);
+  EXPECT_THAT(*cheaper,
               AllOf(HasSubstr("sat"), HasSubstr("(define-fun x () Bool true)"),
                     HasSubstr("(define-fun c () Bool false)")));
+
+  auto exhausted = run_script(with_bound(1));
+  ASSERT_OK(exhausted);
+  EXPECT_THAT(*exhausted, HasSubstr("unsat"));
+}
+
+// A query is asked of whatever the assertions leave, so settling the levels
+// first is what makes it ask about the optimal answer sets. q(1) is the
+// cheapest way to satisfy the constraint, so it holds in every optimal answer
+// set and q(2) does not, though both hold in some answer set.
+TEST(EncodeTest, AQuerySettledFirstAsksAboutOptimalAnswerSets) {
+  auto script = encode_source(R"(
+    p(1). p(2).
+    q(X) :- p(X), not r(X).
+    r(X) :- p(X), not q(X).
+    :- not q(1), not q(2).
+    :~ q(1). [1@1]
+    :~ q(2). [2@1]
+    q(X)?
+  )");
+  ASSERT_OK(script);
+  EXPECT_THAT(comments(*script),
+              Contains("; cost@1 is what an answer set costs. The check-sat "
+                       "just below prints it."));
+
+  // The cost gets a check-sat of its own, ahead of the query's two.
+  auto unsettled = run_script(*script);
+  ASSERT_OK(unsettled);
+  EXPECT_THAT(*unsettled, HasSubstr("(cost@1 "));
+  // Unsettled, neither atom holds throughout: q(2) alone is an answer set too.
+  EXPECT_THAT(*unsettled, HasSubstr("sat\nsat\n"));
+
+  // The walk settles cost@1 at 1, which is q(1) on its own. Settling it is one
+  // line under the cost definitions, and the query then answers about the
+  // optimal answer sets.
+  const size_t at = script->find("(check-sat)");
+  auto settled = run_script(absl::StrCat(
+      script->substr(0, at), "(assert (= cost@1 1))\n", script->substr(at)));
+  ASSERT_OK(settled);
+  EXPECT_THAT(*settled, HasSubstr("unsat\nsat\n"));
 }
 
 // Two minimize statements of one priority are one level, the cost of a level

@@ -3,12 +3,12 @@
 
 #include <cvc5/cvc5.h>
 
-#include <optional>
 #include <string>
 #include <vector>
 
 #include "absl/status/statusor.h"
 #include "aspif.h"
+#include "bigint.h"
 
 /* The translation of a ground program into SMT, along the lines of Niemela,
    "Stable models and difference logic": the Clark completion of the program,
@@ -20,7 +20,9 @@
    another solver.
 
    The two say the same thing, so the script is what solve.cc asserts, and
-   running it answers what solving answers.
+   running it answers what solving answers. Weak constraints take several runs
+   either way. solve.cc asks for a cheaper answer set until there is none left,
+   and the script carries those same steps for a reader to follow by hand.
 */
 
 // cvc5 rejects AND, OR, and ADD with fewer than two arguments, and every empty
@@ -65,6 +67,28 @@ cvc5::Term weighted_sum(cvc5::TermManager& tm,
 cvc5::Term at_least(cvc5::TermManager& tm, const std::vector<cvc5::Term>& lits,
                     std::int64_t bound);
 
+// One priority level of the weak constraints. Two minimize statements sharing
+// a priority make one level, and its cost is the total over their literals.
+struct Level {
+  BigInt priority;
+  std::vector<aspif::WeightedLit> lits;
+  // The formula for each of `lits`, in the same order.
+  std::vector<cvc5::Term> lit_terms;
+  // The weights of the true literals added up.
+  cvc5::Term cost;
+};
+
+// Whether `level` costs at most `bound`.
+//
+// Unit weights make the cost a count of the true literals, which at_least()
+// bounds without arithmetic. Any other level compares its sum instead.
+//
+// Which one is used matters near the least cost. A sum gives the solver almost
+// nothing to propagate there: on an ASP Competition still-life instance the
+// count settled a bound in seconds that the sum left open past 15 minutes.
+cvc5::Term cost_at_most(cvc5::TermManager& tm, const Level& level,
+                        const BigInt& bound);
+
 // One group of assertions and what it is called. They all have to hold, so the
 // grouping changes nothing for the solver. It gives the script headings a
 // reader can navigate by.
@@ -80,7 +104,7 @@ struct Section {
 // formulas that hold of them.
 struct Encoding {
   // The SMT logic the formulas fit in: QF_IDL, the wider QF_LIA, or ALL where
-  // a head cycle or a weak constraint brings a quantifier.
+  // a head cycle brings the quantified minimality assertion.
   const char* logic = nullptr;
   // One Bool per atom, indexed by atom id. Slot 0 is a null Term, 0 being no
   // atom.
@@ -92,15 +116,9 @@ struct Encoding {
   // for the atom where there is one.
   std::vector<std::string> atom_name;
   std::vector<Section> sections;
-  // The cost of each priority level, the most important first. Empty for a
-  // program with no weak constraints. A script names these, and solve.cc reads
-  // their values out of a model to report what an answer set cost.
-  std::vector<cvc5::Term> level_cost;
-  // The formula saying no answer set costs less than this one, empty for a
-  // program with no weak constraints. It is no section of its own because it
-  // does not say which models are answer sets, it picks the optimal ones out
-  // of them. Both solve.cc and a script assert it.
-  std::optional<cvc5::Term> optimality;
+  // The priority levels, the most important first, which is the order they
+  // have to be settled in. Empty for a program with no weak constraints.
+  std::vector<Level> levels;
   // One formula per atom the program's query matched, empty where it matched
   // none. These are questions rather than assertions, so they are kept out of
   // the sections above. Asking one takes a search for an answer set that
@@ -127,17 +145,18 @@ absl::StatusOr<Encoding> build_encoding(cvc5::TermManager& tm,
 // answer set can satisfy it, so 'unsat' there means the program has no answer
 // set, which is the one way such a query holds.
 //
-// Every script runs unedited, and answers its question in the run. Three
-// programs take more than the plain check-sat above:
+// Three programs take more than the plain check-sat above:
 //   - A head cycle, which asserts the minimality check as well. That assertion
 //     quantifies over subsets, so the script is in the ALL logic.
 //   - A query matching several atoms, which is one check-sat per atom, each
 //     under a negation of its own in a push and pop scope, in place of the one
 //     at the end.
-//   - Weak constraints, which name the cost of each priority level and assert
-//     that no answer set costs less. That assertion quantifies over the other
-//     answer set, so it too takes the ALL logic, and it composes with a query:
-//     the query then asks about the optimal answer sets.
+//   - Weak constraints, which name the cost of each priority level and print
+//     it. Bringing a cost down to the least takes a run per step, so this is
+//     the one script a reader edits between runs rather than running once.
+//     The steps are written out in the script itself. Where a query comes
+//     with them, they settle the costs first, and the query then asks about
+//     the optimal answer sets.
 //
 // Returns an UnimplementedError only for what build_encoding refuses.
 absl::StatusOr<std::string> encode_smtlib(const aspif::Program& prog);
