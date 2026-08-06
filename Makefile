@@ -2,7 +2,7 @@ NPROC := $(shell nproc 2>/dev/null || sysctl -n hw.logicalcpu 2>/dev/null || ech
 
 SRCS := $(shell find src -name '*.cpp' -o -name '*.h' -o -name '*.c')
 
-.PHONY: all build clean test asan tidy
+.PHONY: all build clean test perf asan tidy
 
 all: build test
 
@@ -24,6 +24,12 @@ asan:
 
 test:
 	ctest --test-dir build --output-on-failure $(if $(FILTER),-R $(FILTER))
+
+# The timed cases in perf/. Minutes long, so it is not part of 'make'.
+# DIFFICULTY=all adds the slow ones, SAVE=1 records the times to compare to.
+perf: build
+	python3 scripts/perf.py $(if $(DIFFICULTY),--difficulty $(DIFFICULTY)) \
+		$(if $(FILTER),--filter $(FILTER)) $(if $(SAVE),--save)
 
 clean:
 	rm -rf build build-asan
