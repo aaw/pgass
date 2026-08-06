@@ -2,7 +2,7 @@ NPROC := $(shell nproc 2>/dev/null || sysctl -n hw.logicalcpu 2>/dev/null || ech
 
 SRCS := $(shell find src -name '*.cpp' -o -name '*.h' -o -name '*.c')
 
-.PHONY: all build clean test perf asan tidy
+.PHONY: all build clean test perf asan
 
 all: build test
 
