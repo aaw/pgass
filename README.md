@@ -1,5 +1,5 @@
 # pgass
-A pretty good [answer set](https://en.wikipedia.org/wiki/Answer_set_programming) solver
+A pretty good [answer set](https://en.wikipedia.org/wiki/Answer_set_programming) solver.
 
 pgass implements all of [ASP-Core-2](https://arxiv.org/pdf/1911.04326), has modular
 grounder and solver components, uses cvc5 as a solver backend, and is competitive with [clingo](https://potassco.org/clingo/) on
@@ -97,7 +97,6 @@ sat
 
 The `cover(1)`, `cover(2)`, etc. variables in the resulting solution set represent the vertex cover, so the above result
 says `{2,3,5}` is a vertex cover of cost 3.
-
 
 ## References
 

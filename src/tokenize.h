@@ -2,7 +2,10 @@
 #define __TOKENIZE_H__
 
 #include <algorithm>
+#include <cstddef>
+#include <string>
 #include <string_view>
+#include <vector>
 
 #include "absl/strings/str_cat.h"
 
@@ -219,14 +222,21 @@ class Lexer {
 
   std::string report_context(size_t error_pos) {
     size_t clamped = std::min(error_pos, source_.size());
-    int line = 1;
-    size_t line_start = 0;
-    for (size_t i = 0; i < clamped; ++i) {
-      if (source_[i] == '\n') {
-        line++;
-        line_start = i + 1;
+    // Where every line of the source starts, worked out on the first call and
+    // kept. Parsing asks for a position's line far more often than the one
+    // error a run reports: it tries a production, has the failure build its
+    // message, then backtracks, so a file of n statements asks n times.
+    if (line_starts_.empty()) {
+      line_starts_.push_back(0);
+      for (size_t i = 0; i < source_.size(); ++i) {
+        if (source_[i] == '\n') line_starts_.push_back(i + 1);
       }
     }
+    const size_t index =
+        std::upper_bound(line_starts_.begin(), line_starts_.end(), clamped) -
+        line_starts_.begin() - 1;
+    const int line = static_cast<int>(index) + 1;
+    const size_t line_start = line_starts_[index];
     size_t col = clamped - line_start;
     size_t line_end = line_start;
     while (line_end < source_.size() && source_[line_end] != '\n') ++line_end;
@@ -254,6 +264,7 @@ class Lexer {
   std::size_t pos_ = 0;
   std::size_t last_token_start_ = 0;
   std::string_view source_;
+  std::vector<std::size_t> line_starts_;
 };
 
 class LexerCheckpoint {

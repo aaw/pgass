@@ -8,6 +8,7 @@
 #include <utility>
 #include <vector>
 
+#include "absl/algorithm/container.h"
 #include "absl/container/btree_map.h"
 #include "absl/container/btree_set.h"
 #include "absl/container/flat_hash_map.h"
@@ -148,6 +149,32 @@ struct PredData {
     auto it = index.find(args);
     return it == index.end() ? nullptr : &atoms[it->second];
   }
+
+  // How many different values the atoms hold at each argument position, e.g.
+  // {2, 3} for a p/2 holding p(a,1), p(a,2), p(b,3). join_order() reads these
+  // to guess how many atoms a step matches.
+  //
+  // Atoms are only ever appended, so each call counts only the ones added
+  // since the last.
+  const std::vector<size_t>& distinct_per_position() const {
+    if (counted_at == atoms.size()) return distinct;
+    if (seen.empty() && !atoms.empty()) seen.resize(atoms.front().args.size());
+    for (; counted_at < atoms.size(); ++counted_at) {
+      const Tuple& args = atoms[counted_at].args;
+      for (size_t k = 0; k < seen.size(); ++k) seen[k].insert(args[k]);
+    }
+    distinct.clear();
+    distinct.reserve(seen.size());
+    for (const absl::flat_hash_set<Sym>& values : seen) {
+      distinct.push_back(values.size());
+    }
+    return distinct;
+  }
+
+ private:
+  mutable std::vector<absl::flat_hash_set<Sym>> seen;  // values, by position
+  mutable std::vector<size_t> distinct;                // their counts
+  mutable size_t counted_at = 0;
 };
 
 // What one call to Store::insert did: the ASPIF atom the tuple has, and
@@ -446,27 +473,45 @@ bool holds_arithmetic(const Term& term) {
   return false;
 }
 
-// Tries to match `literal`'s arguments against a stored tuple, extending
-// `binding` with any variables the match binds and recording them in `trail`.
-// `tuple` has one value per argument: the store groups atoms by name and arity,
-// so every tuple stored under the literal's predicate has the literal's arity.
+// Which arguments of a literal a match works through, and in what order.
 //
 // The arguments that bind go first, whatever order they stand in, because the
 // arithmetic ones can only be evaluated once the variables they read have
 // values: matching 'q(X+1, X)' against a stored q(4, 3) takes the X from the
 // second argument and only then works out whether X + 1 is the 4.
-absl::StatusOr<bool> match_args(const ClassicalLiteral& literal,
-                                const Tuple& tuple, Binding& binding,
-                                BindingTrail& trail, Symbols& syms) {
-  size_t n = literal.args ? literal.args->size() : 0;
+//
+// `skip` names the positions to leave out, which is how a join step drops the
+// ones it probed the store by.
+std::vector<size_t> match_plan(const ClassicalLiteral& literal,
+                               const std::vector<size_t>& skip) {
+  const size_t n = literal.args ? literal.args->size() : 0;
+  std::vector<size_t> plan;
+  plan.reserve(n);
   for (bool arithmetic : {false, true}) {
     for (size_t k = 0; k < n; ++k) {
-      const Term& arg = *(*literal.args)[k];
-      if (holds_arithmetic(arg) != arithmetic) continue;
-      ASSIGN_OR_RETURN(bool ok,
-                       match_term(arg, tuple[k], binding, trail, syms));
-      if (!ok) return false;
+      if (absl::c_linear_search(skip, k)) continue;
+      if (holds_arithmetic(*(*literal.args)[k]) != arithmetic) continue;
+      plan.push_back(k);
     }
+  }
+  return plan;
+}
+
+// Tries to match `literal`'s arguments against a stored tuple, extending
+// `binding` with any variables the match binds and recording them in `trail`.
+// `tuple` has one value per argument: the store groups atoms by name and arity,
+// so every tuple stored under the literal's predicate has the literal's arity.
+//
+// `plan` is what match_plan() worked out for the literal.
+absl::StatusOr<bool> match_args(const ClassicalLiteral& literal,
+                                const std::vector<size_t>& plan,
+                                const Tuple& tuple, Binding& binding,
+                                BindingTrail& trail, Symbols& syms) {
+  for (size_t k : plan) {
+    ASSIGN_OR_RETURN(
+        bool ok,
+        match_term(*(*literal.args)[k], tuple[k], binding, trail, syms));
+    if (!ok) return false;
   }
   return true;
 }
@@ -969,76 +1014,6 @@ LiteralVars literal_vars(const ClassicalLiteral& literal,
   return vars;
 }
 
-// The order a join visits a body's positive literals in.
-//
-// A literal waits for the variables its arithmetic reads, so
-// "p(X) :- q(X+1), r(X)." matches r(X) first and only then evaluates X + 1.
-// Source order would reach q(X+1) with X still unbound, which is not a term
-// grounding can evaluate.
-//
-// Among the literals whose turn it could be, the delta literal goes first: it
-// reads only what the previous pass derived, which is usually a small fraction
-// of the store, so starting there keeps the partial instances the join carries
-// around few. Left to right, the join would instead build one partial instance
-// per atom of the first literal and only then discover that the delta has
-// nothing to join them with.
-std::vector<size_t> join_order(const BodyParts& parts, const Binding& binding,
-                               std::optional<size_t> delta_position) {
-  const size_t count = parts.positive.size();
-  std::vector<LiteralVars> vars;
-  vars.reserve(count);
-  absl::flat_hash_set<size_t> bound;
-  for (const ClassicalLiteral* literal : parts.positive) {
-    vars.push_back(literal_vars(*literal, binding));
-    for (size_t slot : vars.back().binds) {
-      if (binding.at(slot) != kNoSym) bound.insert(slot);
-    }
-    for (size_t slot : vars.back().needs) {
-      if (binding.at(slot) != kNoSym) bound.insert(slot);
-    }
-  }
-
-  // A literal's turn has come once every variable its arithmetic reads is
-  // bound, either by an earlier literal or by the literal itself, e.g. the X
-  // of 'q(X+1, X)', which match_args binds from the argument that can bind it.
-  auto is_ready = [&](size_t k) {
-    for (size_t slot : vars[k].needs) {
-      if (!bound.contains(slot) && !vars[k].binds.contains(slot)) return false;
-    }
-    return true;
-  };
-
-  std::vector<size_t> order;
-  order.reserve(count);
-  std::vector<bool> taken(count, false);
-  while (order.size() < count) {
-    std::optional<size_t> pick;
-    if (delta_position.has_value() && !taken[*delta_position] &&
-        is_ready(*delta_position)) {
-      pick = *delta_position;
-    }
-    for (size_t k = 0; !pick.has_value() && k < count; ++k) {
-      if (!taken[k] && is_ready(k)) pick = k;
-    }
-    if (!pick.has_value()) {
-      // Nothing is ready, which means a variable is bound only by an
-      // assignment, e.g. the X of "p(X) :- q(X+1), X = 2.". Assignments are
-      // settled after the join, so take the literals as they come and let
-      // matching report the unbound variable.
-      for (size_t k = 0; k < count; ++k) {
-        if (!taken[k]) {
-          pick = k;
-          break;
-        }
-      }
-    }
-    taken[*pick] = true;
-    order.push_back(*pick);
-    bound.insert(vars[*pick].binds.begin(), vars[*pick].binds.end());
-  }
-  return order;
-}
-
 // Whether `term` holds a '_' anywhere, e.g. the 'f(_)' of 'p(f(_))'. Such a
 // term has no value of its own: it takes whatever the atom holds there.
 bool holds_anonymous_variable(const Term& term) {
@@ -1067,6 +1042,185 @@ bool holds_anonymous_variable(const Term& term) {
       return false;
   }
   return false;
+}
+
+// What ordering needs to know about one positive literal. An argument whose
+// slots are all bound and which holds no '_' has a value by the time the
+// literal runs, so the step can probe the store by it. probeable_positions()
+// answers that once the join is running. Ordering answers it from slots alone,
+// before any value exists.
+struct LiteralStats {
+  struct Arg {
+    absl::InlinedVector<size_t, 4> slots;
+    bool anonymous = false;
+  };
+  const PredData* data = nullptr;
+  absl::InlinedVector<Arg, 4> args;
+};
+
+LiteralStats literal_stats(const ClassicalLiteral& literal,
+                           const Binding& binding, const Store& store) {
+  LiteralStats stats;
+  stats.data = store.find(pred_key(literal));
+  if (literal.args == nullptr) return stats;
+  for (const auto& arg : *literal.args) {
+    LiteralStats::Arg& out = stats.args.emplace_back();
+    out.anonymous = holds_anonymous_variable(*arg);
+    collect::for_each_variable(*arg, [&](const Variable& var) {
+      out.slots.push_back(binding.slot_of(var));
+    });
+  }
+  return stats;
+}
+
+// Roughly how many atoms a step at this literal matches once `bound` holds the
+// slots the steps before it fill.
+//
+// A step with nothing to probe by reads the whole predicate. Each position it
+// can probe by cuts that down by however many different values the predicate
+// holds there. The atoms are taken to be spread evenly over those values, so
+// naming one keeps a 1/values share. For a p/2 of a thousand atoms with a
+// hundred different first arguments, 'p(X, Y)' with X bound is guessed to
+// match ten.
+double match_estimate(const LiteralStats& stats,
+                      const absl::flat_hash_set<size_t>& bound) {
+  if (stats.data == nullptr) return 0;
+  double estimate = static_cast<double>(stats.data->atoms.size());
+  const std::vector<size_t>& distinct = stats.data->distinct_per_position();
+  for (size_t k = 0; k < stats.args.size() && k < distinct.size(); ++k) {
+    if (stats.args[k].anonymous || distinct[k] == 0) continue;
+    const bool probeable =
+        absl::c_all_of(stats.args[k].slots,
+                       [&](size_t slot) { return bound.contains(slot); });
+    if (probeable) estimate /= static_cast<double>(distinct[k]);
+  }
+  return estimate;
+}
+
+// The order a join visits a body's positive literals in.
+//
+// A literal waits for the variables its arithmetic reads, so
+// "p(X) :- q(X+1), r(X)." matches r(X) first and only then evaluates X + 1.
+// Source order would reach q(X+1) with X still unbound, which is not a term
+// grounding can evaluate.
+//
+// Among the literals whose turn it could be, the delta literal goes first: it
+// reads only what the previous pass derived, which is usually a small fraction
+// of the store, so starting there keeps the partial instances the join carries
+// around few. Left to right, the join would instead build one partial instance
+// per atom of the first literal and only then discover that the delta has
+// nothing to join them with.
+//
+// The rest keep the order the body wrote them in unless another order reads
+// far fewer atoms, as match_estimate() counts them. Which order is picked
+// matters most on a body whose literals do not all share variables, e.g.
+//
+//   true(conj(S), N) :- elem(conj(S)), true(P), setn(S, N, pos(P)).
+//
+// Source order matches elem, then pairs every S it found with every atom of
+// true, and only then throws nearly all of those pairs away at setn. Taking
+// setn second instead probes it by the S in hand, which binds N and P, and
+// leaves true(P) a single lookup.
+std::vector<size_t> join_order(const BodyParts& parts, const Binding& binding,
+                               const Store& store,
+                               std::optional<size_t> delta_position) {
+  const size_t count = parts.positive.size();
+  std::vector<LiteralVars> vars;
+  std::vector<LiteralStats> stats;
+  vars.reserve(count);
+  stats.reserve(count);
+  absl::flat_hash_set<size_t> bound;
+  for (const ClassicalLiteral* literal : parts.positive) {
+    vars.push_back(literal_vars(*literal, binding));
+    stats.push_back(literal_stats(*literal, binding, store));
+    for (size_t slot : vars.back().binds) {
+      if (binding.at(slot) != kNoSym) bound.insert(slot);
+    }
+    for (size_t slot : vars.back().needs) {
+      if (binding.at(slot) != kNoSym) bound.insert(slot);
+    }
+  }
+
+  // A literal's turn has come once every variable its arithmetic reads is
+  // bound, either by an earlier literal or by the literal itself, e.g. the X
+  // of 'q(X+1, X)', which match_args binds from the argument that can bind it.
+  auto is_ready = [&](size_t k) {
+    for (size_t slot : vars[k].needs) {
+      if (!bound.contains(slot) && !vars[k].binds.contains(slot)) return false;
+    }
+    return true;
+  };
+
+  // An order costs what its steps read. Each step reads match_estimate() atoms
+  // for every partial instance that reaches it, so the order costs the sum of
+  // the running products.
+  //
+  // The walk takes the lowest-numbered ready literal at every step, so the
+  // first order it completes is the body's own. That one is the incumbent.
+  std::vector<size_t> best_order;
+  double best_cost = 0;  // what an order has to come in under
+  std::vector<size_t> order;
+  order.reserve(count);
+  std::vector<bool> taken(count, false);
+
+  // How many orders the search may look at beyond the first. Trying them all
+  // is factorial in the number of positive literals, so a wide body needs a
+  // cutoff to keep ordering cheaper than running.
+  int budget = 4000;
+
+  // The estimate is crude, so it decides nothing it says is close. Keeping the
+  // body's own order where the win is small also keeps the order atoms are
+  // derived in, which is the order they are numbered in.
+  constexpr double kWorthReordering = 4.0;
+  auto record_order = [&](const std::vector<size_t>& candidate, double cost) {
+    const bool incumbent = best_order.empty();
+    best_order = candidate;
+    best_cost = incumbent ? cost / kWorthReordering : cost;
+  };
+
+  auto search = [&](auto& self, double rows, double cost) -> void {
+    if (!best_order.empty() && (cost >= best_cost || --budget < 0)) return;
+    if (order.size() == count) {
+      record_order(order, cost);
+      return;
+    }
+    bool any_ready = false;
+    for (size_t k = 0; k < count; ++k) {
+      if (taken[k] || !is_ready(k)) continue;
+      // The delta literal reads only what the last pass derived, so it takes
+      // its turn as soon as it is ready. Any other literal ahead of it reads
+      // the whole store to find the instances that pass already found.
+      if (delta_position.has_value() && !taken[*delta_position] &&
+          is_ready(*delta_position) && k != *delta_position) {
+        continue;
+      }
+      any_ready = true;
+      const double estimate = match_estimate(stats[k], bound);
+      absl::InlinedVector<size_t, 8> fresh;
+      for (size_t slot : vars[k].binds) {
+        if (bound.insert(slot).second) fresh.push_back(slot);
+      }
+      taken[k] = true;
+      order.push_back(k);
+      self(self, rows * estimate, cost + rows * estimate);
+      order.pop_back();
+      taken[k] = false;
+      for (size_t slot : fresh) bound.erase(slot);
+    }
+    // Nothing left is ready, which means a variable is bound only by an
+    // assignment, e.g. the X of "p(X) :- q(X+1), X = 2.". Assignments are
+    // settled after the join, so the rest go in as they come and matching
+    // reports the unbound variable.
+    if (!any_ready) {
+      std::vector<size_t> rest = order;
+      for (size_t k = 0; k < count; ++k) {
+        if (!taken[k]) rest.push_back(k);
+      }
+      record_order(rest, cost);
+    }
+  };
+  search(search, 1.0, 0.0);
+  return best_order;
 }
 
 // Whether `arg` has a value of its own under `binding`, e.g. the 'Y' of
@@ -1160,6 +1314,8 @@ using InstanceFn = absl::FunctionRef<absl::Status(const Instance&)>;
 struct JoinStep {
   const ClassicalLiteral* literal = nullptr;
   std::vector<size_t> positions;
+  // The arguments matching still has to work through. See match_plan().
+  std::vector<size_t> plan;
   absl::flat_hash_map<Tuple, std::vector<const GroundAtom*>> index;
   bool ready = false;
   // Set when the predicate has no atoms at all, which means no instance can get
@@ -1257,6 +1413,7 @@ void prepare_step(Join& join, size_t depth, const Binding& binding) {
   }
   step.literal = &literal;
   step.positions = probeable_positions(literal, binding);
+  step.plan = match_plan(literal, step.positions);
   step.index = index_atoms(
       *data, scan_range(*data, join.delta_position, position), step.positions);
 }
@@ -1280,11 +1437,12 @@ absl::Status extend(Join& join, size_t depth, Instance& instance,
   auto it = step.index.find(*key);
   if (it == step.index.end()) return absl::OkStatus();
 
-  // The candidates already agree on the probed positions, so match_args is here
-  // to bind the variables in the positions still open.
+  // The candidates already agree on the probed positions, which is why the
+  // step's plan leaves those out: matching is here to bind the variables in the
+  // positions still open.
   for (const GroundAtom* atom : it->second) {
     BindingTrail trail(instance.binding);
-    absl::StatusOr<bool> ok = match_args(*step.literal, atom->args,
+    absl::StatusOr<bool> ok = match_args(*step.literal, step.plan, atom->args,
                                          instance.binding, trail, join.syms);
     // An argument with no value matches no atom at all, so the step is over,
     // not just this candidate.
@@ -1335,7 +1493,8 @@ absl::StatusOr<std::optional<std::string>> find_instances(
   Join join{.parts = parts,
             .store = store,
             .syms = syms,
-            .order = join_order(parts, instance.binding, delta_position),
+            .order =
+                join_order(parts, instance.binding, store, delta_position),
             .delta_position = delta_position};
   join.steps.resize(join.order.size());
   RETURN_IF_ERROR(extend(join, 0, instance, emit));
@@ -1365,10 +1524,11 @@ absl::StatusOr<std::vector<aspif::Atom>> matching_atoms(
   // X has no value yet, which this literal's own scope has no use for, so it
   // happens on a scratch copy.
   Binding scratch = binding;
+  const std::vector<size_t> plan = match_plan(literal, /*skip=*/{});
   for (const GroundAtom& atom : data->atoms) {
     BindingTrail trail(scratch);
     ASSIGN_OR_RETURN(bool ok,
-                     match_args(literal, atom.args, scratch, trail, syms));
+                     match_args(literal, plan, atom.args, scratch, trail, syms));
     if (ok) matched.push_back(atom.id);
   }
   return matched;
