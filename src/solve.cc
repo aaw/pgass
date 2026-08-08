@@ -27,9 +27,17 @@ absl::StatusOr<bool> decided(const cvc5::Result& result) {
                    "' rather than deciding the program"));
 }
 
-// One search over one ground program. The encoding describes the answer sets
-// exactly, so every model the solver returns is an answer set, and an optimal
-// one once settle_costs() has bounded the levels.
+// The options every solver here runs with.
+void configure(cvc5::Solver& solver, const char* logic) {
+  solver.setLogic(logic);
+  solver.setOption("produce-models", "true");
+  solver.setOption("sat-solver", "cadical");
+}
+
+// One search over one ground program. Every model find() returns is an answer
+// set, and an optimal one once settle_costs() has bounded the levels. For most
+// programs the encoding says so outright. A head cycle leaves it to the
+// minimality check, which find() runs before handing a model back.
 //
 // Every member holds terms of `tm`, so `tm` is declared first and destroyed
 // last.
@@ -38,14 +46,26 @@ struct Search {
   const aspif::Program* prog = nullptr;
   Encoding encoding;
   std::optional<cvc5::Solver> solver;
+  // The minimality check of encode.h, asked of every model the solver hands
+  // back. Left unbuilt where the encoding already describes the answer sets.
+  std::optional<cvc5::Solver> checker;
 
   // Builds the encoding of `program`. Nothing is asked of cvc5 until find().
   absl::Status start(const aspif::Program& program);
 
   // Whether the program has an answer set nothing asserted so far rules out.
   // `question`, where given, holds for this call alone.
+  //
+  // A head-cyclic program checks each model for minimality first. One that
+  // fails leaves behind a loop nogood, so the next round asks a solver that
+  // knows more. The loop ends at a model that passes, or at a solver with
+  // nothing left to try.
   absl::StatusOr<bool> find(
       const std::optional<cvc5::Term>& question = std::nullopt);
+
+  // An unfounded set of the model the solver holds, empty where that model is
+  // an answer set. Only a head-cyclic program has one to find.
+  absl::StatusOr<std::vector<aspif::Atom>> unfounded_set();
 
   // The atoms true in the model the solver holds.
   std::vector<aspif::Atom> model_atoms() const;
@@ -75,6 +95,24 @@ struct Search {
 
   // A solver holding the encoding.
   void load();
+
+  // A second solver holding the minimality check, and the term lists below. A
+  // check names all of them every round, so they are built once.
+  void load_checker();
+
+  // Everything one round asks the solver for, in one list so it takes one call:
+  // MinimalityCheck::read first, then the droppable atoms.
+  std::vector<cvc5::Term> probe;
+  // MinimalityCheck::read negated, in the same order as the front of `probe`.
+  std::vector<cvc5::Term> read_false;
+  // The subset variable of each droppable atom and that variable negated, both
+  // in the order of MinimalityCheck::droppable.
+  std::vector<cvc5::Term> droppable_subset;
+  std::vector<cvc5::Term> droppable_dropped;
+  // Scratch refilled every round.
+  std::vector<cvc5::Term> assumptions;
+  std::vector<cvc5::Term> droppable_held;
+  std::vector<bool> holds_droppable;
 };
 
 absl::Status Search::start(const aspif::Program& program) {
@@ -85,10 +123,7 @@ absl::Status Search::start(const aspif::Program& program) {
 
 void Search::load() {
   solver.emplace(tm);
-  solver->setLogic(encoding.logic);
-  solver->setOption("produce-models", "true");
-  solver->setOption("sat-solver", "cadical");
-
+  configure(*solver, encoding.logic);
   for (const Section& section : encoding.sections) {
     for (const cvc5::Term& assertion : section.assertions) {
       solver->assertFormula(assertion);
@@ -96,12 +131,102 @@ void Search::load() {
   }
 }
 
+void Search::load_checker() {
+  checker.emplace(tm);
+  configure(*checker, encoding.check.logic);
+  for (const cvc5::Term& assertion : encoding.check.assertions) {
+    checker->assertFormula(assertion);
+  }
+
+  const MinimalityCheck& check = encoding.check;
+  probe.reserve(check.read.size() + check.droppable.size());
+  read_false.reserve(check.read.size());
+  for (aspif::Atom atom : check.read) {
+    probe.push_back(encoding.atom_var[atom]);
+    read_false.push_back(literal_term(tm, encoding.atom_var, -atom));
+  }
+  droppable_subset.reserve(check.droppable.size());
+  droppable_dropped.reserve(check.droppable.size());
+  for (aspif::Atom atom : check.droppable) {
+    probe.push_back(encoding.atom_var[atom]);
+    droppable_subset.push_back(check.subset_var[atom]);
+    droppable_dropped.push_back(
+        tm.mkTerm(cvc5::Kind::NOT, {check.subset_var[atom]}));
+  }
+  assumptions.reserve(probe.size() + 1);
+  droppable_held.reserve(check.droppable.size());
+  holds_droppable.resize(check.droppable.size());
+}
+
+absl::StatusOr<std::vector<aspif::Atom>> Search::unfounded_set() {
+  const MinimalityCheck& check = encoding.check;
+  if (!checker.has_value()) load_checker();
+
+  // The model under test goes in as assumptions rather than assertions, so one
+  // checker answers about every model and keeps what it learned about the
+  // reduct from one to the next.
+  //
+  // One call reads every value. Asking cvc5 one at a time costs more than
+  // deciding the check does, there being a check per round.
+  const std::vector<cvc5::Term> model = solver->getValue(probe);
+  assumptions.clear();
+  for (size_t i = 0; i < check.read.size(); ++i) {
+    assumptions.push_back(model[i].getBooleanValue() ? probe[i]
+                                                     : read_false[i]);
+  }
+
+  // A smaller model has to leave out every atom the model leaves out, and drop
+  // at least one it holds. Both are about the subset variables alone, so the
+  // model's own variables stay out of the assumptions, which is what keeps a
+  // check from costing one assumption per atom of the component.
+  droppable_held.clear();
+  for (size_t i = 0; i < check.droppable.size(); ++i) {
+    holds_droppable[i] = model[check.read.size() + i].getBooleanValue();
+    if (holds_droppable[i]) {
+      droppable_held.push_back(droppable_dropped[i]);
+    } else {
+      assumptions.push_back(droppable_dropped[i]);
+    }
+  }
+  // With nothing to drop the model is as small as the reduct allows.
+  std::vector<aspif::Atom> unfounded;
+  if (droppable_held.empty()) return unfounded;
+  assumptions.push_back(disjunction(tm, droppable_held));
+
+  ASSIGN_OR_RETURN(const bool smaller,
+                   decided(checker->checkSatAssuming(assumptions)));
+  if (!smaller) return unfounded;
+
+  // The atoms the smaller model drops are the unfounded set. Nothing the model
+  // holds derives them except by going round the positive cycle they sit on.
+  const std::vector<cvc5::Term> kept = checker->getValue(droppable_subset);
+  for (size_t i = 0; i < check.droppable.size(); ++i) {
+    if (holds_droppable[i] && !kept[i].getBooleanValue()) {
+      unfounded.push_back(check.droppable[i]);
+    }
+  }
+  return unfounded;
+}
+
 absl::StatusOr<bool> Search::find(const std::optional<cvc5::Term>& question) {
   if (!solver.has_value()) load();
-  if (!question.has_value()) return decided(solver->checkSat());
-  // A question holds for this call alone, so it goes in as an assumption
-  // rather than an assertion.
-  return decided(solver->checkSatAssuming(*question));
+  const bool head_cyclic = !encoding.check.droppable.empty();
+  while (true) {
+    // A question holds for this call alone, so it goes in as an assumption
+    // rather than an assertion.
+    ASSIGN_OR_RETURN(const bool found,
+                     question.has_value()
+                         ? decided(solver->checkSatAssuming(*question))
+                         : decided(solver->checkSat()));
+    if (!found) return false;
+    if (!head_cyclic) return true;
+
+    ASSIGN_OR_RETURN(const std::vector<aspif::Atom> unfounded, unfounded_set());
+    if (unfounded.empty()) return true;
+    // The nogood is true of every answer set, so it stays asserted. It rules
+    // out this model and every other that leaves the same set unsupported.
+    solver->assertFormula(loop_nogood(tm, *prog, encoding, unfounded));
+  }
 }
 
 std::vector<aspif::Atom> Search::model_atoms() const {

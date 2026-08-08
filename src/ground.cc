@@ -287,8 +287,8 @@ bool has_no_value(const absl::Status& status) {
   return status.code() == kNoValue;
 }
 
-absl::StatusOr<BigInt> eval_number(const Term& term, const Binding& binding,
-                                   Symbols& syms);
+absl::StatusOr<Sym> eval_number_sym(const Term& term, const Binding& binding,
+                                    Symbols& syms);
 
 // Evaluates a term to its ground value, e.g. 'X' evaluates to 1 under the
 // binding {X: 1}. Every variable must already be bound.
@@ -326,15 +326,45 @@ absl::StatusOr<Sym> eval_term(const Term& term, const Binding& binding,
           "'_' cannot appear in a position that must be ground");
     case Term::NegatedTermKind: {
       const NegatedTerm& negated = static_cast<const NegatedTerm&>(term);
-      ASSIGN_OR_RETURN(BigInt value, eval_number(*negated.term, binding, syms));
-      return syms.number(-value);
+      ASSIGN_OR_RETURN(Sym value,
+                       eval_number_sym(*negated.term, binding, syms));
+      if (is_inline_number(value)) return syms.number(-inline_number(value));
+      return syms.number(-syms.number_of(value));
     }
     case Term::TermOperationKind: {
       const TermOperation& operation = static_cast<const TermOperation&>(term);
-      ASSIGN_OR_RETURN(BigInt left,
-                       eval_number(*operation.left, binding, syms));
-      ASSIGN_OR_RETURN(BigInt right,
-                       eval_number(*operation.right, binding, syms));
+      ASSIGN_OR_RETURN(Sym left_sym,
+                       eval_number_sym(*operation.left, binding, syms));
+      ASSIGN_OR_RETURN(Sym right_sym,
+                       eval_number_sym(*operation.right, binding, syms));
+      if (operation.op == OperationType::kDIV) {
+        const BigInt right = syms.number_of(right_sym);
+        if (right.is_zero()) return no_value(term, "divides by zero");
+        return syms.number(syms.number_of(left_sym) / right);
+      }
+      // Two handles carrying their own integers add, subtract and multiply in
+      // 64 bits, with no BigInt built. This is most of the arithmetic a
+      // grounding run does.
+      if (is_inline_number(left_sym) && is_inline_number(right_sym)) {
+        const std::int64_t left = inline_number(left_sym);
+        const std::int64_t right = inline_number(right_sym);
+        // An inlined integer is under 2^30, so a product of two stays well
+        // inside 64 bits.
+        static_assert(kInlineNumberBias <= (std::int64_t{1} << 31),
+                      "inlined integers must square inside an int64");
+        switch (operation.op) {
+          case OperationType::kPLUS:
+            return syms.number(left + right);
+          case OperationType::kMINUS:
+            return syms.number(left - right);
+          case OperationType::kTIMES:
+            return syms.number(left * right);
+          case OperationType::kDIV:
+            break;
+        }
+      }
+      const BigInt left = syms.number_of(left_sym);
+      const BigInt right = syms.number_of(right_sym);
       switch (operation.op) {
         case OperationType::kPLUS:
           return syms.number(left + right);
@@ -343,8 +373,7 @@ absl::StatusOr<Sym> eval_term(const Term& term, const Binding& binding,
         case OperationType::kTIMES:
           return syms.number(left * right);
         case OperationType::kDIV:
-          if (right.is_zero()) return no_value(term, "divides by zero");
-          return syms.number(left / right);
+          break;
       }
       return absl::InternalError("unknown arithmetic operator");
     }
@@ -355,11 +384,11 @@ absl::StatusOr<Sym> eval_term(const Term& term, const Binding& binding,
 // Evaluates a term that has to come out as a number, e.g. either side of a
 // '+'. Arithmetic works on integers only, so anything else comes back kNoValue,
 // e.g. the 'a' that 'X' becomes under {X: a}.
-absl::StatusOr<BigInt> eval_number(const Term& term, const Binding& binding,
-                                   Symbols& syms) {
+absl::StatusOr<Sym> eval_number_sym(const Term& term, const Binding& binding,
+                                    Symbols& syms) {
   ASSIGN_OR_RETURN(Sym value, eval_term(term, binding, syms));
   if (!syms.is_number(value)) return no_value(term, "is not an integer");
-  return syms.number_of(value);
+  return value;
 }
 
 // Evaluates a list of terms under `binding`, e.g. the 'X, 2' of 'p(X, 2)'
@@ -375,6 +404,83 @@ absl::StatusOr<Tuple> eval_terms(const Terms& terms, const Binding& binding,
     }
   }
   return tuple;
+}
+
+// An argument read backwards, from the value it matched to the variable in it.
+// 'N + 1' matched against 4 gives N of 3.
+struct Inverse {
+  // What to do to the value the argument matched to get the variable's. 'N + c'
+  // and 'c + N' both take the constant off, so they are one case.
+  enum class Kind { kTakeConstantOff, kAddConstant, kTakeFromConstant };
+
+  const Variable* variable = nullptr;
+  const BigInt* constant = nullptr;
+  // The constant as an int64 where it fits. Two small integers work out in 64
+  // bits, which is what keeps the common case from building a BigInt.
+  std::optional<std::int64_t> small_constant;
+  Kind kind = Kind::kTakeConstantOff;
+
+  // The variable's value, given the value the argument matched. That value has
+  // to be a number, which match_term() checks first.
+  Sym solve(Sym value, Symbols& syms) const {
+    if (small_constant.has_value() && is_inline_number(value)) {
+      const std::int64_t got = inline_number(value);
+      switch (kind) {
+        case Kind::kTakeConstantOff: return syms.number(got - *small_constant);
+        case Kind::kAddConstant: return syms.number(got + *small_constant);
+        case Kind::kTakeFromConstant: return syms.number(*small_constant - got);
+      }
+    }
+    const BigInt got = syms.number_of(value);
+    switch (kind) {
+      case Kind::kTakeConstantOff: return syms.number(got - *constant);
+      case Kind::kAddConstant: return syms.number(got + *constant);
+      case Kind::kTakeFromConstant: return syms.number(*constant - got);
+    }
+    return kNoSym;
+  }
+};
+
+// Reads `term` as an argument that can be worked backwards: a variable on one
+// side of a '+' or a '-', a number on the other.
+//
+// This is what lets 'p(N+1) :- p(N), q(N)' look p up by the value it matched
+// instead of waiting for N. Without it that literal cannot go first, and a pass
+// that should read only what the pass before derived rescans the whole
+// predicate. Multiplying and dividing do not come back this way over the
+// integers.
+//
+// match_term() does the arithmetic and collect_literal_vars() tells the join
+// order that such an argument binds its variable rather than needing it. Both
+// read this, so both mean the same thing by it.
+std::optional<Inverse> invertible(const Term& term) {
+  if (term.kind != Term::TermOperationKind) return std::nullopt;
+  const TermOperation& operation = static_cast<const TermOperation&>(term);
+  const bool plus = operation.op == OperationType::kPLUS;
+  if (!plus && operation.op != OperationType::kMINUS) return std::nullopt;
+  if (operation.left->kind == Term::VariableKind &&
+      operation.right->kind == Term::NumberKind) {
+    const BigInt& constant = static_cast<const Number&>(*operation.right).value;
+    return Inverse{
+        .variable = static_cast<const Variable*>(operation.left.get()),
+        .constant = &constant,
+        .small_constant = constant.to_int64(),
+        // 'N + c' takes the constant off the value, 'N - c' adds it back.
+        .kind = plus ? Inverse::Kind::kTakeConstantOff
+                     : Inverse::Kind::kAddConstant};
+  }
+  if (operation.right->kind == Term::VariableKind &&
+      operation.left->kind == Term::NumberKind) {
+    const BigInt& constant = static_cast<const Number&>(*operation.left).value;
+    return Inverse{
+        .variable = static_cast<const Variable*>(operation.right.get()),
+        .constant = &constant,
+        .small_constant = constant.to_int64(),
+        // 'c + N' takes the constant off too, 'c - N' takes the value off it.
+        .kind = plus ? Inverse::Kind::kTakeConstantOff
+                     : Inverse::Kind::kTakeFromConstant};
+  }
+  return std::nullopt;
 }
 
 // Tries to match one argument term against one stored value, extending
@@ -397,6 +503,20 @@ absl::StatusOr<bool> match_term(const Term& arg, Sym value, Binding& binding,
     return true;
   }
   if (arg.kind == Term::AnonymousVariableKind) return true;
+  // An unbound variable takes the value the inverse works out. A bound one
+  // falls through and is compared like any other arithmetic.
+  if (arg.kind == Term::TermOperationKind) {
+    if (const std::optional<Inverse> inverse = invertible(arg);
+        inverse.has_value()) {
+      const size_t slot = binding.slot_of(*inverse->variable);
+      if (binding.at(slot) == kNoSym) {
+        if (!syms.is_number(value)) return false;
+        binding.set(slot, inverse->solve(value, syms));
+        trail.record(slot);
+        return true;
+      }
+    }
+  }
   if (arg.kind == Term::AtomKind) {
     const Atom& atom = static_cast<const Atom&>(arg);
     if (atom.args != nullptr) {
@@ -990,6 +1110,15 @@ void collect_literal_vars(const Term& term, bool under_arithmetic,
                            /*under_arithmetic=*/true, binding, out);
       return;
     case Term::TermOperationKind: {
+      // An argument that works backwards binds its variable rather than
+      // needing it, which is what lets the literal take its turn first.
+      if (!under_arithmetic) {
+        if (const std::optional<Inverse> inverse = invertible(term);
+            inverse.has_value()) {
+          out.binds.insert(binding.slot_of(*inverse->variable));
+          return;
+        }
+      }
       const TermOperation& operation = static_cast<const TermOperation&>(term);
       collect_literal_vars(*operation.left, /*under_arithmetic=*/true, binding,
                            out);
@@ -1263,6 +1392,11 @@ absl::flat_hash_map<Tuple, std::vector<const GroundAtom*>> index_atoms(
     const PredData& data, const AtomRange& range,
     const std::vector<size_t>& positions) {
   absl::flat_hash_map<Tuple, std::vector<const GroundAtom*>> index;
+  // Sizing the map up front saves most of the rehashing, but the atoms can
+  // share far fewer keys than there are of them, so the guess is capped rather
+  // than one slot per atom.
+  constexpr size_t kMostToReserve = size_t{1} << 16;
+  index.reserve(std::min(range.end - range.begin, kMostToReserve));
   for (size_t k = range.begin; k < range.end; ++k) {
     const GroundAtom& atom = data.atoms[k];
     Tuple key;

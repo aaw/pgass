@@ -79,6 +79,10 @@ inline std::int64_t inline_number(Sym sym) {
 class Symbols {
  public:
   // The handle for a value, interning it if this is the first time it is seen.
+  // Most of the integers a grounding run makes are small, and the int64
+  // overload is how a caller that already has one avoids building a BigInt to
+  // hand over.
+  Sym number(std::int64_t value);
   Sym number(const BigInt& value);
   Sym constant(std::string_view name);
   Sym string(std::string_view contents);

@@ -2,8 +2,9 @@
 """Run pgass over the ASP Competition 2015 and 2017 benchmark suites.
 
 The suites are not in this repository. They are downloaded on demand into a
-cache directory, which defaults to /tmp/pgass-bench and can be pointed anywhere
-with --cache or PGASS_BENCH_CACHE. Nothing is ever written inside the repo.
+cache directory, which defaults to ~/.cache/pgass-bench and can be pointed
+anywhere with --cache or PGASS_BENCH_CACHE. Nothing is ever written inside the
+repo.
 
 Every domain here ships an official solution checker.
 
@@ -30,7 +31,11 @@ import zipfile
 HERE = os.path.dirname(os.path.abspath(__file__))
 REPO = os.path.dirname(HERE)
 MANIFEST = os.path.join(HERE, "benchmarks.json")
-DEFAULT_CACHE = os.environ.get("PGASS_BENCH_CACHE", "/tmp/pgass-bench")
+# Not under /tmp. macOS prunes /tmp by access time, which eats the instances a
+# run did not touch most recently and leaves a directory that still looks
+# fetched.
+DEFAULT_CACHE = os.environ.get(
+    "PGASS_BENCH_CACHE", os.path.expanduser("~/.cache/pgass-bench"))
 DEFAULT_PGASS = os.path.join(REPO, "build", "pgass")
 
 # The exit codes of src/exit_code.h. A run that found something answers with one

@@ -41,7 +41,7 @@ struct SolveOptions {
 //
 // Nothing here reasons about rules or cycles. That lives in the encoding, the
 // one --encode=smtlib prints. What is left is asking cvc5 for a model,
-// reading it, and ruling it out to ask again.
+// checking it, and ruling it out to ask again.
 //
 // Returns the answer sets in the order cvc5 produced them, so at most
 // options.max_answer_sets of them, along with whether the search was exhausted.
@@ -55,10 +55,11 @@ struct SolveOptions {
 // returned is optimal. The script --encode=smtlib prints does the same walk,
 // written out as steps for a reader to follow by hand.
 //
-// Every program, normal or disjunctive, is decided by one translation. A
-// disjunctive head with two atoms on a common positive cycle costs that
-// translation a quantifier, and so the ALL logic, rather than a solver call of
-// its own. encode.cc says why.
+// A disjunctive head with two atoms on a common positive cycle leaves the
+// encoding admitting models that are not answer sets, so each model is checked
+// before it is reported. The check is a second solver. A model that fails it
+// hands back an unfounded set, and the loop nogood of that set goes to the
+// first solver, ruling out every model that leaves the set unsupported.
 //
 // A query asks about the answer sets rather than restricting them, so it does
 // not narrow what comes back here. answer_query() answers it.

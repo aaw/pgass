@@ -16,12 +16,30 @@ Sym Symbols::intern(SymEntry entry) {
   return it->second;
 }
 
-Sym Symbols::number(const BigInt& value) {
+namespace {
+
+// Whether `value` is small enough to ride inside a handle.
+bool fits_inline_number(std::int64_t value) {
+  return value >= kMinInlineNumber && value <= kMaxInlineNumber;
+}
+
+// The handle carrying `value`, which fits_inline_number() has to accept.
+Sym inline_number_sym(std::int64_t value) {
+  return kInlineNumberTag | static_cast<Sym>(value + kInlineNumberBias);
+}
+
+}  // namespace
+
+Sym Symbols::number(std::int64_t value) {
   // Only a number too big to ride inside a handle is copied into the table.
+  if (fits_inline_number(value)) return inline_number_sym(value);
+  return intern(SymEntry{.kind = SymEntry::kNumber, .number = BigInt(value)});
+}
+
+Sym Symbols::number(const BigInt& value) {
   const std::optional<std::int64_t> small = value.to_int64();
-  if (small.has_value() && *small >= kMinInlineNumber &&
-      *small <= kMaxInlineNumber) {
-    return kInlineNumberTag | static_cast<Sym>(*small + kInlineNumberBias);
+  if (small.has_value() && fits_inline_number(*small)) {
+    return inline_number_sym(*small);
   }
   return intern(SymEntry{.kind = SymEntry::kNumber, .number = value});
 }

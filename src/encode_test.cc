@@ -30,12 +30,18 @@ using ::testing::Not;
 
 namespace {
 
-// Parses, normalizes, and grounds `source`, then encodes it.
-absl::StatusOr<std::string> encode_source(const std::string& source) {
+// Parses, normalizes, and grounds `source`, which is the three steps every
+// test here takes before it has anything to encode.
+absl::StatusOr<aspif::Program> ground_source(const std::string& source) {
   Parser parser(source);
   ASSIGN_OR_RETURN(auto program, parser.parse_program());
   RETURN_IF_ERROR(normalize(*program));
-  ASSIGN_OR_RETURN(aspif::Program grounded, ground(*program));
+  return ground(*program);
+}
+
+// The same, encoded as a script.
+absl::StatusOr<std::string> encode_source(const std::string& source) {
+  ASSIGN_OR_RETURN(const aspif::Program grounded, ground_source(source));
   return encode_smtlib(grounded);
 }
 
@@ -101,7 +107,7 @@ TEST(EncodeTest, TranslatesAChoiceOfTwoAtoms) {
   ASSERT_OK(script);
   EXPECT_THAT(
       commands(*script),
-      ElementsAre("(set-option :produce-models true)", "(set-logic QF_IDL)",
+      ElementsAre("(set-option :produce-models true)", "(set-logic QF_UF)",
                   "(declare-const a Bool)", "(declare-const b Bool)",
                   // Every rule is satisfied.
                   "(assert (=> (not b) a))", "(assert (=> (not a) b))",
@@ -260,7 +266,7 @@ TEST(EncodeTest, AsksAboutEachAtomOfAQueryOnItsOwn) {
   EXPECT_THAT(commands(*script),
               ElementsAre("(set-option :produce-models true)",
                           "(set-option :incremental true)",
-                          "(set-logic QF_IDL)", "(declare-const |p(1)| Bool)",
+                          "(set-logic QF_UF)", "(declare-const |p(1)| Bool)",
                           "(declare-const |p(2)| Bool)",
                           "(assert (=> true |p(1)|))",
                           "(assert (=> true |p(2)|))",
@@ -342,7 +348,7 @@ TEST(EncodeTest, CountsWithoutArithmetic) {
     :- #count{ X : picked(X) } > 1.
   )");
   ASSERT_OK(script);
-  EXPECT_THAT(*script, AllOf(HasSubstr("(set-logic QF_IDL)"),
+  EXPECT_THAT(*script, AllOf(HasSubstr("(set-logic QF_UF)"),
                              HasSubstr("(and |picked(a)| |picked(b)|)"),
                              Not(HasSubstr("(ite ")), Not(HasSubstr("(+ "))));
 }
@@ -355,7 +361,7 @@ TEST(EncodeTest, TranslatesAMinAggregate) {
     q :- #min{ X : p(X) } >= 3.
   )");
   ASSERT_OK(script);
-  EXPECT_THAT(*script, AllOf(HasSubstr("(set-logic QF_IDL)"),
+  EXPECT_THAT(*script, AllOf(HasSubstr("(set-logic QF_UF)"),
                              HasSubstr("(assert (=> (not |p(1)|) q))")));
 }
 
@@ -558,6 +564,92 @@ TEST(EncodeTest, TheModelOfTheScriptIsTheAnswerSet) {
   EXPECT_THAT(*output, AllOf(HasSubstr("(define-fun p () Bool true)"),
                              HasSubstr("(define-fun q () Bool true)"),
                              HasSubstr("(define-fun r () Bool false)")));
+}
+
+// Whether any answer set of `prog` falsifies the loop nogood of the atoms
+// `unfounded` names, which is the one thing a nogood must never do.
+//
+// The sections and the quantified minimality assertion together describe the
+// answer sets exactly, so a model of those and of the negated nogood would be
+// an answer set the nogood is wrong about. There is none, so this is false.
+absl::StatusOr<bool> answer_set_falsifies_loop_nogood(
+    const aspif::Program& prog, const std::vector<std::string>& unfounded) {
+  cvc5::TermManager tm;
+  ASSIGN_OR_RETURN(const Encoding encoding, build_encoding(tm, prog));
+
+  std::vector<aspif::Atom> atoms;
+  for (const std::string& name : unfounded) {
+    for (aspif::Atom atom = 1; atom < prog.next_atom; ++atom) {
+      if (encoding.atom_name[atom] == name) atoms.push_back(atom);
+    }
+  }
+  if (atoms.size() != unfounded.size()) {
+    return absl::InvalidArgumentError("an unfounded atom has no such name");
+  }
+
+  cvc5::Solver solver(tm);
+  solver.setLogic("ALL");
+  for (const Section& section : encoding.sections) {
+    for (const cvc5::Term& assertion : section.assertions) {
+      solver.assertFormula(assertion);
+    }
+  }
+  solver.assertFormula(minimality_assertion(tm, prog, encoding));
+  solver.assertFormula(tm.mkTerm(cvc5::Kind::NOT,
+                                 {loop_nogood(tm, prog, encoding, atoms)}));
+  return solver.checkSat().isSat();
+}
+
+/* The loop nogood of {ny, s} over 'y | ny. s :- y, ny. y :- s. ny :- s.'
+
+   Nothing derives ny or s from outside the set except the disjunction, and it
+   derives ny only where y is false, so the nogood is 'ny or s implies not y'.
+   That is what rules out the model {y, ny, s}, which satisfies the completion
+   and is undercut by the smaller {y}. Both answer sets, {y} and {ny}, satisfy
+   it. */
+TEST(EncodeTest, LoopNogoodHoldsOfEveryAnswerSet) {
+  auto grounded = ground_source(R"(
+    y | ny.
+    s :- y, ny.
+    y :- s.
+    ny :- s.
+  )");
+  ASSERT_OK(grounded);
+
+  auto falsified = answer_set_falsifies_loop_nogood(*grounded, {"ny", "s"});
+  ASSERT_OK(falsified);
+  EXPECT_FALSE(*falsified);
+}
+
+/* A choice rule supports its head atom where the body holds and the atom holds,
+   '{a} :- d' being 'a :- d, not not a'. So it reaches the nogood as 'd and a'.
+
+   'a | b :- c. a :- b. b :- a. {a} :- d. c :- not d. d :- not c.' has answer
+   sets {a, b, c}, {d} and {a, b, d}. The nogood of {a, b} is 'a or b implies c
+   or (d and a)', and that second disjunct is the only part true of {a, b, d}.
+   Leave the choice rule out of the supports and the nogood is wrong about an
+   answer set. */
+TEST(EncodeTest, LoopNogoodCountsAChoiceRuleAsSupportOnlyWhereItsAtomHolds) {
+  // A choice head can only be written as aspif: pgass normalization rewrites
+  // one into a disjunction before grounding.
+  auto prog = aspif::from_aspif(
+      "asp 1 0 0\n"
+      "1 0 2 1 2 0 1 3\n"
+      "1 0 1 1 0 1 2\n"
+      "1 0 1 2 0 1 1\n"
+      "1 1 1 1 0 1 4\n"
+      "1 0 1 3 0 1 -4\n"
+      "1 0 1 4 0 1 -3\n"
+      "4 1 a 1 1\n"
+      "4 1 b 1 2\n"
+      "4 1 c 1 3\n"
+      "4 1 d 1 4\n"
+      "0\n");
+  ASSERT_OK(prog);
+
+  auto falsified = answer_set_falsifies_loop_nogood(*prog, {"a", "b"});
+  ASSERT_OK(falsified);
+  EXPECT_FALSE(*falsified);
 }
 
 // aspif lets a symbol hold under several literals at once, which no one

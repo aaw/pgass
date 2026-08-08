@@ -8,6 +8,7 @@
 #include <vector>
 
 #include "absl/container/btree_map.h"
+#include "absl/container/flat_hash_map.h"
 #include "absl/container/flat_hash_set.h"
 #include "absl/log/check.h"
 #include "absl/status/status.h"
@@ -37,6 +38,9 @@ namespace {
 //
 // A weak constraint costs QF_LIA too. Its level's cost is named as an Int, and
 // that is a sum whatever the weights are.
+//
+// A program with no level variable declares no Int at all, so it needs no
+// arithmetic logic of any kind.
 
 // Whether every weight is one. Then the total is just how many literals hold,
 // and at_least() can say that without arithmetic.
@@ -50,15 +54,21 @@ bool all_unit_weights(const std::vector<aspif::WeightedLit>& lits) {
   return true;
 }
 
-const char* logic_for(const aspif::Program& prog) {
+// Whether `rule`'s body has to be said as arithmetic. A weight body of unit
+// weights is a count, which at_least() says without any. Both the logic of the
+// whole encoding and the logic of the minimality check turn on this, so they
+// ask it here rather than each deciding for itself.
+bool needs_arithmetic(const aspif::Rule& rule) {
+  return rule.body_type == aspif::Rule::BodyType::kWeight &&
+         !all_unit_weights(rule.weighted_body);
+}
+
+const char* logic_for(const aspif::Program& prog, bool any_level_var) {
   for (const aspif::Rule& rule : prog.rules) {
-    if (rule.body_type == aspif::Rule::BodyType::kWeight &&
-        !all_unit_weights(rule.weighted_body)) {
-      return "QF_LIA";
-    }
+    if (needs_arithmetic(rule)) return "QF_LIA";
   }
   if (!prog.minimize.empty()) return "QF_LIA";
-  return "QF_IDL";
+  return any_level_var ? "QF_IDL" : "QF_UF";
 }
 
 // The un-negated body atoms of `rule`, whichever body form it uses. These are
@@ -106,19 +116,22 @@ struct Ranking {
   // Whether each atom can lie on a positive cycle at all, and so needs a level
   // variable. False for every atom of a stratified program, which leaves the
   // translation as plain completion.
+  //
+  // False too for an atom sharing a rule head with another of its component.
+  // Ranking one of those would throw away answer sets like the {a, b} of
+  // 'a | b. a :- b. b :- a.', where a and b hold each other up and neither is
+  // above the other. The rest of the component is still ranked, resting on the
+  // unranked atoms as sources. Every answer set admits such a ranking: an atom
+  // no ordering reaches would sit on a cycle nothing outside supports.
   std::vector<bool> needs_level;
-  // Whether a smaller model of the reduct could drop each atom, which is true
-  // exactly of the atoms on a positive cycle. A model described by minimality
-  // rather than by a ranking quantifies over these atoms and no others.
-  std::vector<bool> on_cycle;
-  // Whether each component, indexed by component id, holds two head atoms of
-  // one rule. Nothing in such a component is ranked. A ranking would throw away
-  // answer sets like the {a, b} of 'a | b. a :- b. b :- a.', where a and b
-  // support each other around the cycle and neither is above the other. The
-  // minimality check decides those atoms instead.
-  std::vector<bool> head_cyclic;
-  // Whether any component is head-cyclic, which is what turns that check on.
-  bool any_head_cycle = false;
+  // Whether any atom needs one, which is whether the encoding declares an Int.
+  bool any_level_var = false;
+  // Whether each atom sits in a component holding two head atoms of one rule,
+  // indexed by atom id. Those are the atoms a smaller model of the reduct may
+  // drop, so this is what the minimality check is built over.
+  std::vector<bool> droppable;
+  // Whether any atom is, which is what turns the check on.
+  bool any_droppable = false;
 };
 
 Ranking build_ranking(const aspif::Program& prog) {
@@ -127,8 +140,9 @@ Ranking build_ranking(const aspif::Program& prog) {
   Ranking ranking;
   ranking.component = strongly_connected_components(succ);
   ranking.needs_level.assign(prog.next_atom, false);
-  ranking.on_cycle.assign(prog.next_atom, false);
-  ranking.head_cyclic.assign(ranking.component.size(), false);
+  ranking.droppable.assign(prog.next_atom, false);
+  std::vector<bool> head_cyclic(ranking.component.size(), false);
+  std::vector<bool> shares_a_head(prog.next_atom, false);
 
   std::vector<int> component_size(ranking.component.size(), 0);
   for (int component : ranking.component) ++component_size[component];
@@ -138,11 +152,13 @@ Ranking build_ranking(const aspif::Program& prog) {
   // them ever have to hold together.
   for (const aspif::Rule& rule : prog.rules) {
     if (rule.head_type == aspif::Rule::HeadType::kChoice) continue;
-    absl::flat_hash_set<int> seen;
+    absl::flat_hash_map<int, aspif::Atom> seen;
     for (aspif::Atom head : rule.head) {
-      if (seen.insert(ranking.component[head]).second) continue;
-      ranking.head_cyclic[ranking.component[head]] = true;
-      ranking.any_head_cycle = true;
+      const auto [at, fresh] = seen.emplace(ranking.component[head], head);
+      if (fresh) continue;
+      head_cyclic[ranking.component[head]] = true;
+      shares_a_head[head] = true;
+      shares_a_head[at->second] = true;
     }
   }
 
@@ -153,9 +169,13 @@ Ranking build_ranking(const aspif::Program& prog) {
     for (int successor : succ[atom]) {
       if (successor == atom) cyclic = true;
     }
-    const bool head_cyclic = ranking.head_cyclic[ranking.component[atom]];
-    ranking.on_cycle[atom] = cyclic || head_cyclic;
-    ranking.needs_level[atom] = cyclic && !head_cyclic;
+    ranking.needs_level[atom] = cyclic && !shares_a_head[atom];
+    if (ranking.needs_level[atom]) ranking.any_level_var = true;
+    // Every atom of a head-cyclic component can be dropped, ranked or not. A
+    // ranked atom rests on the unranked ones, so dropping one of those can
+    // take what stood on it too.
+    ranking.droppable[atom] = head_cyclic[ranking.component[atom]];
+    if (ranking.droppable[atom]) ranking.any_droppable = true;
   }
   return ranking;
 }
@@ -296,7 +316,10 @@ std::vector<aspif::Atom> ranked_body_atoms(const aspif::Rule& rule,
   std::vector<aspif::Atom> ranked_below;
   if (!ranking.needs_level[head]) return ranked_below;
   for (aspif::Atom body_atom : positive_body_atoms(rule)) {
-    if (ranking.component[body_atom] == ranking.component[head]) {
+    // An atom of the component that shares a head with another one of it has
+    // no level, so it is a source rather than something to rank below.
+    if (ranking.component[body_atom] == ranking.component[head] &&
+        ranking.needs_level[body_atom]) {
       ranked_below.push_back(body_atom);
     }
   }
@@ -624,64 +647,128 @@ cvc5::Term reduct_rule(cvc5::TermManager& tm, const aspif::Rule& rule,
   return tm.mkTerm(cvc5::Kind::IMPLIES, {body, disjunction(tm, heads)});
 }
 
-// The minimality check as one formula: no proper subset of the atoms the model
-// `model_var` holds is itself a model of the reduct under it. That is the
-// second half of the ASP-Core-2 definition of an answer set, and the subset
-// being a bound variable is what lets one formula stand for every candidate at
-// once.
+// Whether a smaller model of the reduct could fail `rule`. A non-null entry of
+// `subset_var` is an atom the smaller model may drop.
 //
-// `quantified` picks the atoms the subset may drop. Elsewhere the subset is the
-// model itself, which costs it nothing, every rule of the reduct being an
-// implication. Restricting the quantifier this way is what makes the formula
-// usable: quantifying over every atom sent one 2-QBF instance of 55 atoms, 23
-// of them head-cyclic, from 0.03s to over 45s.
-cvc5::Term minimality_term(cvc5::TermManager& tm, const aspif::Program& prog,
-                           const std::vector<cvc5::Term>& model_var,
-                           const std::vector<std::string>& model_name,
-                           const std::vector<bool>& quantified,
-                           absl::flat_hash_set<std::string>& taken) {
-  const cvc5::Sort bool_sort = tm.getBooleanSort();
-  std::vector<cvc5::Term> subset_var(prog.next_atom);
-  std::vector<cvc5::Term> bound_vars;
+// A rule heading none of those is satisfied already: a smaller model satisfying
+// its body means the model satisfies it too, so the head atom the model holds
+// is one the smaller model holds as well. Same for an integrity constraint.
+bool rule_can_fail(const aspif::Rule& rule,
+                   const std::vector<cvc5::Term>& subset_var) {
+  for (aspif::Atom head : rule.head) {
+    if (!subset_var[head].isNull()) return true;
+  }
+  return false;
+}
+
+// The rules of the reduct a smaller model could fail, one formula each.
+//
+// `subset_var` holds the smaller model's stand-in for each atom it may drop and
+// a null Term for the rest. An atom with no stand-in reads the model itself, so
+// `reads` gives the rules one variable per atom whichever side it comes from.
+std::vector<cvc5::Term> reduct_terms(
+    cvc5::TermManager& tm, const aspif::Program& prog,
+    const std::vector<cvc5::Term>& model_var,
+    const std::vector<cvc5::Term>& subset_var) {
+  std::vector<cvc5::Term> reads(model_var);
+  for (aspif::Atom atom = 1; atom < prog.next_atom; ++atom) {
+    if (!subset_var[atom].isNull()) reads[atom] = subset_var[atom];
+  }
+  std::vector<cvc5::Term> rules;
+  for (const aspif::Rule& rule : prog.rules) {
+    if (!rule_can_fail(rule, subset_var)) continue;
+    rules.push_back(reduct_rule(tm, rule, model_var, reads));
+  }
+  return rules;
+}
+
+// What a smaller model of the reduct has to satisfy: it holds nothing the model
+// leaves out, it drops something the model holds, and it models every rule of
+// the reduct that could fail.
+std::vector<cvc5::Term> smaller_model_terms(
+    cvc5::TermManager& tm, const aspif::Program& prog,
+    const std::vector<cvc5::Term>& model_var,
+    const std::vector<cvc5::Term>& subset_var) {
   std::vector<cvc5::Term> conjuncts;
-  // What the quantified atoms say about the subset: it holds nothing the model
-  // leaves out, and it leaves out something the model holds, which together
-  // make it a proper subset. An atom standing for itself says neither.
   std::vector<cvc5::Term> dropped;
   for (aspif::Atom atom = 1; atom < prog.next_atom; ++atom) {
-    if (!quantified[atom]) {
-      subset_var[atom] = model_var[atom];
-      continue;
-    }
-    const cvc5::Term subset = tm.mkVar(
+    if (subset_var[atom].isNull()) continue;
+    conjuncts.push_back(
+        tm.mkTerm(cvc5::Kind::IMPLIES, {subset_var[atom], model_var[atom]}));
+    dropped.push_back(tm.mkTerm(
+        cvc5::Kind::AND, {model_var[atom],
+                          tm.mkTerm(cvc5::Kind::NOT, {subset_var[atom]})}));
+  }
+  conjuncts.push_back(disjunction(tm, dropped));
+  const std::vector<cvc5::Term> rules =
+      reduct_terms(tm, prog, model_var, subset_var);
+  conjuncts.insert(conjuncts.end(), rules.begin(), rules.end());
+  return conjuncts;
+}
+
+// The assertions a smaller model of the reduct satisfies, over constants rather
+// than bound variables, with the model under test left free for an assumption
+// to fix.
+MinimalityCheck build_check(cvc5::TermManager& tm, const aspif::Program& prog,
+                            const std::vector<cvc5::Term>& model_var,
+                            const std::vector<std::string>& model_name,
+                            const std::vector<bool>& droppable) {
+  absl::flat_hash_set<std::string> taken(model_name.begin(), model_name.end());
+  const cvc5::Sort bool_sort = tm.getBooleanSort();
+  MinimalityCheck check;
+  check.subset_var.resize(prog.next_atom);
+  check.derived_by.resize(prog.next_atom);
+  for (aspif::Atom atom = 1; atom < prog.next_atom; ++atom) {
+    if (!droppable[atom]) continue;
+    check.droppable.push_back(atom);
+    check.subset_var[atom] = tm.mkConst(
         bool_sort,
         fresh_name(taken, absl::StrCat("sub(", model_name[atom], ")")));
-    subset_var[atom] = subset;
-    bound_vars.push_back(subset);
-    conjuncts.push_back(
-        tm.mkTerm(cvc5::Kind::IMPLIES, {subset, model_var[atom]}));
-    dropped.push_back(
-        tm.mkTerm(cvc5::Kind::AND,
-                  {model_var[atom], tm.mkTerm(cvc5::Kind::NOT, {subset})}));
   }
-  // With nothing to drop there is no proper subset to rule out, and the check
-  // holds of every model.
-  if (bound_vars.empty()) return tm.mkTrue();
+  if (check.droppable.empty()) return check;
+  // Only the rules are asserted. Which atoms the smaller model may drop, and
+  // which it has to, change with the model under test, so solve.cc says those
+  // per round.
+  check.assertions = reduct_terms(tm, prog, model_var, check.subset_var);
 
-  conjuncts.push_back(disjunction(tm, dropped));
-  for (const aspif::Rule& rule : prog.rules) {
-    conjuncts.push_back(reduct_rule(tm, rule, model_var, subset_var));
+  // A weight body of real weights is the only place the reduct reaches for
+  // arithmetic. Without one the check is a plain Boolean question, which cvc5
+  // answers with its SAT solver alone, and MinimalityCheck::logic already says
+  // so.
+  std::vector<bool> is_read(prog.next_atom, false);
+  for (size_t index = 0; index < prog.rules.size(); ++index) {
+    const aspif::Rule& rule = prog.rules[index];
+    if (!rule_can_fail(rule, check.subset_var)) continue;
+    if (needs_arithmetic(rule)) check.logic = "QF_LIA";
+    // A droppable atom stands for itself nowhere in the reduct: every positive
+    // place it appears reads its stand-in. So only the other atoms and the
+    // negated literals come out of the model. A choice head is the exception,
+    // since whether the reduct keeps that rule turns on the model holding it.
+    const bool choice = rule.head_type == aspif::Rule::HeadType::kChoice;
+    for (aspif::Atom head : rule.head) {
+      if (choice || !droppable[head]) is_read[head] = true;
+      if (droppable[head]) check.derived_by[head].push_back(index);
+    }
+    for (aspif::Lit lit : rule.body) {
+      if (lit < 0 || !droppable[lit]) is_read[std::abs(lit)] = true;
+    }
+    for (const aspif::WeightedLit& weighted : rule.weighted_body) {
+      if (weighted.lit < 0 || !droppable[weighted.lit]) {
+        is_read[std::abs(weighted.lit)] = true;
+      }
+    }
   }
-
-  return tm.mkTerm(cvc5::Kind::FORALL,
-                   {tm.mkTerm(cvc5::Kind::VARIABLE_LIST, bound_vars),
-                    tm.mkTerm(cvc5::Kind::NOT, {conjunction(tm, conjuncts)})});
+  for (aspif::Atom atom = 1; atom < prog.next_atom; ++atom) {
+    if (is_read[atom]) check.read.push_back(atom);
+  }
+  return check;
 }
 
 constexpr char kMinimalityComment[] =
     R"(; A rule of this program has two head atoms on a common positive cycle,
 ; so the assertions above admit models that are not answer sets. The
-; constraint below rules those out.
+; constraint below rules those out. It says that no proper subset of the
+; atoms a model holds is itself a model of the reduct under that model.
 )";
 
 // How a comment names the query: as the program wrote it, or as 'the query'
@@ -761,6 +848,91 @@ cvc5::Term literal_term(cvc5::TermManager& tm,
                         aspif::Lit lit) {
   if (lit > 0) return atom_var[lit];
   return tm.mkTerm(cvc5::Kind::NOT, {atom_var[-lit]});
+}
+
+cvc5::Term minimality_assertion(cvc5::TermManager& tm,
+                                const aspif::Program& prog,
+                                const Encoding& encoding) {
+  const MinimalityCheck& check = encoding.check;
+  if (check.droppable.empty()) return cvc5::Term();
+
+  // The bound variables stand for the atoms the check already picked, and take
+  // the names it already made fresh for them.
+  const cvc5::Sort bool_sort = tm.getBooleanSort();
+  std::vector<cvc5::Term> subset_var(prog.next_atom);
+  std::vector<cvc5::Term> bound_vars;
+  bound_vars.reserve(check.droppable.size());
+  for (aspif::Atom atom : check.droppable) {
+    subset_var[atom] =
+        tm.mkVar(bool_sort, check.subset_var[atom].getSymbol());
+    bound_vars.push_back(subset_var[atom]);
+  }
+
+  // The subset being a bound variable is what lets one formula rule out every
+  // candidate at once.
+  const std::vector<cvc5::Term> conjuncts =
+      smaller_model_terms(tm, prog, encoding.atom_var, subset_var);
+
+  return tm.mkTerm(cvc5::Kind::FORALL,
+                   {tm.mkTerm(cvc5::Kind::VARIABLE_LIST, bound_vars),
+                    tm.mkTerm(cvc5::Kind::NOT, {conjunction(tm, conjuncts)})});
+}
+
+cvc5::Term loop_nogood(cvc5::TermManager& tm, const aspif::Program& prog,
+                       const Encoding& encoding,
+                       const std::vector<aspif::Atom>& unfounded) {
+  absl::flat_hash_set<aspif::Atom> in_loop;
+  in_loop.reserve(unfounded.size());
+  in_loop.insert(unfounded.begin(), unfounded.end());
+  std::vector<cvc5::Term> held;
+  held.reserve(unfounded.size());
+  for (aspif::Atom atom : unfounded) held.push_back(encoding.atom_var[atom]);
+
+  // Only a rule deriving a member of the set can support it, and one rule can
+  // derive several, so each is looked at once.
+  std::vector<cvc5::Term> supports;
+  absl::flat_hash_set<int> seen;
+  for (aspif::Atom atom : unfounded) {
+    for (int index : encoding.check.derived_by[atom]) {
+      if (!seen.insert(index).second) continue;
+      const aspif::Rule& rule = prog.rules[index];
+      // A rule reaching back into the set supports nothing. It would need a
+      // member to hold before it could derive one.
+      bool reaches_back = false;
+      for (aspif::Lit lit : rule.body) {
+        if (lit > 0 && in_loop.contains(lit)) reaches_back = true;
+      }
+      for (const aspif::WeightedLit& weighted : rule.weighted_body) {
+        if (weighted.lit > 0 && in_loop.contains(weighted.lit)) {
+          reaches_back = true;
+        }
+      }
+      if (reaches_back) continue;
+
+      const cvc5::Term body = body_term(tm, encoding.atom_var, rule);
+      if (rule.head_type == aspif::Rule::HeadType::kChoice) {
+        // A choice rule is '{a} :- B', which is 'a :- B, not not a'. It
+        // supports a only where a holds, so the head atom joins the condition
+        // and each head atom in the set gets a disjunct of its own.
+        for (aspif::Atom head : rule.head) {
+          if (!in_loop.contains(head)) continue;
+          supports.push_back(
+              tm.mkTerm(cvc5::Kind::AND, {body, encoding.atom_var[head]}));
+        }
+        continue;
+      }
+      // A disjunctive rule derives one head atom at a time, so it supports the
+      // set only where every head atom outside the set is false.
+      std::vector<cvc5::Term> conjuncts = {body};
+      for (aspif::Atom head : rule.head) {
+        if (in_loop.contains(head)) continue;
+        conjuncts.push_back(literal_term(tm, encoding.atom_var, -head));
+      }
+      supports.push_back(conjunction(tm, conjuncts));
+    }
+  }
+  return tm.mkTerm(cvc5::Kind::IMPLIES,
+                   {disjunction(tm, held), disjunction(tm, supports)});
 }
 
 namespace {
@@ -857,9 +1029,7 @@ absl::StatusOr<Encoding> build_encoding(cvc5::TermManager& tm,
   Names names = choose_names(prog, ranking);
 
   Encoding encoding;
-  // The minimality assertion below is quantified, which no quantifier free
-  // logic can hold.
-  encoding.logic = ranking.any_head_cycle ? "ALL" : logic_for(prog);
+  encoding.logic = logic_for(prog, ranking.any_level_var);
   encoding.atom_var = declare_constants(tm, tm.getBooleanSort(), names.atom);
   encoding.level_var = declare_constants(tm, tm.getIntegerSort(), names.level);
   encoding.atom_name = std::move(names.atom);
@@ -891,21 +1061,9 @@ absl::StatusOr<Encoding> build_encoding(cvc5::TermManager& tm,
       Section{.title = "Support", .assertions = std::move(support_terms)});
   encoding.sections.push_back(Section{.title = "Level ranking",
                                       .assertions = std::move(ranking_terms)});
-  if (ranking.any_head_cycle) {
-    absl::flat_hash_set<std::string> taken(encoding.atom_name.begin(),
-                                           encoding.atom_name.end());
-    // Only the atoms of a head-cyclic component are quantified. The rest are
-    // ranked, and a ranked atom cannot be unfounded, so no smaller model of the
-    // reduct differs there.
-    std::vector<bool> quantified(prog.next_atom, false);
-    for (aspif::Atom atom = 1; atom < prog.next_atom; ++atom) {
-      quantified[atom] = ranking.head_cyclic[ranking.component[atom]];
-    }
-    const cvc5::Term minimality = minimality_term(
-        tm, prog, encoding.atom_var, encoding.atom_name, quantified, taken);
-    encoding.sections.push_back(Section{.title = "Minimality",
-                                        .comment = kMinimalityComment,
-                                        .assertions = {minimality}});
+  if (ranking.any_droppable) {
+    encoding.check = build_check(tm, prog, encoding.atom_var,
+                                 encoding.atom_name, ranking.droppable);
   }
   for (auto& [priority, lits] : level_costs(prog)) {
     Level level{.priority = priority, .lits = std::move(lits)};
@@ -936,7 +1094,11 @@ absl::StatusOr<std::string> encode_smtlib(const aspif::Program& prog) {
       (prog.query.has_value() && !encoding.levels.empty())) {
     absl::StrAppend(&script, "(set-option :incremental true)\n");
   }
-  absl::StrAppend(&script, "(set-logic ", encoding.logic, ")\n");
+  // The minimality assertion is quantified, which no quantifier free logic can
+  // hold.
+  const cvc5::Term minimality = minimality_assertion(tm, prog, encoding);
+  absl::StrAppend(&script, "(set-logic ",
+                  minimality.isNull() ? encoding.logic : "ALL", ")\n");
 
   std::string constants;
   std::string levels;
@@ -956,6 +1118,12 @@ absl::StatusOr<std::string> encode_smtlib(const aspif::Program& prog) {
       absl::StrAppend(&body, "(assert ", assertion.toString(), ")\n");
     }
     append_block(script, section.title, body);
+  }
+
+  if (!minimality.isNull()) {
+    append_block(script, "Minimality",
+                 absl::StrCat(kMinimalityComment, "(assert ",
+                              minimality.toString(), ")\n"));
   }
 
   if (!encoding.levels.empty()) {
