@@ -117,10 +117,13 @@ def unzip_into(archive, dest):
 
 def fetch_domain(cache, domain, force=False):
     target = domain_dir(cache, domain)
-    if os.path.isdir(target) and not force:
+    complete = is_fetched(cache, domain)
+    if complete and not force:
         print(f"  {domain['name']}: already fetched")
         return
-    if force and os.path.isdir(target):
+    if os.path.isdir(target):
+        if not complete:
+            print(f"  {domain['name']}: files are missing, fetching again")
         shutil.rmtree(target)
 
     print(f"  {domain['name']}: downloading {human(domain['size'])}")
@@ -278,6 +281,29 @@ def encoding_of(cache, domain, instance):
     if os.path.exists(beside):
         return beside
     return os.path.join(os.path.dirname(os.path.dirname(instance)), "encoding.asp")
+
+
+def is_fetched(cache, domain):
+    """Whether a domain has the files a run needs, which is its instances and
+    the encoding each one is solved with. The directory being there says
+    nothing. A cache that lived under /tmp keeps directories whose contents
+    macOS deleted by access time, and a half-empty domain looks fetched."""
+    roots = instance_roots(cache, domain)
+    if not roots:
+        return False
+    for base in roots:
+        listing = os.path.join(base, "instances.competition")
+        if not os.path.exists(listing):
+            continue
+        with open(listing) as f:
+            names = [line.strip() for line in f if line.strip()]
+        if not all(os.path.isfile(os.path.join(base, n)) for n in names):
+            return False
+    instances = instances_of(cache, domain, selected_only=False)
+    if not instances:
+        return False
+    encodings = {encoding_of(cache, domain, i) for i in instances}
+    return all(os.path.exists(path) for path in encodings)
 
 
 def output_predicates(cache, domain, instance, checker=None):
@@ -521,7 +547,7 @@ def list_instances(args, domain):
     """The instances of one domain, which is what naming a domain asks for.
     Paths are printed in full, next to the encoding each one is solved with, so
     that a line can be pasted straight into a pgass command."""
-    if not os.path.isdir(domain_dir(args.cache, domain)):
+    if not is_fetched(args.cache, domain):
         sys.exit(f"bench: {domain['name']} is not fetched. "
                  f"Try 'bench.py fetch {domain['name']}'.")
 
@@ -555,7 +581,7 @@ def cmd_ls(args):
 
     rows = []
     for domain in manifest["domains"]:
-        fetched = os.path.isdir(domain_dir(args.cache, domain))
+        fetched = is_fetched(args.cache, domain)
         if args.fetched and not fetched:
             continue
         count, status = "-", ""
@@ -593,7 +619,7 @@ def cmd_run(args):
         sys.exit(f"bench: no pgass at {args.pgass}. Run 'make' first.")
 
     domain = find_domain(manifest, args.domain)
-    if not os.path.isdir(domain_dir(args.cache, domain)):
+    if not is_fetched(args.cache, domain):
         sys.exit(f"bench: {domain['name']} not fetched. "
                  f"Try 'bench.py fetch {domain['name']}'.")
 
