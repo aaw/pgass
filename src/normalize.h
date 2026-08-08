@@ -10,9 +10,21 @@
 // normalization. Later stages match on it to print the atom as '-p(1)' again.
 inline constexpr std::string_view kClassicalNegationPrefix = "_neg_";
 
-// Rewrites `prog` into the shape ground() expects: weak constraints become
-// '_viol' rules, classical negation becomes fresh '_neg_' predicates, and choice
-// rules become disjunctive rules plus a counting constraint.
+// The predicate a shown term becomes: '#show t : body.' turns into
+// '_show(t) :- body.'. name_outputs() prints the argument of each one. Every
+// shown term shares this one predicate, which is what makes them a set: two
+// statements producing the same term produce the same ground atom.
+inline constexpr std::string_view kShowPredicate = "_show";
+
+// The predicate a weak constraint becomes: ':~ body. [w@l, t]' turns into
+// '_viol(l, w, t) :- body.'. emit_minimize() reads the cost of each level off
+// these atoms.
+inline constexpr std::string_view kViolationPredicate = "_viol";
+
+// Rewrites `prog` into the shape ground() expects: '#show' statements become
+// '_show' rules and a print filter, weak constraints become '_viol' rules,
+// classical negation becomes fresh '_neg_' predicates, and choice rules become
+// disjunctive rules plus a counting constraint.
 //
 // A disjunctive head passes through as it stands. Turning 'a | b :- body.' into
 // normal rules is only sound while no two head atoms lie on a common positive

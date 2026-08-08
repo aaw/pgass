@@ -3198,7 +3198,7 @@ void emit_minimize(const Store& store, const Symbols& syms,
                    aspif::Program& result) {
   absl::btree_map<BigInt, std::vector<aspif::WeightedLit>> by_level;
   for (const PredKey& key : store.order) {
-    if (key.name != "_viol") continue;
+    if (key.name != kViolationPredicate) continue;
     for (const GroundAtom& atom : store.find(key)->atoms) {
       // normalize() always puts the level and weight first, in that order.
       const Sym level = atom.args[0];
@@ -3214,21 +3214,49 @@ void emit_minimize(const Store& store, const Symbols& syms,
   }
 }
 
-// Names every atom of a user-visible predicate so answer sets print
-// symbolically. '_' predicates are internal and stay hidden, apart from a
-// '_neg_p' standing for a classically negated '-p', which prints as '-p'.
-void name_outputs(const Store& store, const Symbols& syms,
-                  aspif::Program& result) {
-  for (const PredKey& key : store.order) {
-    std::string predicate;
-    if (key.name.starts_with(kClassicalNegationPrefix)) {
-      predicate =
-          absl::StrCat("-", key.name.substr(kClassicalNegationPrefix.size()));
-    } else if (key.name.starts_with('_')) {
-      continue;
-    } else {
-      predicate = key.name;
+// Whether a predicate prints. The scan runs once per predicate, not once per
+// atom, over the handful of signatures one program names.
+bool shows_predicate(const ShowFilter& filter, bool negated,
+                     std::string_view name, size_t arity) {
+  if (!filter.has_value()) return true;
+  for (const Show::Signature& signature : *filter) {
+    if (signature.negated == negated && signature.arity == arity &&
+        signature.name == name) {
+      return true;
     }
+  }
+  return false;
+}
+
+// Names every atom an answer set prints so it reads symbolically. That is each
+// atom of a user-visible predicate `filter` admits, plus each shown term.
+// normalize() left a shown term behind as a '_show' atom holding the term as
+// its one argument.
+//
+// The rest of the '_' predicates are internal and stay hidden, apart from a
+// '_neg_p' standing for a classically negated '-p', which prints as '-p'.
+void name_outputs(const ShowFilter& filter, const Store& store,
+                  const Symbols& syms, aspif::Program& result) {
+  for (const PredKey& key : store.order) {
+    if (key.name == kShowPredicate) {
+      for (const GroundAtom& atom : store.find(key)->atoms) {
+        result.outputs.push_back(aspif::Output{
+            .name = syms.printed(atom.args[0]), .condition = {atom.id}});
+      }
+      continue;
+    }
+
+    std::string_view name = key.name;
+    const bool negated = name.starts_with(kClassicalNegationPrefix);
+    if (negated) {
+      name.remove_prefix(kClassicalNegationPrefix.size());
+    } else if (name.starts_with('_')) {
+      continue;
+    }
+    if (!shows_predicate(filter, negated, name, key.arity)) continue;
+
+    const std::string predicate =
+        negated ? absl::StrCat("-", name) : std::string(name);
     for (const GroundAtom& atom : store.find(key)->atoms) {
       result.outputs.push_back(
           aspif::Output{.name = syms.printed_call(predicate, atom.args),
@@ -3304,7 +3332,7 @@ absl::StatusOr<aspif::Program> ground(const Program& prog,
                                agg_cache, result, warnings));
   }
   emit_minimize(store, syms, result);
-  name_outputs(store, syms, result);
+  name_outputs(prog.show_filter, store, syms, result);
   if (prog.query != nullptr && prog.query->lit != nullptr) {
     RETURN_IF_ERROR(emit_query(*prog.query->lit, store, syms, result));
     result.query_text = format(*prog.query);

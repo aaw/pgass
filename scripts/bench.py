@@ -50,7 +50,6 @@ INTERRUPTED = 1
 # failures.
 UNSUPPORTED = [
     ("range", re.compile(r"[0-9A-Za-z_)]\.\.[0-9A-Za-z_(]")),
-    ("#show", re.compile(r"#show")),
     ("#const", re.compile(r"#const")),
     ("#minimize", re.compile(r"#minimi[sz]e|#maximi[sz]e")),
 ]
@@ -310,8 +309,8 @@ def output_predicates(cache, domain, instance, checker=None):
     """The predicates that make up the answer, named as 'steiner/3,edge/4'.
 
     A checker wants only these, not the whole answer set: the fixtures the
-    checkers ship hold nothing but the chosen atoms. pgass has no #show, so
-    everything it derives is printed and has to be narrowed down here.
+    checkers ship hold nothing but the chosen atoms. An encoding that names no
+    #show prints every atom it derives, so the answer is narrowed down here.
     """
     candidates = [os.path.join(os.path.dirname(instance), "filter.txt"),
                   os.path.join(os.path.dirname(encoding_of(cache, domain, instance)),

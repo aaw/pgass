@@ -2,6 +2,7 @@
 #define AST_H_
 
 #include <memory>
+#include <optional>
 #include <string>
 #include <string_view>
 #include <utility>
@@ -68,10 +69,40 @@ struct Weight {
       : weight(std::move(w)), level(std::move(l)), terms(std::move(t)) {}
 };
 
+/* A '#show' directive, which says what an answer set prints and nothing else.
+
+   A signature, '#show p/2.' or '#show -p/2.' or '#show.', names the predicates
+   to print. A term, '#show t : body.', prints t for every way the body holds,
+   whether or not the program derives an atom named t.
+
+   Both forms are statements rather than fields of Program, unlike the query,
+   so that format() prints them back where the program wrote them.
+*/
+struct Show {
+  struct Signature {
+    bool negated = false;
+    std::string name;
+    size_t arity = 0;
+  };
+
+  // Set in the signature form. '#show.' sets neither this nor `term`.
+  std::optional<Signature> signature;
+  // Set in the term form. The statement's body is the condition.
+  std::unique_ptr<Term> term;
+};
+
+// Which predicates an answer set prints. No value means every one the user
+// wrote does. A value holds the signatures '#show' named, so an empty one
+// prints nothing.
+using ShowFilter = std::optional<std::vector<Show::Signature>>;
+
 struct Statement {
   std::unique_ptr<Head> head;
   std::unique_ptr<Body> body;
   std::unique_ptr<Weight> weight;
+  // Set on a '#show' statement, which has no head and whose body, if any, is
+  // the shown term's condition.
+  std::unique_ptr<Show> show;
   size_t source_pos = 0;
 };
 
@@ -213,6 +244,8 @@ struct Query {
 struct Program {
   Statements statements;
   std::unique_ptr<Query> query;
+  // normalize() fills this in from the program's '#show' statements.
+  ShowFilter show_filter;
   std::string_view source;
 };
 

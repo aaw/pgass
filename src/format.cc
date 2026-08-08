@@ -340,7 +340,27 @@ void format_weight(std::string* fmt, const Weight& weight) {
   }
 }
 
+void format_show(std::string* fmt, const Show& show, const Body* condition) {
+  absl::StrAppend(fmt, "#show");
+  if (show.signature) {
+    absl::StrAppend(fmt, " ", show.signature->negated ? "-" : "",
+                    show.signature->name, "/", show.signature->arity);
+  } else if (show.term) {
+    absl::StrAppend(fmt, " ");
+    format_term(fmt, *show.term);
+    if (condition) {
+      absl::StrAppend(fmt, " : ");
+      format_body(fmt, *condition);
+    }
+  }
+  absl::StrAppend(fmt, ".");
+}
+
 void format_statement(std::string* fmt, const Statement& statement) {
+  if (statement.show) {
+    format_show(fmt, *statement.show, statement.body.get());
+    return;
+  }
   if (statement.weight) {
     absl::StrAppend(fmt, ":~ ");
     format_body(fmt, *statement.body);

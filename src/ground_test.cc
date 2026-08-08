@@ -60,6 +60,81 @@ TEST(GroundTest, Facts) {
             "0\n");
 }
 
+// A '#show' over a signature keeps the atoms and drops the output statements
+// naming them, since it decides what prints and nothing else.
+TEST(GroundTest, ShowSignatureKeepsTheAtomsAndDropsTheirNames) {
+  auto out = ground_source("p(1). q(2). #show p/1.");
+  ASSERT_OK(out);
+  EXPECT_EQ(*out,
+            "asp 1 0 0\n"
+            "1 0 1 1 0 0\n"
+            "1 0 1 2 0 0\n"
+            "4 4 p(1) 1 2\n"
+            "0\n");
+}
+
+// Arity is part of a signature, so 'p/1' says nothing about 'p/2'.
+TEST(GroundTest, ShowSignatureMatchesOneArity) {
+  auto out = ground_source("p(1). p(1,2). #show p/1.");
+  ASSERT_OK(out);
+  EXPECT_THAT(*out, HasSubstr(" p(1) "));
+  EXPECT_THAT(*out, Not(HasSubstr("p(1,2)")));
+}
+
+// '-p' is its own signature, so showing 'p/1' hides it.
+TEST(GroundTest, ShowSignatureTellsNegatedPredicatesApart) {
+  auto shown = ground_source("-p(1). p(2). #show -p/1.");
+  ASSERT_OK(shown);
+  EXPECT_THAT(*shown, HasSubstr("-p(1)"));
+  EXPECT_THAT(*shown, Not(HasSubstr("4 4 p(2)")));
+
+  auto hidden = ground_source("-p(1). p(2). #show p/1.");
+  ASSERT_OK(hidden);
+  EXPECT_THAT(*hidden, HasSubstr("4 4 p(2)"));
+  EXPECT_THAT(*hidden, Not(HasSubstr("-p(1)")));
+}
+
+TEST(GroundTest, ShowNothingNamesNoAtom) {
+  auto out = ground_source("p(1). q(2). #show.");
+  ASSERT_OK(out);
+  EXPECT_THAT(*out, Not(HasSubstr("4 ")));
+}
+
+// The name is the term, not the '_show' atom carrying it.
+TEST(GroundTest, ShowTermIsNamedAfterTheTerm) {
+  auto out = ground_source(R"(
+    p(1). p(2).
+    #show foo(X) : p(X).
+  )");
+  ASSERT_OK(out);
+  EXPECT_THAT(*out, HasSubstr(" foo(1) "));
+  EXPECT_THAT(*out, HasSubstr(" foo(2) "));
+  EXPECT_THAT(*out, Not(HasSubstr("_show")));
+}
+
+// Two ways of producing the same term are one atom and one output, because
+// every shown term goes through the same '_show' predicate.
+TEST(GroundTest, ShowTermsAreASet) {
+  auto out = ground_source(R"(
+    p(1). p(2).
+    #show foo : p(X).
+  )");
+  ASSERT_OK(out);
+  EXPECT_THAT(*out, HasSubstr("foo"));
+  EXPECT_EQ(out->find("foo"), out->rfind("foo"));
+}
+
+TEST(GroundTest, ShowTermSurvivesShowNothing) {
+  auto out = ground_source(R"(
+    p(1).
+    #show.
+    #show foo(X) : p(X).
+  )");
+  ASSERT_OK(out);
+  EXPECT_THAT(*out, HasSubstr(" foo(1) "));
+  EXPECT_THAT(*out, Not(HasSubstr("p(1)")));
+}
+
 // '_' matches whatever an atom holds in its position, so a join must compare
 // against it rather than looking atoms up by it, even when every other
 // argument of the literal is already bound.

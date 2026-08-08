@@ -37,6 +37,55 @@ std::unique_ptr<BodyItem> positive_atom_item(const std::string& id,
   return naf;
 }
 
+// A head holding the single atom 'name(args)'. Every directive this file
+// rewrites into a rule ends up with a head of that shape.
+std::unique_ptr<Head> single_atom_head(std::string_view name, Terms args) {
+  auto literal = std::make_unique<ClassicalLiteral>();
+  literal->id = std::string(name);
+  literal->args = std::move(args);
+  auto disjunction = std::make_unique<Disjunction>();
+  disjunction->literals.push_back(std::move(literal));
+  return disjunction;
+}
+
+/* Take each '#show' statement out of the program, in one of two ways.
+
+   A signature, '#show p/2.' or '#show.', says which predicates an answer set
+   prints, so it goes into prog.show_filter and grounding reads it there.
+
+   A term, '#show t : body.', becomes '_show(t) :- body.'. From here on it is
+   an ordinary rule, so the predicate graph, grounding and emission need to
+   know nothing about '#show'. name_outputs() reads the '_show' atoms back and
+   prints each one's argument.
+*/
+void rewrite_show_statements(Program& prog) {
+  auto new_statements =
+      std::make_unique<std::vector<std::unique_ptr<Statement>>>();
+  for (auto& statement : *prog.statements) {
+    if (!statement->show) {
+      new_statements->push_back(std::move(statement));
+      continue;
+    }
+
+    Show& show = *statement->show;
+    if (show.term == nullptr) {
+      if (!prog.show_filter.has_value()) prog.show_filter.emplace();
+      if (show.signature) prog.show_filter->push_back(*show.signature);
+      continue;
+    }
+
+    auto args = std::make_unique<std::vector<std::unique_ptr<Term>>>();
+    args->push_back(std::move(show.term));
+
+    auto rule = std::make_unique<Statement>();
+    rule->head = single_atom_head(kShowPredicate, std::move(args));
+    rule->body = std::move(statement->body);
+    rule->source_pos = statement->source_pos;
+    new_statements->push_back(std::move(rule));
+  }
+  prog.statements = std::move(new_statements);
+}
+
 /* Rewrite each weak constraint
 
      :~ body. [w@l, t1, ..., tn]
@@ -74,14 +123,8 @@ absl::Status rewrite_weak_constraints(Program& prog) {
       }
     }
 
-    auto viol = std::make_unique<ClassicalLiteral>();
-    viol->id = "_viol";
-    viol->args = std::move(args);
-    auto disjunction = std::make_unique<Disjunction>();
-    disjunction->literals.push_back(std::move(viol));
-
     auto rule = std::make_unique<Statement>();
-    rule->head = std::move(disjunction);
+    rule->head = single_atom_head(kViolationPredicate, std::move(args));
     rule->body = std::move(statement->body);
     new_statements->push_back(std::move(rule));
   }
@@ -267,6 +310,9 @@ absl::Status normalize_choice_rules(Program& prog) {
 }  // namespace
 
 absl::Status normalize(Program& prog) {
+  // '#show' goes first so that a '-p' in a shown term's condition is left for
+  // remove_classical_negation below, along with every other rule body.
+  rewrite_show_statements(prog);
   RETURN_IF_ERROR(rewrite_weak_constraints(prog));
   RETURN_IF_ERROR(remove_classical_negation(prog));
   RETURN_IF_ERROR(normalize_choice_rules(prog));

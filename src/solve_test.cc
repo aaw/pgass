@@ -120,6 +120,36 @@ absl::StatusOr<std::vector<std::string>> query_matches(
   return names;
 }
 
+// A '#show' decides what an answer set prints and changes nothing else: the
+// same two answer sets, told apart by the same choice, printed differently.
+TEST(SolveTest, ShowChangesWhatPrintsAndNotWhatHolds) {
+  auto plain = solve_source(R"(
+    { p(1) }.
+    q(2) :- p(1).
+  )");
+  ASSERT_OK(plain);
+  EXPECT_THAT(*plain, UnorderedElementsAre("", "p(1) q(2)"));
+
+  auto shown = solve_source(R"(
+    { p(1) }.
+    q(2) :- p(1).
+    #show q/1.
+  )");
+  ASSERT_OK(shown);
+  EXPECT_THAT(*shown, UnorderedElementsAre("", "q(2)"));
+}
+
+TEST(SolveTest, ShownTermFollowsItsCondition) {
+  auto out = solve_source(R"(
+    { p(1); p(2) }.
+    #show.
+    #show both : p(1), p(2).
+    #show one(X) : p(X), not p(3 - X).
+  )");
+  ASSERT_OK(out);
+  EXPECT_THAT(*out, UnorderedElementsAre("", "one(1)", "one(2)", "both"));
+}
+
 // A positive cycle holds only where something outside it offers support. Under
 // 'p' the cycle is reached through 'a :- p'; under 'q' nothing reaches it, and
 // the level ranking is what stops a and b from supporting each other.

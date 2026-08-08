@@ -1,5 +1,5 @@
 * Consider adding `--encode=sat`, which dumps the encoding as DIMACS.
-* Add non-standard language constructs like #show, #const, #minimize
+* Add non-standard language constructs like #const, #minimize
   and ranges so we can run all benchmarks
 * PermutationPatternMatching costs what it costs to hand cvc5 a million
   clauses, not to search them. Grounding is ahead of gringo, 0.29s against

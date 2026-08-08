@@ -4,6 +4,7 @@
 #include <utility>
 #include <vector>
 
+#include "absl/strings/numbers.h"
 #include "absl/strings/str_cat.h"
 #include "macros.h"
 
@@ -84,12 +85,42 @@ absl::StatusOr<Statements> Parser::parse_statements() {
                  | <head> [CONS [<body>]] DOT
                  | WCONS [<body>] DOT SQUARE_OPEN <weight_at_level>
    SQUARE_CLOSE
+                 | SHOW <show> [COLON <body>] DOT
 */
 absl::StatusOr<std::unique_ptr<Statement>> Parser::parse_statement() {
   auto statement = std::make_unique<Statement>();
   statement->source_pos = lexer_.next_token_pos();
 
-  // First, try to parse the head-less productions that start with CONS/WCONS.
+  // A '#show' has a token of its own, so it is settled ahead of the
+  // productions that have to be told apart by backtracking.
+  {
+    LexerCheckpoint try_show(lexer_);
+    if (lexer_.next().type == TokenType::kSHOW) {
+      try_show.commit();
+      ASSIGN_OR_RETURN(statement->show, parse_show());
+
+      // What follows the shown term is either its condition or the end of the
+      // statement, so nothing here has to be taken back.
+      Token tok = lexer_.next();
+      if (tok.type == TokenType::kCOLON) {
+        if (statement->show->term == nullptr) {
+          return absl::InvalidArgumentError(
+              absl::StrCat("'#show' over a predicate takes no condition\n",
+                           lexer_.report_last_token_pos()));
+        }
+        ASSIGN_OR_RETURN(statement->body, parse_body());
+        tok = lexer_.next();
+      }
+      if (tok.type != TokenType::kDOT) {
+        return absl::InvalidArgumentError(
+            absl::StrCat("Expected '.' to end rule, got '", tok.val, "'\n",
+                         lexer_.report_last_token_pos()));
+      }
+      return statement;
+    }
+  }
+
+  // Next, try to parse the head-less productions that start with CONS/WCONS.
   {
     LexerCheckpoint try_no_head(lexer_);
     Token tok = lexer_.next();
@@ -602,6 +633,61 @@ absl::StatusOr<std::unique_ptr<BuiltinAtom>> Parser::parse_builtin_atom() {
   ASSIGN_OR_RETURN(atom->op, parse_binop());
   ASSIGN_OR_RETURN(atom->right, parse_term());
   return atom;
+}
+
+// <show_signature> ::= [MINUS] ID DIV NUMBER
+absl::StatusOr<Show::Signature> Parser::parse_show_signature() {
+  Show::Signature signature;
+
+  {
+    LexerCheckpoint try_minus(lexer_);
+    if (lexer_.next().type == TokenType::kMINUS) {
+      try_minus.commit();
+      signature.negated = true;
+    }
+  }
+
+  CONSUME_TOKEN_OR_RETURN(lexer_, name, TokenType::kID);
+  signature.name = std::string(name.val);
+  CONSUME_TOKEN_TYPE_OR_RETURN(lexer_, TokenType::kDIV);
+  CONSUME_TOKEN_OR_RETURN(lexer_, arity, TokenType::kNUMBER);
+  if (!absl::SimpleAtoi(arity.val, &signature.arity)) {
+    return absl::InvalidArgumentError(
+        absl::StrCat("Couldn't read '", arity.val, "' as an arity\n",
+                     lexer_.report_last_token_pos()));
+  }
+  return signature;
+}
+
+/* <show> ::= [<show_signature> | <term>]
+
+   '#show p/1.' and '#show.' say which predicates print. '#show t : body.' adds
+   a term to print, and its condition is parsed as the statement's body.
+*/
+absl::StatusOr<std::unique_ptr<Show>> Parser::parse_show() {
+  auto show = std::make_unique<Show>();
+
+  // '#show.' has nothing between the token and the dot.
+  {
+    LexerCheckpoint peek_dot(lexer_);
+    if (lexer_.next().type == TokenType::kDOT) return show;
+  }
+
+  // A signature is tried first because 'p/1' reads as a term too: the constant
+  // p divided by 1.
+  {
+    LexerCheckpoint try_signature(lexer_);
+    auto signature = parse_show_signature();
+    if (signature.ok()) {
+      try_signature.commit();
+      show->signature = std::move(*signature);
+      return show;
+    }
+    update_furthest(signature.status());
+  }
+
+  ASSIGN_OR_RETURN(show->term, parse_term());
+  return show;
 }
 
 // <query> ::= <classical_literal> QUERY_MARK

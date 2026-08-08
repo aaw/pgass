@@ -66,6 +66,107 @@ TEST_F(NormalizeTest, TestNoNormalization) {
   EXPECT_THAT(**prog, EquivalentToSource(program));
 }
 
+TEST_F(NormalizeTest, TestShowTermBecomesAShowRule) {
+  std::string program = R"(
+    p(1).
+    #show foo(X) : p(X).
+  )";
+  std::string expected = R"(
+    p(1).
+    _show(foo(X)) :- p(X).
+  )";
+
+  Parser parser(program);
+  auto prog = parser.parse_program();
+  ASSERT_OK(prog);
+  ASSERT_OK(normalize(**prog));
+
+  EXPECT_THAT(**prog, EquivalentToSource(expected));
+  EXPECT_FALSE((*prog)->show_filter.has_value());
+}
+
+TEST_F(NormalizeTest, TestShowTermWithoutAConditionBecomesAFact) {
+  std::string program = R"(
+    p(1).
+    #show foo.
+  )";
+  std::string expected = R"(
+    p(1).
+    _show(foo).
+  )";
+
+  Parser parser(program);
+  auto prog = parser.parse_program();
+  ASSERT_OK(prog);
+  ASSERT_OK(normalize(**prog));
+
+  EXPECT_THAT(**prog, EquivalentToSource(expected));
+}
+
+TEST_F(NormalizeTest, TestShowSignaturesBecomeTheFilter) {
+  std::string program = R"(
+    p(1).
+    #show p/1.
+    #show -q/2.
+  )";
+  std::string expected = R"(
+    p(1).
+  )";
+
+  Parser parser(program);
+  auto prog = parser.parse_program();
+  ASSERT_OK(prog);
+  ASSERT_OK(normalize(**prog));
+
+  EXPECT_THAT(**prog, EquivalentToSource(expected));
+  ASSERT_TRUE((*prog)->show_filter.has_value());
+  ASSERT_EQ((*prog)->show_filter->size(), 2u);
+  EXPECT_FALSE((*prog)->show_filter->at(0).negated);
+  EXPECT_EQ((*prog)->show_filter->at(0).name, "p");
+  EXPECT_EQ((*prog)->show_filter->at(0).arity, 1u);
+  EXPECT_TRUE((*prog)->show_filter->at(1).negated);
+  EXPECT_EQ((*prog)->show_filter->at(1).name, "q");
+  EXPECT_EQ((*prog)->show_filter->at(1).arity, 2u);
+}
+
+// '#show.' names no predicate, but it still turns hiding on, which is what
+// makes it print nothing rather than everything.
+TEST_F(NormalizeTest, TestShowNothingLeavesAnEmptyFilter) {
+  std::string program = R"(
+    p(1).
+    #show.
+  )";
+
+  Parser parser(program);
+  auto prog = parser.parse_program();
+  ASSERT_OK(prog);
+  ASSERT_OK(normalize(**prog));
+
+  ASSERT_TRUE((*prog)->show_filter.has_value());
+  EXPECT_TRUE((*prog)->show_filter->empty());
+}
+
+// A condition is a rule body like any other, so classical negation in one is
+// rewritten along with the rest of the program.
+TEST_F(NormalizeTest, TestShowConditionGetsClassicalNegationRemoved) {
+  std::string program = R"(
+    -p(1).
+    #show foo(X) : -p(X).
+  )";
+  std::string expected = R"(
+    _neg_p(1).
+    _show(foo(X)) :- _neg_p(X).
+    :- p(X), _neg_p(X).
+  )";
+
+  Parser parser(program);
+  auto prog = parser.parse_program();
+  ASSERT_OK(prog);
+  ASSERT_OK(normalize(**prog));
+
+  EXPECT_THAT(**prog, EquivalentToSource(expected));
+}
+
 TEST_F(NormalizeTest, TestArithmeticKeepsOnlyTheParenthesesItNeeds) {
   // Parentheses that precedence already implies are dropped when printing,
   // and the ones that change the grouping are kept.

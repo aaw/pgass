@@ -567,6 +567,76 @@ TEST_F(ParserTest, ErrorMessageMissingDotBetweenRules) {
             "^");
 }
 
+TEST_F(ParserTest, ShowSignature) {
+  Parser parser("#show p/2.");
+  auto result = parser.parse_program();
+  ASSERT_OK(result);
+  ASSERT_EQ((*result)->statements->size(), 1u);
+  const Show& show = *(*(*result)->statements)[0]->show;
+  ASSERT_TRUE(show.signature.has_value());
+  EXPECT_FALSE(show.signature->negated);
+  EXPECT_EQ(show.signature->name, "p");
+  EXPECT_EQ(show.signature->arity, 2u);
+  EXPECT_EQ(show.term, nullptr);
+}
+
+TEST_F(ParserTest, ShowSignatureOfAClassicallyNegatedPredicate) {
+  Parser parser("#show -p/1.");
+  auto result = parser.parse_program();
+  ASSERT_OK(result);
+  const Show& show = *(*(*result)->statements)[0]->show;
+  ASSERT_TRUE(show.signature.has_value());
+  EXPECT_TRUE(show.signature->negated);
+  EXPECT_EQ(show.signature->name, "p");
+  EXPECT_EQ(show.signature->arity, 1u);
+}
+
+TEST_F(ParserTest, ShowNothing) {
+  Parser parser("#show.");
+  auto result = parser.parse_program();
+  ASSERT_OK(result);
+  const Show& show = *(*(*result)->statements)[0]->show;
+  EXPECT_FALSE(show.signature.has_value());
+  EXPECT_EQ(show.term, nullptr);
+}
+
+TEST_F(ParserTest, ShowTermWithACondition) {
+  Parser parser("#show foo(X) : p(X), not q(X).");
+  auto result = parser.parse_program();
+  ASSERT_OK(result);
+  const Statement& statement = *(*(*result)->statements)[0];
+  ASSERT_NE(statement.show->term, nullptr);
+  EXPECT_FALSE(statement.show->signature.has_value());
+  ASSERT_EQ(statement.show->term->kind, Term::AtomKind);
+  const Atom& term = static_cast<const Atom&>(*statement.show->term);
+  EXPECT_EQ(term.name, "foo");
+  ASSERT_NE(term.args, nullptr);
+  EXPECT_EQ(term.args->size(), 1u);
+  ASSERT_NE(statement.body, nullptr);
+  EXPECT_EQ(statement.body->items->size(), 2u);
+}
+
+// '#show foo.' prints foo whatever else holds, and is not a signature: only
+// the '/n' makes one.
+TEST_F(ParserTest, ShowTermWithoutACondition) {
+  Parser parser("#show foo.");
+  auto result = parser.parse_program();
+  ASSERT_OK(result);
+  const Statement& statement = *(*(*result)->statements)[0];
+  ASSERT_NE(statement.show->term, nullptr);
+  ASSERT_EQ(statement.show->term->kind, Term::AtomKind);
+  EXPECT_EQ(static_cast<const Atom&>(*statement.show->term).name, "foo");
+  EXPECT_EQ(statement.body, nullptr);
+}
+
+TEST_F(ParserTest, ShowOverAPredicateRejectsACondition) {
+  Parser parser("#show p/1 : q(1).");
+  auto result = parser.parse_program();
+  ASSERT_FALSE(result.ok());
+  EXPECT_THAT(result.status().message(),
+              HasSubstr("'#show' over a predicate takes no condition"));
+}
+
 TEST_F(ParserTest, ErrorMessageMissingDotAtEndOfProgram) {
   Parser parser("p(1). p(X) :- not r(X)");
   auto result = parser.parse_program();

@@ -32,6 +32,8 @@ class Parser {
   absl::StatusOr<BinopType> parse_binop();
   absl::StatusOr<std::unique_ptr<BuiltinAtom>> parse_builtin_atom();
   absl::StatusOr<std::unique_ptr<Query>> parse_query();
+  absl::StatusOr<std::unique_ptr<Show>> parse_show();
+  absl::StatusOr<Show::Signature> parse_show_signature();
   absl::StatusOr<std::unique_ptr<Term>> parse_term();
   absl::StatusOr<std::unique_ptr<Term>> parse_product_term();
   absl::StatusOr<std::unique_ptr<Term>> parse_single_term();

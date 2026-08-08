@@ -463,6 +463,48 @@ TEST_F(SafetyTest, TestAggregateGuardVariableAlsoInsideElements) {
   EXPECT_THAT(verify_safe(**prog), Not(IsOk()));
 }
 
+TEST_F(SafetyTest, TestShowTermBoundByItsCondition) {
+  std::string_view src = "p(1). #show foo(X) : p(X).";
+  Parser parser(src);
+  auto prog = parser.parse_program();
+  ASSERT_OK(prog);
+  EXPECT_THAT(verify_safe(**prog), IsOk());
+}
+
+TEST_F(SafetyTest, TestShowSignatureIsAlwaysSafe) {
+  std::string_view src = "p(1). #show p/1. #show.";
+  Parser parser(src);
+  auto prog = parser.parse_program();
+  ASSERT_OK(prog);
+  EXPECT_THAT(verify_safe(**prog), IsOk());
+}
+
+// A query names its substitutions with the outputs '#show' decides, so the two
+// together have no one answer.
+TEST_F(SafetyTest, TestQueryAndShowTogetherIsRejected) {
+  std::string_view src = "p(1). #show p/1. p(X)?";
+  Parser parser(src);
+  auto prog = parser.parse_program();
+  ASSERT_OK(prog);
+  auto status = verify_safe(**prog);
+  ASSERT_THAT(status, Not(IsOk()));
+  EXPECT_THAT(std::string(status.message()),
+              HasSubstr("cannot have both a query and a '#show'"));
+}
+
+TEST_F(SafetyTest, ErrorMessageUnsafeShowTerm) {
+  // The condition holds without ever saying which foo to print.
+  std::string_view src = "p(1). #show foo(X) : p(1).";
+  Parser parser(src);
+  auto prog = parser.parse_program();
+  ASSERT_OK(prog);
+  auto status = verify_safe(**prog);
+  ASSERT_THAT(status, Not(IsOk()));
+  EXPECT_EQ(status.message(),
+            "line 1: p(1). #show foo(X) : p(1).\n"
+            "unsafe variable in rule '#show': X");
+}
+
 TEST_F(SafetyTest, ErrorMessageUnsafeWeakConstraint) {
   std::string_view src = ":~ p(X). [1@0, Y]";
   Parser parser(src);

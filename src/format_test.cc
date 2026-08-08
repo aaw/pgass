@@ -64,4 +64,16 @@ TEST_F(FormatTest, TermsRoundTrip) {
 
 TEST_F(FormatTest, QueryRoundTrips) { ExpectRoundTrips("p(1). -p(X)?"); }
 
+TEST_F(FormatTest, ShowRoundTrips) {
+  ExpectRoundTrips(
+      "p(1). -p(2).\n"
+      "#show.\n"
+      "#show p/1.\n"
+      "#show -p/2.\n"
+      "#show foo.\n"
+      R"(#show "hi" : p(1).)"
+      "\n"
+      "#show foo(X) : p(X), not q(X).\n");
+}
+
 }  // namespace

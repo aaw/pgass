@@ -98,6 +98,12 @@ sat
 The `cover(1)`, `cover(2)`, etc. variables in the resulting solution set represent the vertex cover, so the above result
 says `{2,3,5}` is a vertex cover of cost 3.
 
+## Language
+
+pgass supports all of ASP-Core-2 plus a few non-standard language constructs that appear in benchmarks:
+
+* `#show`: TODO(aaw): add an example
+
 ## References
 
 - [ASP-Core-2 Input Language Format](https://arxiv.org/pdf/1911.04326)

@@ -162,6 +162,9 @@ void collect_every_head_variable(const Head& head,
 void collect_global_variables(const Statement& statement,
                               absl::flat_hash_set<std::string_view>& out) {
   if (statement.head) collect_every_head_variable(*statement.head, out);
+  if (statement.show && statement.show->term) {
+    collect::collect_variables(*statement.show->term, out);
+  }
   if (statement.weight) {
     const Weight& weight = *statement.weight;
     collect::collect_variables(*weight.weight, out);
@@ -284,6 +287,7 @@ std::string format_source_line(std::string_view source, size_t pos) {
 // Returns a human-readable label for a rule's head (e.g. "p/2", "{p/1; q/2}",
 // or "integrity constraint").
 std::string head_description(const Statement& stmt) {
+  if (stmt.show) return "#show";
   if (stmt.weight) return "weak constraint";
   if (stmt.head == nullptr) return "integrity constraint";
   if (auto* disj = dynamic_cast<const Disjunction*>(stmt.head.get())) {
@@ -413,6 +417,12 @@ absl::Status verify_safe(const Program& prog) {
       collect_head_vars(*statement->head, bound_vars, vars);
     }
 
+    // A shown term must be bound by its condition, the way a head must be
+    // bound by its body. '#show foo(X) : q(1).' never says which foo to print.
+    if (statement->show && statement->show->term) {
+      collect::collect_variables(*statement->show->term, vars);
+    }
+
     // A weak constraint's weight, level, and distinctness terms must be bound
     // by the body, same as any other variable use: they're the "head" of a
     // weak constraint in everything but syntax.
@@ -452,6 +462,17 @@ absl::Status verify_safe(const Program& prog) {
   // classical literal args, and the binding there is intentionally existential
   // (e.g., p(X, 1, a)? means "does there exist an X such that p(X, 1, a) is
   // produced?") so there are no more questions of binding/safety at this point.
+
+  if (prog.query != nullptr) {
+    for (const auto& statement : *(prog.statements)) {
+      if (statement->show == nullptr) continue;
+      return absl::InvalidArgumentError(absl::StrCat(
+          format_source_line(source, statement->source_pos), "\n",
+          "a program cannot have both a query and a '#show': the query reports "
+          "the substitutions it holds under, and '#show' decides the names "
+          "those substitutions are reported by"));
+    }
+  }
 
   // ASP-Core-2 section 5 forbids recursive aggregates: no predicate occurring
   // un-negated inside an aggregate element may share a positive-dependency

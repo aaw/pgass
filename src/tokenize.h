@@ -40,6 +40,7 @@ enum class TokenType {
   kPLUS,
   kQUERY_MARK,
   kSEMICOLON,
+  kSHOW,
   kSQUARE_CLOSE,
   kSQUARE_OPEN,
   kSTRING,
@@ -99,6 +100,8 @@ class Lexer {
         return consume(TokenType::kAGGREGATE_MIN, 4);
       if (source_.substr(pos_, 4) == "#sum" && !is_id_char(pos_ + 4))
         return consume(TokenType::kAGGREGATE_SUM, 4);
+      if (source_.substr(pos_, 5) == "#show" && !is_id_char(pos_ + 5))
+        return consume(TokenType::kSHOW, 5);
     }
     if (source_.substr(pos_, 2) == "<>" || source_.substr(pos_, 2) == "!=") {
       return consume(TokenType::kUNEQUAL, 2);
