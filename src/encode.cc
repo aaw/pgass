@@ -359,11 +359,34 @@ std::vector<std::vector<Support>> collect_supports(
 //
 // A choice rule forces nothing, so it has no formula here. Its head atoms are
 // free, and support alone decides them.
+//
+// An integrity constraint with a normal body is already a clause: every body
+// literal negated. Saying it that way rather than as '(=> (and ...) false)'
+// saves cvc5 building the conjunction only to rewrite it away, and it costs the
+// solver nothing, because that conjunction appears in this one assertion and is
+// forced false there. On PermutationPatternMatching, where 99.5% of the program
+// is binary constraints, going through the implication was most of the solve.
+//
+// A rule that derives something keeps the implication. Its body conjunction can
+// be shared, and cvc5 names it with a variable the search branches on. Flatten
+// those too and partner-units-166 goes from 5.4s to 54.7s, all of it in
+// CaDiCaL rather than in preprocessing.
 void rule_formulas(cvc5::TermManager& tm, const aspif::Program& prog,
                    const std::vector<cvc5::Term>& atom_var,
                    std::vector<cvc5::Term>& out) {
+  std::vector<cvc5::Term> literals;
   for (const aspif::Rule& rule : prog.rules) {
     if (rule.head_type == aspif::Rule::HeadType::kChoice) continue;
+    if (rule.head.empty() &&
+        rule.body_type == aspif::Rule::BodyType::kNormal) {
+      literals.clear();
+      literals.reserve(rule.body.size());
+      for (aspif::Lit lit : rule.body) {
+        literals.push_back(literal_term(tm, atom_var, -lit));
+      }
+      out.push_back(disjunction(tm, literals));
+      continue;
+    }
     std::vector<cvc5::Term> heads;
     heads.reserve(rule.head.size());
     for (aspif::Atom head : rule.head) heads.push_back(atom_var[head]);

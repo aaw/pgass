@@ -97,6 +97,21 @@ absl::StatusOr<std::string> check_sat_of(const std::string& source) {
 }
 
 // Two atoms, each holding where the other does not, is the smallest program
+// An integrity constraint is a clause, its body literals negated, rather than
+// the '(=> (and ...) false)' that says the same thing. A rule that derives
+// something keeps the implication, so both shapes are here.
+TEST(EncodeTest, WritesAnIntegrityConstraintAsAClause) {
+  auto script = encode_source(R"(
+    a :- not b.
+    b :- not a.
+    :- a, not b.
+  )");
+  ASSERT_OK(script);
+  EXPECT_THAT(commands(*script),
+              AllOf(Contains("(assert (or (not a) b))"),
+                    Contains("(assert (=> (not b) a))")));
+}
+
 // with more than one answer set. Its whole script is stated here, so a change
 // to the translation shows up as a diff.
 TEST(EncodeTest, TranslatesAChoiceOfTwoAtoms) {
