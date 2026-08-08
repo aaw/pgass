@@ -1,6 +1,7 @@
 #include "ground.h"
 
 #include <algorithm>
+#include <cstdint>
 #include <deque>
 #include <optional>
 #include <string>
@@ -14,11 +15,13 @@
 #include "absl/container/flat_hash_map.h"
 #include "absl/container/flat_hash_set.h"
 #include "absl/container/inlined_vector.h"
+#include "absl/container/node_hash_map.h"
 #include "absl/functional/function_ref.h"
 #include "absl/log/check.h"
 #include "absl/status/status.h"
 #include "absl/status/statusor.h"
 #include "absl/strings/str_cat.h"
+#include "absl/types/span.h"
 #include "collect.h"
 #include "format.h"
 #include "graph.h"
@@ -150,6 +153,17 @@ struct PredData {
     return it == index.end() ? nullptr : &atoms[it->second];
   }
 
+  // The same, among the atoms in [begin, end). A join step reads a stretch of
+  // the deque rather than all of it.
+  const GroundAtom* find_within(const Tuple& args, size_t begin,
+                                size_t end) const {
+    auto it = index.find(args);
+    if (it == index.end() || it->second < begin || it->second >= end) {
+      return nullptr;
+    }
+    return &atoms[it->second];
+  }
+
   // How many different values the atoms hold at each argument position, e.g.
   // {2, 3} for a p/2 holding p(a,1), p(a,2), p(b,3). join_order() reads these
   // to guess how many atoms a step matches.
@@ -189,7 +203,10 @@ struct Inserted {
 // a fixpoint, and emit_rules() looks atoms up in it to build the ground
 // rules.
 struct Store {
-  absl::flat_hash_map<PredKey, PredData> preds;
+  // Node-based because a join step holds a PredData while it runs, and the
+  // instances it hands on derive atoms of their own. A predicate seen for the
+  // first time mid-join would grow a flat map and move every PredData in it.
+  absl::node_hash_map<PredKey, PredData> preds;
   std::vector<PredKey> order;  // predicates in first-seen order
   // How many atoms the store holds, and the most it may hold. 0 means no
   // limit. See check_size().
@@ -1384,32 +1401,105 @@ std::vector<size_t> probeable_positions(const ClassicalLiteral& literal,
   return positions;
 }
 
-// Groups `range`'s atoms by the values they hold at `positions`, e.g. the
-// edge/2 atoms by their first argument, so a join step can find the atoms
-// matching an instance. An empty `positions` puts every atom in one bucket,
-// which is what a literal with nothing bound yet needs.
-absl::flat_hash_map<Tuple, std::vector<const GroundAtom*>> index_atoms(
-    const PredData& data, const AtomRange& range,
-    const std::vector<size_t>& positions) {
-  absl::flat_hash_map<Tuple, std::vector<const GroundAtom*>> index;
-  // Sizing the map up front saves most of the rehashing, but the atoms can
-  // share far fewer keys than there are of them, so the guess is capped rather
-  // than one slot per atom.
+// Where one key's atoms sit in StepIndex::members.
+struct Run {
+  std::uint32_t begin = 0;
+  std::uint32_t count = 0;
+};
+
+/* The atoms a join step can match, arranged so that probing by the values the
+   step knows takes a lookup rather than a scan.
+
+   Three shapes, because the two ends need no arranging at all. A step that
+   probes every argument names one atom, which the store's own index already
+   finds. A step that probes none matches every atom it reads. Only a step
+   between the two groups its atoms, into one block with a run per key, so that
+   a key costs no allocation of its own. A step is set up afresh on every
+   derivation pass, so an allocation per key is one the whole pass pays.
+*/
+struct StepIndex {
+  enum class Kind { kEvery, kOne, kGrouped };
+  Kind kind = Kind::kEvery;
+  // kEvery and kGrouped: the atoms the step reads. kGrouped keeps each key's
+  // atoms together, as a run of `runs`.
+  std::vector<const GroundAtom*> members;
+  absl::flat_hash_map<Tuple, Run> runs;
+  // kOne: the store's own index maps a full argument tuple straight to its
+  // atom, so the step reads from there and checks the atom is one it reads.
+  const PredData* data = nullptr;
+  AtomRange range;
+};
+
+// How the step at `positions` reads `range`'s atoms, e.g. the edge/2 atoms
+// grouped by their first argument.
+StepIndex build_step_index(const PredData& data, const AtomRange& range,
+                           const std::vector<size_t>& positions, size_t arity) {
+  StepIndex index;
+  if (positions.size() == arity && arity > 0) {
+    index.kind = StepIndex::Kind::kOne;
+    index.data = &data;
+    index.range = range;
+    return index;
+  }
+
+  index.members.reserve(range.end - range.begin);
+  if (positions.empty()) {
+    for (size_t k = range.begin; k < range.end; ++k) {
+      index.members.push_back(&data.atoms[k]);
+    }
+    return index;
+  }
+
+  index.kind = StepIndex::Kind::kGrouped;
+  // Sizing the map up front saves most of the rehashing. The atoms can share
+  // far fewer keys than there are of them, so the guess is capped.
   constexpr size_t kMostToReserve = size_t{1} << 16;
-  index.reserve(std::min(range.end - range.begin, kMostToReserve));
+  index.runs.reserve(std::min(range.end - range.begin, kMostToReserve));
+  // Each atom's key is worked out once, here. The group it lands in is kept, so
+  // that filling `members` below needs no second lookup. A run's `begin` stands
+  // for its group until the offsets are known.
+  std::vector<std::uint32_t> group_of;
+  std::vector<std::uint32_t> counts;
+  group_of.reserve(range.end - range.begin);
+  Tuple key;
   for (size_t k = range.begin; k < range.end; ++k) {
     const GroundAtom& atom = data.atoms[k];
-    Tuple key;
-    key.reserve(positions.size());
+    key.clear();
     for (size_t position : positions) key.push_back(atom.args[position]);
-    index[std::move(key)].push_back(&atom);
+    auto [it, added] = index.runs.try_emplace(key, Run{});
+    if (added) {
+      it->second.begin = static_cast<std::uint32_t>(counts.size());
+      counts.push_back(0);
+    }
+    group_of.push_back(it->second.begin);
+    ++counts[it->second.begin];
+  }
+
+  // The groups take the block in the order they were first seen, so a run is
+  // its group's count added to everything before it.
+  std::vector<std::uint32_t> offsets(counts.size(), 0);
+  std::uint32_t next = 0;
+  for (size_t group = 0; group < counts.size(); ++group) {
+    offsets[group] = next;
+    next += counts[group];
+  }
+  for (auto& entry : index.runs) {
+    const std::uint32_t group = entry.second.begin;
+    entry.second.begin = offsets[group];
+    entry.second.count = counts[group];
+  }
+
+  index.members.resize(next);
+  std::vector<std::uint32_t> cursor = std::move(offsets);
+  for (size_t k = range.begin; k < range.end; ++k) {
+    index.members[cursor[group_of[k - range.begin]]++] = &data.atoms[k];
   }
   return index;
 }
 
 // The values one partial instance needs at `positions`, e.g. {b} for the
-// 'edge(Y, Z)' above under {Y: b}. Looking these up in the index_atoms() index
-// gives the atoms that can extend the instance.
+// 'edge(Y, Z)' above under {Y: b}. Looking these up in the step's index gives
+// the atoms that can extend the instance.
 //
 // Comes back kNoValue when one of the terms is ill-formed, e.g. the
 // 'edge(1 / 0, Z)' that 'edge(X / 0, Z)' becomes under {X: 0}: no atom matches
@@ -1450,7 +1540,7 @@ struct JoinStep {
   std::vector<size_t> positions;
   // The arguments matching still has to work through. See match_plan().
   std::vector<size_t> plan;
-  absl::flat_hash_map<Tuple, std::vector<const GroundAtom*>> index;
+  StepIndex index;
   bool ready = false;
   // Set when the predicate has no atoms at all, which means no instance can get
   // past this step.
@@ -1548,8 +1638,29 @@ void prepare_step(Join& join, size_t depth, const Binding& binding) {
   step.literal = &literal;
   step.positions = probeable_positions(literal, binding);
   step.plan = match_plan(literal, step.positions);
-  step.index = index_atoms(
-      *data, scan_range(*data, join.delta_position, position), step.positions);
+  step.index = build_step_index(
+      *data, scan_range(*data, join.delta_position, position), step.positions,
+      literal.args == nullptr ? 0 : literal.args->size());
+}
+
+// The atoms `step` can match under `key`. A step naming one atom has nowhere to
+// keep it, so `one` holds it for the length of the call.
+absl::Span<const GroundAtom* const> candidates(const JoinStep& step,
+                                               const Tuple& key,
+                                               const GroundAtom** one) {
+  const StepIndex& index = step.index;
+  if (index.kind == StepIndex::Kind::kOne) {
+    *one = index.data->find_within(key, index.range.begin, index.range.end);
+    if (*one == nullptr) return {};
+    return absl::MakeConstSpan(one, 1);
+  }
+  if (index.kind == StepIndex::Kind::kEvery) {
+    return absl::MakeConstSpan(index.members);
+  }
+  auto it = index.runs.find(key);
+  if (it == index.runs.end()) return {};
+  return absl::MakeConstSpan(index.members).subspan(it->second.begin,
+                                                    it->second.count);
 }
 
 // Extends `instance` with every stored atom the step at `depth` can match, and
@@ -1568,13 +1679,11 @@ absl::Status extend(Join& join, size_t depth, Instance& instance,
   // no atom, so nothing gets past this step.
   if (join.lost_instance(key.status())) return absl::OkStatus();
   RETURN_IF_ERROR(key.status());
-  auto it = step.index.find(*key);
-  if (it == step.index.end()) return absl::OkStatus();
-
+  const GroundAtom* one = nullptr;
   // The candidates already agree on the probed positions, which is why the
   // step's plan leaves those out: matching is here to bind the variables in the
   // positions still open.
-  for (const GroundAtom* atom : it->second) {
+  for (const GroundAtom* atom : candidates(step, *key, &one)) {
     BindingTrail trail(instance.binding);
     absl::StatusOr<bool> ok = match_args(*step.literal, step.plan, atom->args,
                                          instance.binding, trail, join.syms);
