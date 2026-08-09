@@ -1,9 +1,4 @@
 * Consider adding `--encode=sat`, which dumps the encoding as DIMACS.
-* An interval's variable is bound after the join, so a positive literal reading
-  it under arithmetic the join cannot work backwards leaves it unbound:
-  "p(X) :- X = 1..3, q(X*2)." reports X as unbound where clingo grounds it.
-  `q(X+1)` is fine, since invertible() reads that one backwards and binds X.
-  Aggregate output variables are bound at the same point and have the same gap.
 * PermutationPatternMatching costs what it costs to hand cvc5 a million
   clauses, not to search them. Grounding is ahead of gringo, 0.29s against
   0.93s on 0092, and the CNF is 6413 variables and 996605 clauses that clasp

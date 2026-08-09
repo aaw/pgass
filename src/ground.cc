@@ -1499,10 +1499,10 @@ std::vector<size_t> join_order(const BodyParts& parts, const Binding& binding,
       taken[k] = false;
       for (size_t slot : fresh) bound.erase(slot);
     }
-    // Nothing left is ready, which means a variable is bound only by an
-    // assignment that a step further in makes ready. The rest go in as they
-    // come, and extend() binds each assignment once the steps ahead of it have
-    // what it reads.
+    // Nothing left is ready, which means a variable is bound by something the
+    // steps do not bind: an assignment, or an interval or aggregate the join
+    // waits on. The rest go in as they come, and the step that has what one of
+    // those reads binds it. See extend() and plan_items().
     if (!any_ready) {
       std::vector<size_t> rest = order;
       for (size_t k = 0; k < count; ++k) {
@@ -1706,6 +1706,15 @@ using InstanceFn = absl::FunctionRef<absl::Status(const Instance&)>;
 // and extend() binds whichever assignments those make ready. None of it turns
 // on the values matched. So the index is built once and reused for every
 // partial instance that reaches this step.
+// One interval or aggregate a step runs before it reads the store, and the
+// slots it binds: an interval's variable, or an aggregate's value. One of
+// `interval` and `aggregate` is set.
+struct JoinItem {
+  const NafLiteral* interval = nullptr;
+  const Aggregate* aggregate = nullptr;
+  absl::InlinedVector<size_t, 2> slots;
+};
+
 struct JoinStep {
   const ClassicalLiteral* literal = nullptr;
   std::vector<size_t> positions;
@@ -1716,6 +1725,9 @@ struct JoinStep {
   // Set when the predicate has no atoms at all, which means no instance can get
   // past this step.
   bool dead = false;
+  // What the step runs before it reads the store, in the order plan_items()
+  // put them in. Empty for nearly every step.
+  std::vector<JoinItem> items;
 };
 
 // One join in progress: the body it is satisfying, the store it reads, and the
@@ -1729,6 +1741,10 @@ struct Join {
   std::optional<std::string> no_value_seen;
   std::vector<size_t> order;  // positive literal positions, delta first
   std::optional<size_t> delta_position;
+  // The intervals and aggregates left for finish() to run. plan_items() takes
+  // out the ones it gave to a step.
+  std::vector<const NafLiteral*> intervals;
+  std::vector<const Aggregate*> aggregates;
   std::vector<JoinStep> steps;  // one per entry of `order`, in that order
 
   // True when the status is a term with no value, which drops the instance it
@@ -1742,11 +1758,34 @@ struct Join {
   }
 };
 
+// One distinct tuple an aggregate's elements can produce, e.g. the [1] that
+// both elements of '#count{ X : p(X) ; X : r(X) }' produce once p(1) and r(1)
+// are derived.
+struct AggTuple {
+  Tuple tuple;
+  BigInt weight;  // what the tuple adds to the aggregate's value
+  // One body per grounding that puts the tuple in the set. Empty when every
+  // grounding has an ill-formed 'not' literal.
+  std::vector<std::vector<aspif::Lit>> supports;
+};
+
 // find_instances() and bind_agg_outputs() call each other: grounding an
 // aggregate's elements needs find_instances() for the element conditions.
 // Aggregates cannot nest, so the recursion stops one level down.
 absl::StatusOr<std::vector<Instance>> bind_agg_outputs(
     Join& join, std::vector<Instance> instances);
+
+// Defined with the rest of the aggregate code, below. The join reads them to
+// run an aggregate whose value a literal waits for. See plan_items().
+std::vector<size_t> agg_output_slots(const Aggregate& agg,
+                                     const Binding& binding);
+std::vector<size_t> agg_variable_slots(const Aggregate& agg,
+                                       const Binding& binding);
+absl::StatusOr<std::vector<AggTuple>> collect_agg_tuples(
+    const Aggregate& agg, const Binding& outer_binding, const Store& store,
+    Symbols& syms);
+absl::StatusOr<std::vector<Sym>> possible_values(
+    const Aggregate& agg, const std::vector<AggTuple>& tuples, Symbols& syms);
 
 absl::Status extend(Join& join, size_t depth, Instance& instance,
                     const InstanceFn& emit);
@@ -1810,11 +1849,11 @@ absl::StatusOr<std::vector<Instance>> expand_over_interval(
   return expanded;
 }
 
-// Runs every interval of the body, each one either binding its variable to one
-// value at a time or testing the value something else bound.
+// Runs every interval the join left, each one either binding its variable to
+// one value at a time or testing the value something else bound.
 absl::StatusOr<std::vector<Instance>> expand_intervals(
     Join& join, std::vector<Instance> instances) {
-  std::vector<const NafLiteral*> pending = join.parts.intervals;
+  std::vector<const NafLiteral*> pending = join.intervals;
   while (!pending.empty() && !instances.empty()) {
     // An interval's turn has come once its ends have values. Running another
     // one can be what settles them: the N of '_R1 = 1..N' can be the _R0 of
@@ -1842,7 +1881,8 @@ absl::StatusOr<std::vector<Instance>> expand_intervals(
 
 /* Hands `emit` the instances that survive the parts of the body that are
    decided once every positive literal has matched: the intervals, the
-   aggregates, and the comparisons. extend() has made the assignments.
+   aggregates, and the comparisons. extend() has made the assignments, and the
+   steps have run whatever the join itself waited on.
 
    An interval stands for several values, and an aggregate that binds a
    variable to its value, e.g. '#count{X : p(X)} = S', for several answers. So
@@ -1850,7 +1890,7 @@ absl::StatusOr<std::vector<Instance>> expand_intervals(
    of the search that works on copies.
 */
 absl::Status finish(Join& join, Instance& instance, const InstanceFn& emit) {
-  if (join.parts.aggregates.empty() && join.parts.intervals.empty()) {
+  if (join.aggregates.empty() && join.intervals.empty()) {
     // Every variable the body binds has a value by now, so all the comparisons
     // are decidable.
     absl::StatusOr<bool> holds =
@@ -1866,7 +1906,7 @@ absl::Status finish(Join& join, Instance& instance, const InstanceFn& emit) {
   // An expansion that loses a term's value loses this instance, not the whole
   // grounding run, so neither of these propagates its status.
   std::vector<Instance> instances{instance};
-  if (!join.parts.intervals.empty()) {
+  if (!join.intervals.empty()) {
     // An interval runs before the aggregates, since an aggregate inside a rule
     // holding one is a different aggregate under each of its values.
     absl::StatusOr<std::vector<Instance>> expanded =
@@ -1875,7 +1915,7 @@ absl::Status finish(Join& join, Instance& instance, const InstanceFn& emit) {
     RETURN_IF_ERROR(expanded.status());
     instances = *std::move(expanded);
   }
-  if (!join.parts.aggregates.empty()) {
+  if (!join.aggregates.empty()) {
     absl::StatusOr<std::vector<Instance>> expanded =
         bind_agg_outputs(join, std::move(instances));
     if (join.lost_instance(expanded.status())) return absl::OkStatus();
@@ -1937,6 +1977,93 @@ absl::Span<const GroundAtom* const> candidates(const JoinStep& step,
       .subspan(it->second.begin, it->second.count);
 }
 
+absl::Status run_step(Join& join, size_t depth, Instance& instance,
+                      const InstanceFn& emit);
+
+absl::Status run_items(Join& join, size_t depth, size_t k, Instance& instance,
+                       const InstanceFn& emit);
+
+// Runs the interval `item` stands for, one value at a time, and the items
+// after it under each of those.
+absl::Status run_interval_item(Join& join, size_t depth, size_t k,
+                               const JoinItem& item, Instance& instance,
+                               const InstanceFn& emit) {
+  const IntervalSides sides =
+      interval_sides(static_cast<const BuiltinAtom&>(*item.interval->literal));
+  const size_t slot = item.slots.front();
+  absl::Status listed = for_each_interval_value(
+      *sides.interval, instance.binding, join.syms,
+      [&](Sym value) -> absl::Status {
+        BindingTrail trail(instance.binding);
+        instance.binding.set(slot, value);
+        trail.record(slot);
+        // The value can complete an assignment, e.g. the 'X = _R0' normalize()
+        // writes 'X = 1..3' as.
+        absl::Status bound =
+            bind_assignments(join.parts, instance.binding, trail, join.syms);
+        if (join.lost_instance(bound)) return absl::OkStatus();
+        RETURN_IF_ERROR(bound);
+        return run_items(join, depth, k + 1, instance, emit);
+      });
+  // An end with no value, the 'a..3' of 'X = a..N' under {N: a}, leaves this
+  // instance no values at all.
+  if (join.lost_instance(listed)) return absl::OkStatus();
+  return listed;
+}
+
+// Runs the aggregate `item` stands for, one of the values it can take at a
+// time. Each value is a rule instance of its own, the one an answer set giving
+// the aggregate that value satisfies.
+absl::Status run_aggregate_item(Join& join, size_t depth, size_t k,
+                                const JoinItem& item, Instance& instance,
+                                const InstanceFn& emit) {
+  // An assignment can have bound the value by now, which leaves the aggregate
+  // a plain check for emit_rules to make.
+  absl::InlinedVector<size_t, 2> outputs;
+  for (size_t slot : item.slots) {
+    if (instance.binding.at(slot) == kNoSym) outputs.push_back(slot);
+  }
+  if (outputs.empty()) return run_items(join, depth, k + 1, instance, emit);
+
+  absl::StatusOr<std::vector<AggTuple>> tuples = collect_agg_tuples(
+      *item.aggregate, instance.binding, join.store, join.syms);
+  if (join.lost_instance(tuples.status())) return absl::OkStatus();
+  RETURN_IF_ERROR(tuples.status());
+  absl::StatusOr<std::vector<Sym>> values =
+      possible_values(*item.aggregate, *tuples, join.syms);
+  if (join.lost_instance(values.status())) return absl::OkStatus();
+  RETURN_IF_ERROR(values.status());
+
+  for (Sym value : *values) {
+    BindingTrail trail(instance.binding);
+    for (size_t slot : outputs) {
+      instance.binding.set(slot, value);
+      trail.record(slot);
+    }
+    // The value can complete an assignment, e.g. the 'T = S + 1' of
+    // 'q(T) :- #count{X : p(X)} = S, T = S + 1.' A value the assignment cannot
+    // use, e.g. a #min that comes out a constant, drops that value alone.
+    absl::Status bound =
+        bind_assignments(join.parts, instance.binding, trail, join.syms);
+    if (join.lost_instance(bound)) continue;
+    RETURN_IF_ERROR(bound);
+    RETURN_IF_ERROR(run_items(join, depth, k + 1, instance, emit));
+  }
+  return absl::OkStatus();
+}
+
+// Runs the items of the step at `depth` from `k` on, and the step itself once
+// each of them has bound its variable.
+absl::Status run_items(Join& join, size_t depth, size_t k, Instance& instance,
+                       const InstanceFn& emit) {
+  const std::vector<JoinItem>& items = join.steps[depth].items;
+  if (k == items.size()) return run_step(join, depth, instance, emit);
+  if (items[k].interval != nullptr) {
+    return run_interval_item(join, depth, k, items[k], instance, emit);
+  }
+  return run_aggregate_item(join, depth, k, items[k], instance, emit);
+}
+
 // Extends `instance` with every stored atom the step at `depth` can match, and
 // recurses into the step after it.
 absl::Status extend(Join& join, size_t depth, Instance& instance,
@@ -1955,6 +2082,18 @@ absl::Status extend(Join& join, size_t depth, Instance& instance,
 
   if (depth == join.order.size()) return finish(join, instance, emit);
 
+  // The intervals and aggregates the step waits on come before it: the literal
+  // it matches can be reading a variable one of them binds.
+  if (!join.steps[depth].items.empty()) {
+    return run_items(join, depth, 0, instance, emit);
+  }
+  return run_step(join, depth, instance, emit);
+}
+
+// Matches the step at `depth` against the store and recurses into the step
+// after it, with every variable it reads bound.
+absl::Status run_step(Join& join, size_t depth, Instance& instance,
+                      const InstanceFn& emit) {
   if (!join.steps[depth].ready) prepare_step(join, depth, instance.binding);
   const JoinStep& step = join.steps[depth];
   if (step.dead) return absl::OkStatus();
@@ -1986,11 +2125,211 @@ absl::Status extend(Join& join, size_t depth, Instance& instance,
   return absl::OkStatus();
 }
 
+/* One thing in the body that gives a variable a value, and what it reads to
+   do it. An assignment binds its variable and reads the other side of the '='.
+   An interval binds its variable and reads its ends. An aggregate binds its
+   value and reads what it counts over.
+
+   `interval` and `aggregate` name the ones a step can run. An assignment has
+   neither, since bind_assignments() makes those as the join goes.
+*/
+struct Provider {
+  const NafLiteral* interval = nullptr;
+  const Aggregate* aggregate = nullptr;
+  absl::InlinedVector<size_t, 2> binds;
+  absl::InlinedVector<size_t, 4> reads;
+};
+
+std::vector<Provider> body_providers(const BodyParts& parts,
+                                     const Binding& binding) {
+  std::vector<Provider> providers;
+  auto read = [&](Provider& provider, const Term& term) {
+    collect::for_each_variable(term, [&](const Variable& var) {
+      provider.reads.push_back(binding.slot_of(var));
+    });
+  };
+  for (const NafLiteral* item : parts.comparisons) {
+    const std::optional<Assignment> assignment = assignment_of(*item, binding);
+    if (!assignment.has_value()) continue;
+    Provider& provider = providers.emplace_back();
+    provider.binds.push_back(binding.slot_of(*assignment->variable));
+    read(provider, *assignment->value);
+  }
+  for (const NafLiteral* item : parts.intervals) {
+    const IntervalSides sides =
+        interval_sides(static_cast<const BuiltinAtom&>(*item->literal));
+    if (sides.other->kind != Term::VariableKind) continue;
+    Provider& provider = providers.emplace_back();
+    provider.interval = item;
+    provider.binds.push_back(
+        binding.slot_of(static_cast<const Variable&>(*sides.other)));
+    read(provider, *sides.interval);
+  }
+  for (const Aggregate* agg : parts.aggregates) {
+    const std::vector<size_t> outputs = agg_output_slots(*agg, binding);
+    if (outputs.empty()) continue;
+    Provider& provider = providers.emplace_back();
+    provider.aggregate = agg;
+    provider.binds.assign(outputs.begin(), outputs.end());
+    for (size_t slot : agg_variable_slots(*agg, binding)) {
+      if (!absl::c_linear_search(outputs, slot)) provider.reads.push_back(slot);
+    }
+  }
+  return providers;
+}
+
+/* Works out what each step of the join runs before it reads the store.
+
+   An interval and an aggregate each bind their variable one value at a time,
+   which is why finish() runs them once the join is done. A literal reading
+   such a variable under arithmetic has nothing to read there, so
+   "p(X) :- X = 1..3, q(X*2)." leaves X unbound at q under a plain join.
+
+   The ones the join waits on move into it, each to the first step whose
+   matching gives it everything it reads. That step binds it one value at a
+   time before reading the store, so 'q(X*2)' probes by a value it has.
+
+   The rest stay with finish(). An interval over a variable the join binds
+   itself, the 'X = 1..3' of "p(X) :- q(X), X = 1..3.", is a test on the value
+   q matched, and running it first would fan the join out over values q never
+   holds. So is an item no step makes ready, which takes a body binding its
+   variables in a cycle. verify_safe() rejects those.
+*/
+void plan_items(Join& join, const Binding& seed) {
+  const BodyParts& parts = join.parts;
+  if (parts.intervals.empty() && parts.aggregates.empty()) return;
+
+  // What the literals bind, and what they read under arithmetic and cannot
+  // bind. Only an interval or an aggregate can give the second kind a value.
+  std::vector<LiteralVars> vars;
+  vars.reserve(parts.positive.size());
+  absl::flat_hash_set<size_t> literal_binds;
+  for (const ClassicalLiteral* literal : parts.positive) {
+    vars.push_back(literal_vars(*literal, seed));
+    for (size_t slot : vars.back().binds) {
+      if (seed.at(slot) == kNoSym) literal_binds.insert(slot);
+    }
+  }
+  absl::flat_hash_set<size_t> wanted;
+  for (const LiteralVars& literal : vars) {
+    for (size_t slot : literal.needs) {
+      if (seed.at(slot) == kNoSym && !literal_binds.contains(slot)) {
+        wanted.insert(slot);
+      }
+    }
+  }
+  if (wanted.empty()) return;
+
+  std::vector<Provider> providers = body_providers(parts, seed);
+  absl::flat_hash_set<size_t> provided;
+  for (const Provider& provider : providers) {
+    provided.insert(provider.binds.begin(), provider.binds.end());
+  }
+  // A variable nothing in the body binds is one an aggregate's element keeps
+  // to itself, e.g. the Y of '#count{Y : m(X, Y)}'. Waiting for it would wait
+  // forever, so it is no part of what a provider reads.
+  for (Provider& provider : providers) {
+    absl::InlinedVector<size_t, 4> kept;
+    for (size_t slot : provider.reads) {
+      if (seed.at(slot) != kNoSym) continue;
+      if (provided.contains(slot) || literal_binds.contains(slot)) {
+        kept.push_back(slot);
+      }
+    }
+    provider.reads = std::move(kept);
+  }
+  // What a wanted variable is bound from is wanted in turn. That is the _R0
+  // of the 'X = _R0' normalize() writes 'X = 1..3' as, the N of an 'X = 1..N'
+  // whose end is a #count, and the X a wanted '#count{Y : m(X, Y)}' counts
+  // under.
+  for (bool grew = true; grew;) {
+    grew = false;
+    for (const Provider& provider : providers) {
+      if (!absl::c_any_of(provider.binds, [&](size_t slot) {
+            return wanted.contains(slot);
+          })) {
+        continue;
+      }
+      // A slot a literal binds is not wanted: the join gives it a value, and
+      // whatever reads it runs on that value.
+      for (size_t slot : provider.reads) {
+        if (literal_binds.contains(slot)) continue;
+        if (wanted.insert(slot).second) grew = true;
+      }
+    }
+  }
+
+  std::vector<const Provider*> pending;
+  for (const Provider& provider : providers) {
+    if (provider.interval == nullptr && provider.aggregate == nullptr) continue;
+    if (absl::c_any_of(provider.binds,
+                       [&](size_t slot) { return wanted.contains(slot); })) {
+      pending.push_back(&provider);
+    }
+  }
+  if (pending.empty()) return;
+
+  // The steps run in a fixed order and bind the same slots every time, so
+  // which step an item lands on is settled here, before the search starts.
+  absl::flat_hash_set<size_t> bound;
+  auto has_value = [&](size_t slot) {
+    return seed.at(slot) != kNoSym || bound.contains(slot);
+  };
+  // An item's value reaches the rest of the body through an assignment, the
+  // 'X = _R0' an interval is written as. The walk makes those where the join
+  // makes them.
+  auto settle_assignments = [&]() {
+    for (bool grew = true; grew;) {
+      grew = false;
+      for (const Provider& provider : providers) {
+        if (provider.interval != nullptr || provider.aggregate != nullptr) {
+          continue;
+        }
+        if (has_value(provider.binds.front())) continue;
+        if (!absl::c_all_of(provider.reads, has_value)) continue;
+        bound.insert(provider.binds.front());
+        grew = true;
+      }
+    }
+  };
+  settle_assignments();
+  for (size_t depth = 0; depth < join.order.size() && !pending.empty();
+       ++depth) {
+    // One item's value can make the next one ready, so this takes them until
+    // nothing more is.
+    for (bool took = true; took;) {
+      took = false;
+      for (size_t k = 0; k < pending.size(); ++k) {
+        const Provider& item = *pending[k];
+        if (!absl::c_all_of(item.reads, has_value)) continue;
+        join.steps[depth].items.push_back(JoinItem{.interval = item.interval,
+                                                   .aggregate = item.aggregate,
+                                                   .slots = item.binds});
+        if (item.interval != nullptr) {
+          std::erase(join.intervals, item.interval);
+        } else {
+          std::erase(join.aggregates, item.aggregate);
+        }
+        bound.insert(item.binds.begin(), item.binds.end());
+        settle_assignments();
+        pending.erase(pending.begin() + k);
+        took = true;
+        break;
+      }
+    }
+    for (size_t slot : vars[join.order[depth]].binds) bound.insert(slot);
+    settle_assignments();
+  }
+}
+
 // Hands `emit` every way to satisfy the body with the atoms currently in the
 // store. Works through the positive literals one at a time, matching each
 // against the store and backtracking, then keeps the instances whose
 // assignments, aggregates, and comparisons work out. 'not' literals never
 // filter here; the caller decides what to do with them.
+//
+// An interval or aggregate the join reads but cannot bind runs inside it, at
+// the step that makes it ready. See plan_items().
 //
 // `seed` is the binding to start from: an empty one for a rule, or, for an
 // aggregate element's condition, the enclosing rule instance's binding, so that
@@ -2022,10 +2361,12 @@ absl::StatusOr<std::optional<std::string>> find_instances(
   Join join{.parts = parts,
             .store = store,
             .syms = syms,
-            .order =
-                join_order(parts, instance.binding, store, delta_position),
-            .delta_position = delta_position};
+            .delta_position = delta_position,
+            .intervals = parts.intervals,
+            .aggregates = parts.aggregates};
+  join.order = join_order(parts, instance.binding, store, delta_position);
   join.steps.resize(join.order.size());
+  plan_items(join, instance.binding);
   RETURN_IF_ERROR(extend(join, 0, instance, emit));
   return join.no_value_seen;
 }
@@ -2157,17 +2498,6 @@ absl::StatusOr<std::optional<std::vector<aspif::Lit>>> negative_lits(
 // '#count{...} = S', is handled before that, by splitting the rule instance
 // into one per value the aggregate can take.
 // --------------------------------------------------------------------------
-
-// One distinct tuple an aggregate's elements can produce, e.g. the [1] that
-// both elements of '#count{ X : p(X) ; X : r(X) }' produce once p(1) and r(1)
-// are derived.
-struct AggTuple {
-  Tuple tuple;
-  BigInt weight;  // what the tuple adds to the aggregate's value
-  // One body per grounding that puts the tuple in the set. Empty when every
-  // grounding has an ill-formed 'not' literal.
-  std::vector<std::vector<aspif::Lit>> supports;
-};
 
 // Whether `function` is #min or #max, the two aggregates whose value is a term
 // rather than a number.
@@ -2496,7 +2826,7 @@ absl::StatusOr<std::vector<Instance>> expand_over_values(
 // of the instances an aggregate expands into.
 absl::StatusOr<std::vector<Instance>> bind_agg_outputs(
     Join& join, std::vector<Instance> instances) {
-  std::vector<const Aggregate*> pending = join.parts.aggregates;
+  std::vector<const Aggregate*> pending = join.aggregates;
   while (!pending.empty() && !instances.empty()) {
     std::vector<const Aggregate*> waiting;
     for (const Aggregate* agg : pending) {

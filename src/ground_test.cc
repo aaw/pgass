@@ -2041,6 +2041,94 @@ TEST(GroundTest, IntervalsAndAssignmentsSettleEachOther) {
   EXPECT_THAT(*out, HasSubstr("p(3,4)"));
 }
 
+// A literal reading an interval's variable under arithmetic waits for the
+// interval, which the join runs before it reaches the store. Matching cannot
+// work 'X * 2' backwards to a value for X, so nothing else can bind it.
+TEST(GroundTest, LiteralReadsAnIntervalVariableUnderArithmetic) {
+  auto out = ground_source("q(2). q(4). q(6). p(X) :- X = 1..3, q(X*2).");
+  ASSERT_OK(out);
+  EXPECT_THAT(*out, HasSubstr("p(1)"));
+  EXPECT_THAT(*out, HasSubstr("p(2)"));
+  EXPECT_THAT(*out, HasSubstr("p(3)"));
+}
+
+// The interval's own bounds come from a literal here, so it runs after that
+// literal has matched and before the one that reads it.
+TEST(GroundTest, IntervalTheJoinWaitsForTakesItsBoundsFromTheJoin) {
+  auto out =
+      ground_source("n(3). q(2). q(4). q(6). p(X) :- n(N), X = 1..N, q(X*2).");
+  ASSERT_OK(out);
+  EXPECT_THAT(*out, HasSubstr("p(1)"));
+  EXPECT_THAT(*out, HasSubstr("p(2)"));
+  EXPECT_THAT(*out, HasSubstr("p(3)"));
+}
+
+// One interval's value is the other's bound, and only the second one's
+// variable is read under arithmetic, so both have to run before the literal.
+TEST(GroundTest, ChainedIntervalsRunBeforeTheLiteralReadingThem) {
+  auto out = ground_source("q(2). q(4). p(Y) :- X = 1..3, Y = 1..X, q(Y*2).");
+  ASSERT_OK(out);
+  EXPECT_THAT(*out, HasSubstr("p(1)"));
+  EXPECT_THAT(*out, HasSubstr("p(2)"));
+  EXPECT_THAT(*out, Not(HasSubstr("p(3)")));
+}
+
+// An aggregate binds its value where an interval binds its variable, so a
+// literal reading that value under arithmetic waits for it the same way.
+TEST(GroundTest, LiteralReadsAnAggregateValueUnderArithmetic) {
+  auto out =
+      ground_source("p(1). p(2). q(4). r(X) :- #count{Y : p(Y)} = X, q(X*2).");
+  ASSERT_OK(out);
+  EXPECT_THAT(*out, HasSubstr("r(2)"));
+}
+
+// The count is over the X a literal binds, so it is a different count under
+// each of them: it runs after that literal and before the one reading it.
+TEST(GroundTest, AggregateTheJoinWaitsForCountsWhatTheJoinBound) {
+  auto out = ground_source(R"(
+    q(1). q(2). f(1,a). f(2,a). f(2,b). r(2). r(4).
+    p(X, C) :- q(X), #count{ Y : f(X, Y) } = C, r(C*2).
+  )");
+  ASSERT_OK(out);
+  EXPECT_THAT(*out, HasSubstr("p(1,1)"));
+  EXPECT_THAT(*out, HasSubstr("p(2,2)"));
+}
+
+// Here the X the count is over comes from an interval, so both run inside the
+// join, the interval first.
+TEST(GroundTest, AggregateTheJoinWaitsForCountsOverAnIntervalVariable) {
+  auto out = ground_source(R"(
+    n(2). q(2). q(4). m(1,a). m(2,a). m(2,b).
+    p(X, C) :- n(N), X = 1..N, #count{ Y : m(X, Y) } = C, q(C*2).
+  )");
+  ASSERT_OK(out);
+  EXPECT_THAT(*out, HasSubstr("p(1,1)"));
+  EXPECT_THAT(*out, HasSubstr("p(2,2)"));
+}
+
+// The count binds the interval's end, so the count runs first and the interval
+// second, which is the reverse of the order finish() would have run them in.
+TEST(GroundTest, AggregateTheJoinWaitsForBindsAnIntervalsEnd) {
+  auto out = ground_source(R"(
+    a(1). a(2). q(2). q(4).
+    p(X) :- #count{ Y : a(Y) } = N, X = 1..N, q(X*2).
+  )");
+  ASSERT_OK(out);
+  EXPECT_THAT(*out, HasSubstr("p(1)"));
+  EXPECT_THAT(*out, HasSubstr("p(2)"));
+}
+
+// One count reads the other's value, so the join runs them in that order and
+// only then the literal reading the second one.
+TEST(GroundTest, AggregateTheJoinWaitsForReadsAnotherAggregatesValue) {
+  auto out = ground_source(R"(
+    a(1). a(2). b(2,x). b(3,y). b(3,z). q(2). q(4).
+    p(C) :- #count{ X : a(X) } = M, #count{ Y : b(M, Y) } = C, q(C*2).
+  )");
+  ASSERT_OK(out);
+  EXPECT_THAT(*out, HasSubstr("p(1)"));
+}
+
 TEST(GroundTest, IntervalWithANonIntegerBoundWarns) {
   auto warnings = ground_warnings("p(a..3).");
   ASSERT_OK(warnings);
