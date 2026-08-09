@@ -3,8 +3,12 @@
 #include <cstddef>
 #include <string>
 #include <utility>
+#include <vector>
 
 #include "absl/container/btree_set.h"
+#include "absl/container/flat_hash_map.h"
+#include "absl/container/flat_hash_set.h"
+#include "absl/functional/function_ref.h"
 #include "absl/strings/str_cat.h"
 #include "collect.h"
 #include "macros.h"
@@ -46,6 +50,241 @@ std::unique_ptr<Head> single_atom_head(std::string_view name, Terms args) {
   auto disjunction = std::make_unique<Disjunction>();
   disjunction->literals.push_back(std::move(literal));
   return disjunction;
+}
+
+// The literals a rewrite adds to one condition. See for_each_scoped_term().
+using Added = std::vector<std::unique_ptr<NafLiteral>>;
+
+/* Calls `visit(slot, added)` on every term slot of a statement, where `added`
+   is the condition a rewrite of that term can add literals to.
+
+   For most terms that condition is the statement's own body. For a term inside
+   an aggregate or choice element it is the element's own condition, which is
+   where a variable local to the element belongs: '#count{ 1..3 }' is three
+   tuples, so the variable the interval binds is the element's and not the
+   rule's. Each list is spliced into place once its scope is done.
+*/
+using ScopedTermFn = absl::FunctionRef<void(std::unique_ptr<Term>&, Added&)>;
+
+// Appends `added` to `condition`, which is how a rewrite's new literals reach
+// the element they belong to. An element with no condition of its own gets one.
+void splice(Added added, NafLiterals& condition) {
+  if (added.empty()) return;
+  if (condition == nullptr) {
+    condition = std::make_unique<std::vector<std::unique_ptr<NafLiteral>>>();
+  }
+  for (auto& literal : added) condition->push_back(std::move(literal));
+}
+
+// Walks the terms of one element. Its condition is both a place terms stand
+// and the scope its rewrites go to.
+void visit_element(Terms& terms, NafLiterals& condition,
+                   const ScopedTermFn& visit) {
+  Added added;
+  auto in_element = [&](std::unique_ptr<Term>& slot) { visit(slot, added); };
+  collect::for_each_term(terms, in_element);
+  if (condition != nullptr) collect::for_each_term(*condition, in_element);
+  splice(std::move(added), condition);
+}
+
+void visit_head(Head& head, Added& added, const ScopedTermFn& visit) {
+  auto in_rule = [&](std::unique_ptr<Term>& slot) { visit(slot, added); };
+  switch (head.kind) {
+    case Head::DisjunctionKind:
+      for (auto& literal : static_cast<Disjunction&>(head).literals) {
+        collect::for_each_term(literal->args, in_rule);
+      }
+      return;
+    case Head::ChoiceKind: {
+      auto& choice = static_cast<Choice&>(head);
+      if (choice.lb_term) in_rule(choice.lb_term);
+      if (choice.ub_term) in_rule(choice.ub_term);
+      if (choice.elements == nullptr) return;
+      for (auto& element : *choice.elements) {
+        visit_element(element->literal->args, element->conditions, visit);
+      }
+      return;
+    }
+  }
+}
+
+void visit_aggregate(Aggregate& aggregate, Added& added,
+                     const ScopedTermFn& visit) {
+  if (aggregate.lb_term) visit(aggregate.lb_term, added);
+  if (aggregate.ub_term) visit(aggregate.ub_term, added);
+  if (aggregate.elements == nullptr) return;
+  for (auto& element : *aggregate.elements) {
+    visit_element(element->terms, element->literals, visit);
+  }
+}
+
+void for_each_scoped_term(Statement& statement, const ScopedTermFn& visit) {
+  Added added;
+  auto in_rule = [&](std::unique_ptr<Term>& slot) { visit(slot, added); };
+  if (statement.head) visit_head(*statement.head, added, visit);
+  if (statement.weight) collect::for_each_term(*statement.weight, in_rule);
+  if (statement.show && statement.show->term) in_rule(statement.show->term);
+  if (statement.body) {
+    for (auto& item : *statement.body->items) {
+      if (item->kind == BodyItem::AggregateKind) {
+        visit_aggregate(static_cast<Aggregate&>(*item), added, visit);
+        continue;
+      }
+      collect::for_each_term(*static_cast<NafLiteral&>(*item).literal, in_rule);
+    }
+  }
+
+  if (added.empty()) return;
+  if (statement.body == nullptr) {
+    statement.body = std::make_unique<Body>();
+    statement.body->items =
+        std::make_unique<std::vector<std::unique_ptr<BodyItem>>>();
+  }
+  for (auto& literal : added) {
+    statement.body->items->push_back(std::move(literal));
+  }
+}
+
+/* Rewrite each '#minimize' or '#maximize' statement into the weak constraints
+   it stands for:
+
+     #minimize{ w1@l1, t1 : b1 ; w2@l2, t2 : b2 }.
+
+   becomes
+
+     :~ b1. [w1@l1, t1]
+     :~ b2. [w2@l2, t2]
+
+   A '#maximize' is a '#minimize' over negated weights, so its elements get a
+   '-' in front of each weight and are otherwise the same.
+*/
+void rewrite_minimize_statements(Program& prog) {
+  auto new_statements =
+      std::make_unique<std::vector<std::unique_ptr<Statement>>>();
+  for (auto& statement : *prog.statements) {
+    if (!statement->minimize) {
+      new_statements->push_back(std::move(statement));
+      continue;
+    }
+
+    Minimize& minimize = *statement->minimize;
+    for (auto& element : minimize.elements) {
+      auto rule = std::make_unique<Statement>();
+      rule->weight = std::move(element->weight);
+      if (minimize.maximize) {
+        rule->weight->weight =
+            std::make_unique<NegatedTerm>(std::move(rule->weight->weight));
+      }
+      // A weak constraint always has a body, so an element with no condition,
+      // e.g. the '1@0' of '#minimize{ 1@0 }', gets an empty one.
+      rule->body = std::make_unique<Body>();
+      rule->body->items =
+          std::make_unique<std::vector<std::unique_ptr<BodyItem>>>();
+      if (element->condition != nullptr) {
+        for (auto& literal : *element->condition) {
+          rule->body->items->push_back(std::move(literal));
+        }
+      }
+      rule->source_pos = statement->source_pos;
+      new_statements->push_back(std::move(rule));
+    }
+  }
+  prog.statements = std::move(new_statements);
+}
+
+// What a '#const' names, keyed by the name. The value is fully resolved: a
+// constant defined as another constant holds what that one came to.
+using Constants = absl::flat_hash_map<std::string, std::unique_ptr<Term>>;
+
+// The name a term is, when it is one a '#const' gave a meaning to. Only a name
+// standing on its own is a constant. The p of 'p(a)' and the a of 'a(1)' are
+// predicates, and neither reaches here as a term.
+const std::string* constant_name(const std::unique_ptr<Term>& term,
+                                 const Constants& constants) {
+  if (term->kind != Term::AtomKind) return nullptr;
+  const Atom& atom = static_cast<const Atom&>(*term);
+  if (atom.args != nullptr) return nullptr;
+  auto it = constants.find(atom.name);
+  return it == constants.end() ? nullptr : &it->first;
+}
+
+// Replaces each constant name in `slot` with what '#const' said it stands for.
+// The values in `constants` are already resolved, so nothing put in needs a
+// second pass.
+void substitute_constants(std::unique_ptr<Term>& slot,
+                          const Constants& constants) {
+  collect::for_each_subterm(slot, [&](std::unique_ptr<Term>& term) {
+    const std::string* name = constant_name(term, constants);
+    if (name != nullptr) term = constants.at(*name)->clone();
+  });
+}
+
+/* Take each '#const' statement out of the program, putting what it names in
+   place of the name everywhere the program uses it.
+
+   A directive holds for the whole program, not just for what follows it, so
+   '#const n = 3.' at the end of a file reaches the 'p(n)' at the top. One
+   constant may be defined as another, '#const a = b.' with '#const b = 3.',
+   which is why each definition is resolved before any of them is substituted.
+*/
+absl::Status resolve_constants(Program& prog) {
+  Constants constants;
+  // Kept in source order, so that two definitions of one name are reported at
+  // the second one and a cycle is reported the same way every run.
+  std::vector<std::string> names;
+  for (const auto& statement : *prog.statements) {
+    if (!statement->constant) continue;
+    const Constant& constant = *statement->constant;
+    if (constants.contains(constant.name)) {
+      return absl::InvalidArgumentError(
+          absl::StrCat("'#const ", constant.name,
+                       "' is defined more than once, so it names two terms"));
+    }
+    constants.emplace(constant.name, constant.value->clone());
+    names.push_back(constant.name);
+  }
+
+  // Resolve each definition against the others, depth first: what a value
+  // names is resolved before the value is substituted, so a value only ever
+  // takes in terms that are settled. A name reached twice on one path defines
+  // itself, e.g. '#const a = f(a).', which no amount of substituting settles.
+  absl::flat_hash_set<std::string> on_path;
+  auto resolve = [&](auto& self, const std::string& name) -> absl::Status {
+    if (!on_path.insert(name).second) {
+      return absl::InvalidArgumentError(absl::StrCat(
+          "'#const ", name, "' is defined in terms of itself"));
+    }
+    std::vector<const std::string*> uses;
+    collect::for_each_subterm(constants.at(name),
+                              [&](std::unique_ptr<Term>& term) {
+                                const std::string* use =
+                                    constant_name(term, constants);
+                                if (use != nullptr) uses.push_back(use);
+                              });
+    for (const std::string* use : uses) RETURN_IF_ERROR(self(self, *use));
+    substitute_constants(constants.at(name), constants);
+    on_path.erase(name);
+    return absl::OkStatus();
+  };
+  for (const std::string& name : names) RETURN_IF_ERROR(resolve(resolve, name));
+
+  auto new_statements =
+      std::make_unique<std::vector<std::unique_ptr<Statement>>>();
+  for (auto& statement : *prog.statements) {
+    if (statement->constant) continue;
+    for_each_scoped_term(*statement,
+                         [&](std::unique_ptr<Term>& slot, Added&) {
+                           substitute_constants(slot, constants);
+                         });
+    new_statements->push_back(std::move(statement));
+  }
+  prog.statements = std::move(new_statements);
+  if (prog.query && prog.query->lit->args) {
+    for (auto& arg : *prog.query->lit->args) {
+      substitute_constants(arg, constants);
+    }
+  }
+  return absl::OkStatus();
 }
 
 /* Take each '#show' statement out of the program, in one of two ways.
@@ -129,6 +368,65 @@ absl::Status rewrite_weak_constraints(Program& prog) {
     new_statements->push_back(std::move(rule));
   }
   prog.statements = std::move(new_statements);
+  return absl::OkStatus();
+}
+
+/* Replaces every interval in `slot` with a variable of its own, adding to
+   `added` the comparison that gives the variable its values:
+
+     p(1..3, X)   becomes   p(_R0, X)   plus   _R0 = 1..3
+
+   The bounds are lifted first, so an interval built out of intervals, the
+   '(1..2)..3' that '1..2..3' parses as, comes out as '_R1 = _R0..3' with
+   '_R0 = 1..2' beside it. The outer interval runs from each value the inner
+   one takes.
+*/
+void lift_intervals(std::unique_ptr<Term>& slot, Added& added, size_t& next) {
+  collect::for_each_subterm(slot, [&](std::unique_ptr<Term>& term) {
+    if (term->kind != Term::IntervalKind) return;
+    std::string name = absl::StrCat(kIntervalVariablePrefix, next++);
+    auto comparison = std::make_unique<BuiltinAtom>();
+    comparison->op = BinopType::kEQUAL;
+    comparison->left = std::make_unique<Variable>(name);
+    comparison->right = std::move(term);
+    auto naf = std::make_unique<NafLiteral>();
+    naf->literal = std::move(comparison);
+    added.push_back(std::move(naf));
+
+    term = std::make_unique<Variable>(name);
+  });
+}
+
+/* Lift every interval in the program out to a comparison of its own, leaving
+   an interval in one place only: the right-hand side of '_R = lo..hi'.
+
+   An interval in an aggregate or choice element joins that element's own
+   condition, so the variable it binds is local to the element and the element
+   is counted once per value: '#count{ 1..3 }' is three tuples. Every other
+   interval joins the statement's body.
+*/
+absl::Status lift_intervals(Program& prog) {
+  size_t next = 0;
+  for (auto& statement : *prog.statements) {
+    for_each_scoped_term(*statement,
+                         [&](std::unique_ptr<Term>& slot, Added& added) {
+                           lift_intervals(slot, added, next);
+                         });
+  }
+
+  // A query has no body to hold the comparison, and asking whether p holds for
+  // some argument in a range is a question about several queries anyway. What
+  // the lift leaves behind does not matter: the program is rejected.
+  if (prog.query && prog.query->lit->args) {
+    Added added;
+    for (auto& arg : *prog.query->lit->args) {
+      lift_intervals(arg, added, next);
+    }
+    if (!added.empty()) {
+      return absl::InvalidArgumentError(
+          "an interval cannot appear in a query: a query asks about one atom");
+    }
+  }
   return absl::OkStatus();
 }
 
@@ -310,9 +608,18 @@ absl::Status normalize_choice_rules(Program& prog) {
 }  // namespace
 
 absl::Status normalize(Program& prog) {
+  // '#minimize' first, so that everything below sees the weak constraints it
+  // stands for rather than a statement shape of its own. '#const' next, since
+  // a constant can name the term any of the rewrites below work on.
+  rewrite_minimize_statements(prog);
+  RETURN_IF_ERROR(resolve_constants(prog));
   // '#show' goes first so that a '-p' in a shown term's condition is left for
   // remove_classical_negation below, along with every other rule body.
   rewrite_show_statements(prog);
+  // Intervals come out before the rewrites below build rules out of the terms
+  // holding them, so that each one lands in the condition it belongs to while
+  // the elements it was written in are still there to say which that is.
+  RETURN_IF_ERROR(lift_intervals(prog));
   RETURN_IF_ERROR(rewrite_weak_constraints(prog));
   RETURN_IF_ERROR(remove_classical_negation(prog));
   RETURN_IF_ERROR(normalize_choice_rules(prog));

@@ -102,7 +102,14 @@ says `{2,3,5}` is a vertex cover of cost 3.
 
 pgass supports all of ASP-Core-2 plus a few non-standard language constructs that appear in benchmarks:
 
-* `#show`: TODO(aaw): add an example
+* `#show cover/1.` prints only the cover atoms of an answer set, and
+  `#show pair(X,Y) : cover(X), cover(Y).` prints a term whether or not the program
+  derives an atom by that name.
+* `#const n = 3.` names a term, and every `n` in the program stands for it.
+* `#minimize{ 1@0, X : cover(X) }.` is the weak constraints it spells out, one per
+  element. `#maximize` is the same with the sign of each weight flipped.
+* `1..3` is an interval, which stands for each integer in it: `node(1..3).` is three
+  facts, and `p(1..N) :- q(N).` reads its end from the body.
 
 ## References
 

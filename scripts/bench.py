@@ -19,7 +19,6 @@ import argparse
 import fnmatch
 import json
 import os
-import re
 import shutil
 import subprocess
 import sys
@@ -44,15 +43,6 @@ SATISFIABLE = {10, 30, 62}
 UNSATISFIABLE = {20}
 NO_RUN = 128
 INTERRUPTED = 1
-
-# What pgass cannot read yet. Both 'ls' and 'run' look for these, so that a
-# benchmark out of reach is named as such rather than buried among real
-# failures.
-UNSUPPORTED = [
-    ("range", re.compile(r"[0-9A-Za-z_)]\.\.[0-9A-Za-z_(]")),
-    ("#const", re.compile(r"#const")),
-    ("#minimize", re.compile(r"#minimi[sz]e|#maximi[sz]e")),
-]
 
 
 def load_manifest():
@@ -330,21 +320,6 @@ def output_predicates(cache, domain, instance, checker=None):
     return None
 
 
-def scan_unsupported(paths):
-    """The features in these files that pgass cannot read yet."""
-    blocking = []
-    for path in paths:
-        try:
-            with open(path, errors="replace") as f:
-                text = f.read()
-        except OSError:
-            continue
-        for name, pattern in UNSUPPORTED:
-            if name not in blocking and pattern.search(text):
-                blocking.append(name)
-    return blocking
-
-
 # ---------------------------------------------------------------- running
 
 
@@ -401,11 +376,6 @@ def run_one(args, domain, instance, cache):
     encoding = encoding_of(cache, domain, instance)
     command = [args.pgass, f"--models={args.models}", encoding, instance]
     record = {"domain": domain["name"], "instance": name}
-
-    blocking = scan_unsupported([encoding, instance])
-    if blocking:
-        record.update(status="SKIP", blocked_by=blocking)
-        return record
 
     cost, atoms = None, None
     started = time.time()
@@ -524,16 +494,6 @@ def run_checker(args, domain, instance, atoms, record, cache):
 # ---------------------------------------------------------------- commands
 
 
-def domain_status(cache, domain, instances):
-    """What stands between pgass and a domain. Reading every instance of a large
-    domain would be slow and tells you nothing the first few do not, so this
-    reads the encoding and a handful of instances."""
-    sample = instances[:5]
-    encodings = {encoding_of(cache, domain, i) for i in sample}
-    blocking = scan_unsupported(sorted(encodings) + sample)
-    return "needs " + ", ".join(blocking) if blocking else "runnable"
-
-
 def match_instances(instances, pattern):
     """The instances whose name the pattern picks out. Naming an instance in
     full is a mouthful, so any part of the name will do, as will a glob."""
@@ -583,17 +543,15 @@ def cmd_ls(args):
         fetched = is_fetched(args.cache, domain)
         if args.fetched and not fetched:
             continue
-        count, status = "-", ""
+        count = "-"
         if fetched:
-            instances = instances_of(args.cache, domain)
-            count = len(instances)
-            status = domain_status(args.cache, domain, instances)
+            count = len(instances_of(args.cache, domain))
         rows.append((domain["name"], domain["year"], human(domain["size"]),
-                     count, status))
+                     count))
 
-    print(f"{'DOMAIN':<46} {'YEAR':>4} {'SIZE':>9} {'N':>5}  STATUS")
-    for name, year, size, count, status in rows:
-        print(f"{name:<46} {year:>4} {size:>9} {count:>5}  {status}")
+    print(f"{'DOMAIN':<46} {'YEAR':>4} {'SIZE':>9} {'N':>5}")
+    for name, year, size, count in rows:
+        print(f"{name:<46} {year:>4} {size:>9} {count:>5}")
 
 
 def cmd_fetch(args):
@@ -672,8 +630,6 @@ def report_row(record, comparing):
         row += "  " + timing(oracle.get("status", "-"), oracle.get("seconds"))
     if record.get("cost"):
         row += f"  cost {' '.join(record['cost'])}"
-    if record.get("blocked_by"):
-        row += f"  needs {', '.join(record['blocked_by'])}"
     if (record.get("checker") or {}).get("result") == "rejected":
         row += "  CHECKER REJECTED"
     if record.get("error"):

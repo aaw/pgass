@@ -1,6 +1,13 @@
 * Consider adding `--encode=sat`, which dumps the encoding as DIMACS.
-* Add non-standard language constructs like #const, #minimize
-  and ranges so we can run all benchmarks
+* MaxSAT grounds in 98s where gringo takes 0.6s, on the first instance. The
+  ranges the domain uses are not the cost: `vars(1..7076)` is 0.01s of it, and
+  500k of them is 0.3s, ahead of gringo. What is left is the encoding's two
+  `#count` aggregates over clauses, which is where the run sits.
+* An interval's variable is bound after the join, so a positive literal reading
+  it under arithmetic the join cannot work backwards leaves it unbound:
+  "p(X) :- X = 1..3, q(X*2)." reports X as unbound where clingo grounds it.
+  `q(X+1)` is fine, since invertible() reads that one backwards and binds X.
+  Aggregate output variables are bound at the same point and have the same gap.
 * PermutationPatternMatching costs what it costs to hand cvc5 a million
   clauses, not to search them. Grounding is ahead of gringo, 0.29s against
   0.93s on 0092, and the CNF is 6413 variables and 996605 clauses that clasp

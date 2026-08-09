@@ -477,4 +477,199 @@ TEST_F(NormalizeTest, TestRewriteWeakConstraintMultiple) {
   )"));
 }
 
+TEST_F(NormalizeTest, TestConstantsAreSubstituted) {
+  // A '#const' holds for the whole program, so the p(n) above it reads it too.
+  std::string program = R"(
+    p(n).
+    #const n = 3.
+    q(X) :- p(X), X < n.
+  )";
+
+  Parser parser(program);
+  auto prog = parser.parse_program();
+  ASSERT_OK(prog);
+  ASSERT_OK(normalize(**prog));
+
+  EXPECT_THAT(**prog, EquivalentToSource(R"(
+    p(3).
+    q(X) :- p(X), X < 3.
+  )"));
+}
+
+// Only a name standing on its own is a constant. The a of 'a(1)' is a predicate.
+TEST_F(NormalizeTest, TestConstantsLeavePredicateNamesAlone) {
+  std::string program = R"(
+    #const a = 1.
+    a(2).
+    p(a) :- a(X).
+  )";
+
+  Parser parser(program);
+  auto prog = parser.parse_program();
+  ASSERT_OK(prog);
+  ASSERT_OK(normalize(**prog));
+
+  EXPECT_THAT(**prog, EquivalentToSource(R"(
+    a(2).
+    p(1) :- a(X).
+  )"));
+}
+
+TEST_F(NormalizeTest, TestConstantsDefinedInTermsOfEachOther) {
+  std::string program = R"(
+    #const a = f(b).
+    #const b = 3.
+    p(a).
+  )";
+
+  Parser parser(program);
+  auto prog = parser.parse_program();
+  ASSERT_OK(prog);
+  ASSERT_OK(normalize(**prog));
+
+  EXPECT_THAT(**prog, EquivalentToSource(R"(
+    p(f(3)).
+  )"));
+}
+
+TEST_F(NormalizeTest, TestConstantDefinedTwiceIsAnError) {
+  Parser parser("#const a = 1. #const a = 2. p(a).");
+  auto prog = parser.parse_program();
+  ASSERT_OK(prog);
+  auto status = normalize(**prog);
+  ASSERT_FALSE(status.ok());
+  EXPECT_THAT(std::string(status.message()),
+              HasSubstr("is defined more than once"));
+}
+
+TEST_F(NormalizeTest, TestCyclicConstantIsAnError) {
+  Parser parser("#const a = b. #const b = a. p(a).");
+  auto prog = parser.parse_program();
+  ASSERT_OK(prog);
+  auto status = normalize(**prog);
+  ASSERT_FALSE(status.ok());
+  EXPECT_THAT(std::string(status.message()),
+              HasSubstr("is defined in terms of itself"));
+}
+
+TEST_F(NormalizeTest, TestMinimizeBecomesWeakConstraints) {
+  std::string program = R"(
+    #minimize{ 1@2, X : p(X), not q(X); 3 : r }.
+  )";
+
+  Parser parser(program);
+  auto prog = parser.parse_program();
+  ASSERT_OK(prog);
+  ASSERT_OK(normalize(**prog));
+
+  EXPECT_THAT(**prog, EquivalentToSource(R"(
+    _viol(2, 1, X) :- p(X), not q(X).
+    _viol(0, 3) :- r.
+  )"));
+}
+
+// '#maximize' is '#minimize' over negated weights.
+TEST_F(NormalizeTest, TestMaximizeNegatesTheWeights) {
+  std::string program = R"(
+    #maximize{ X@1, X : p(X) }.
+  )";
+
+  Parser parser(program);
+  auto prog = parser.parse_program();
+  ASSERT_OK(prog);
+  ASSERT_OK(normalize(**prog));
+
+  EXPECT_THAT(**prog, EquivalentToSource(R"(
+    _viol(1, -X, X) :- p(X).
+  )"));
+}
+
+TEST_F(NormalizeTest, TestIntervalBecomesAComparison) {
+  std::string program = R"(
+    p(1..3, X) :- q(X).
+  )";
+
+  Parser parser(program);
+  auto prog = parser.parse_program();
+  ASSERT_OK(prog);
+  ASSERT_OK(normalize(**prog));
+
+  EXPECT_THAT(**prog, EquivalentToSource(R"(
+    p(_R0, X) :- q(X), _R0 = 1..3.
+  )"));
+}
+
+TEST_F(NormalizeTest, TestIntervalInAFactGivesTheFactABody) {
+  std::string program = R"(
+    p(1..3).
+  )";
+
+  Parser parser(program);
+  auto prog = parser.parse_program();
+  ASSERT_OK(prog);
+  ASSERT_OK(normalize(**prog));
+
+  EXPECT_THAT(**prog, EquivalentToSource(R"(
+    p(_R0) :- _R0 = 1..3.
+  )"));
+}
+
+// The inner interval generates the values the outer one runs from.
+TEST_F(NormalizeTest, TestIntervalOfAnIntervalIsLiftedInnermostFirst) {
+  std::string program = R"(
+    p(1..2..3).
+  )";
+
+  Parser parser(program);
+  auto prog = parser.parse_program();
+  ASSERT_OK(prog);
+  ASSERT_OK(normalize(**prog));
+
+  EXPECT_THAT(**prog, EquivalentToSource(R"(
+    p(_R1) :- _R0 = 1..2, _R1 = _R0..3.
+  )"));
+}
+
+// An interval inside an aggregate element joins that element's own condition,
+// so each value is a tuple rather than a rule instance.
+TEST_F(NormalizeTest, TestIntervalInAnAggregateElementJoinsTheElement) {
+  std::string program = R"(
+    p :- 2 <= #count{ 1..3 }.
+  )";
+
+  Parser parser(program);
+  auto prog = parser.parse_program();
+  ASSERT_OK(prog);
+  ASSERT_OK(normalize(**prog));
+
+  EXPECT_THAT(**prog, EquivalentToSource(R"(
+    p :- 2 <= #count{ _R0: _R0 = 1..3 }.
+  )"));
+}
+
+TEST_F(NormalizeTest, TestIntervalInAWeakConstraintJoinsTheBody) {
+  std::string program = R"(
+    :~ p(X). [1..2@0, X]
+  )";
+
+  Parser parser(program);
+  auto prog = parser.parse_program();
+  ASSERT_OK(prog);
+  ASSERT_OK(normalize(**prog));
+
+  EXPECT_THAT(**prog, EquivalentToSource(R"(
+    _viol(0, _R0, X) :- p(X), _R0 = 1..2.
+  )"));
+}
+
+TEST_F(NormalizeTest, TestIntervalInAQueryIsAnError) {
+  Parser parser("p(1). p(1..3)?");
+  auto prog = parser.parse_program();
+  ASSERT_OK(prog);
+  auto status = normalize(**prog);
+  ASSERT_FALSE(status.ok());
+  EXPECT_THAT(std::string(status.message()),
+              HasSubstr("an interval cannot appear in a query"));
+}
+
 }  // namespace

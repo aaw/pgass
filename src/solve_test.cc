@@ -990,4 +990,106 @@ TEST(SolveTest, ChoiceHeadLeftOutDoesNotExcuseTheMinimalityCheck) {
   EXPECT_THAT(*out, UnorderedElementsAre("a b c", "d", "d z"));
 }
 
+// --------------------------------------------------------------------------
+// The non-standard directives: '#const', '#minimize' and intervals
+// --------------------------------------------------------------------------
+
+TEST(SolveTest, MinimizeCostsWhatItsElementsCollect) {
+  auto out = solve_source(R"(
+    { a; b }.
+    :- not a, not b.
+    #minimize{ 1@0, a : a; 2@0, b : b }.
+  )");
+  ASSERT_OK(out);
+  EXPECT_THAT(*out, UnorderedElementsAre("a | cost 1"));
+}
+
+// Two groundings that agree on weight, level and tuple are one violation.
+TEST(SolveTest, MinimizeCountsATupleOnce) {
+  auto out = solve_source(R"(
+    p(1). p(2).
+    #minimize{ 1@0, x : p(X) }.
+  )");
+  ASSERT_OK(out);
+  EXPECT_THAT(*out, UnorderedElementsAre("p(1) p(2) | cost 1"));
+}
+
+// An element with no tuple is named by its weight and level alone, so both
+// groundings here are the same violation.
+TEST(SolveTest, MinimizeWithoutATuple) {
+  auto out = solve_source(R"(
+    p(1). p(2).
+    #minimize{ 1@0 : p(X) }.
+  )");
+  ASSERT_OK(out);
+  EXPECT_THAT(*out, UnorderedElementsAre("p(1) p(2) | cost 1"));
+}
+
+TEST(SolveTest, MaximizeLooksForTheMostItCanCollect) {
+  auto out = solve_source(R"(
+    { a; b }.
+    #maximize{ 1@0, a : a; 1@0, b : b }.
+  )");
+  ASSERT_OK(out);
+  EXPECT_THAT(*out, UnorderedElementsAre("a b | cost -2"));
+}
+
+TEST(SolveTest, MinimizeOverSeveralLevels) {
+  auto out = solve_source(R"(
+    { a; b }.
+    :- not a.
+    #minimize{ 1@1, a : a; 1@0, b : b }.
+  )");
+  ASSERT_OK(out);
+  EXPECT_THAT(*out, UnorderedElementsAre("a | cost 1 0"));
+}
+
+TEST(SolveTest, ConstantNamesATerm) {
+  auto out = solve_source(R"(
+    #const n = 2.
+    p(n).
+    q :- p(2).
+  )");
+  ASSERT_OK(out);
+  EXPECT_THAT(*out, UnorderedElementsAre("p(2) q"));
+}
+
+TEST(SolveTest, IntervalGeneratesADomain) {
+  auto out = solve_source(R"(
+    #const n = 3.
+    node(1..n).
+  )");
+  ASSERT_OK(out);
+  EXPECT_THAT(*out, UnorderedElementsAre("node(1) node(2) node(3)"));
+}
+
+TEST(SolveTest, IntervalInAChoiceHead) {
+  auto out = solve_source(R"(
+    { p(1..2) }.
+    :- not p(1).
+    :- p(2).
+  )");
+  ASSERT_OK(out);
+  EXPECT_THAT(*out, UnorderedElementsAre("p(1)"));
+}
+
+// A choice over an interval counts the atoms it offers, so a bound of one
+// leaves one of the two.
+TEST(SolveTest, IntervalInABoundedChoiceHead) {
+  auto out = solve_source(R"(
+    1 <= { p(1..2) } <= 1.
+  )");
+  ASSERT_OK(out);
+  EXPECT_THAT(*out, UnorderedElementsAre("p(1)", "p(2)"));
+}
+
+TEST(SolveTest, IntervalInAWeakConstraint) {
+  auto out = solve_source(R"(
+    p(1).
+    :~ p(X). [1..2@0, X]
+  )");
+  ASSERT_OK(out);
+  EXPECT_THAT(*out, UnorderedElementsAre("p(1) | cost 3"));
+}
+
 }  // namespace

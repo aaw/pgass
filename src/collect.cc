@@ -25,6 +25,12 @@ void for_each_variable(const Term& term, const VariableVisitor& visit) {
       for_each_variable(*op.right, visit);
       break;
     }
+    case Term::IntervalKind: {
+      const auto& interval = static_cast<const Interval&>(term);
+      for_each_variable(*interval.lower, visit);
+      for_each_variable(*interval.upper, visit);
+      break;
+    }
     case Term::NumberKind:
     case Term::StringKind:
     case Term::AnonymousVariableKind:
@@ -111,6 +117,71 @@ void collect_variables(const Term& term, std::vector<std::string>& out) {
 void collect_variables(const Literal& literal, std::vector<std::string>& out) {
   for_each_variable(literal,
                     [&](const Variable& var) { push_unique(var.name, out); });
+}
+
+void for_each_term(Terms& terms, const TermVisitor& visit) {
+  if (terms == nullptr) return;
+  for (auto& term : *terms) visit(term);
+}
+
+void for_each_subterm(std::unique_ptr<Term>& slot, const TermVisitor& visit) {
+  switch (slot->kind) {
+    case Term::AtomKind: {
+      auto& atom = static_cast<Atom&>(*slot);
+      if (atom.args != nullptr) {
+        for (auto& arg : *atom.args) for_each_subterm(arg, visit);
+      }
+      break;
+    }
+    case Term::NegatedTermKind:
+      for_each_subterm(static_cast<NegatedTerm&>(*slot).term, visit);
+      break;
+    case Term::TermOperationKind: {
+      auto& operation = static_cast<TermOperation&>(*slot);
+      for_each_subterm(operation.left, visit);
+      for_each_subterm(operation.right, visit);
+      break;
+    }
+    case Term::IntervalKind: {
+      auto& interval = static_cast<Interval&>(*slot);
+      for_each_subterm(interval.lower, visit);
+      for_each_subterm(interval.upper, visit);
+      break;
+    }
+    case Term::NumberKind:
+    case Term::StringKind:
+    case Term::VariableKind:
+    case Term::AnonymousVariableKind:
+      break;
+  }
+  visit(slot);
+}
+
+void for_each_term(Literal& literal, const TermVisitor& visit) {
+  switch (literal.kind) {
+    case Literal::ClassicalLiteralKind:
+      for_each_term(static_cast<ClassicalLiteral&>(literal).args, visit);
+      return;
+    case Literal::BuiltinAtomKind: {
+      auto& builtin = static_cast<BuiltinAtom&>(literal);
+      visit(builtin.left);
+      visit(builtin.right);
+      return;
+    }
+  }
+}
+
+void for_each_term(std::vector<std::unique_ptr<NafLiteral>>& nafs,
+                   const TermVisitor& visit) {
+  for (auto& naf : nafs) {
+    if (naf->literal) for_each_term(*naf->literal, visit);
+  }
+}
+
+void for_each_term(Weight& weight, const TermVisitor& visit) {
+  visit(weight.weight);
+  if (weight.level) visit(weight.level);
+  for_each_term(weight.terms, visit);
 }
 
 void for_each_classical_literal(Head& head,

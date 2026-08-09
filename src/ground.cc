@@ -307,6 +307,14 @@ bool has_no_value(const absl::Status& status) {
 absl::StatusOr<Sym> eval_number_sym(const Term& term, const Binding& binding,
                                     Symbols& syms);
 
+// What evaluating an interval comes back as.
+absl::Status no_interval_value(const Term& term) {
+  return absl::InternalError(
+      absl::StrCat("'", format(term),
+                   "' stands for every value in it, so it has no one value to "
+                   "evaluate"));
+}
+
 // Evaluates a term to its ground value, e.g. 'X' evaluates to 1 under the
 // binding {X: 1}. Every variable must already be bound.
 //
@@ -394,6 +402,10 @@ absl::StatusOr<Sym> eval_term(const Term& term, const Binding& binding,
       }
       return absl::InternalError("unknown arithmetic operator");
     }
+    case Term::IntervalKind:
+      // An interval is several values. expand_intervals() is where they are
+      // read, one at a time.
+      return no_interval_value(term);
   }
   return absl::InternalError("unknown term kind");
 }
@@ -421,6 +433,48 @@ absl::StatusOr<Tuple> eval_terms(const Terms& terms, const Binding& binding,
     }
   }
   return tuple;
+}
+
+/* The two sides of a comparison against an interval, e.g. the '1..3' and the
+   '_R0' of '_R0 = 1..3'. A comparison against no interval has neither.
+
+   normalize() writes every interval a program holds into a comparison of this
+   shape, so this is the only shape grounding meets. The term opposite the
+   interval either takes its values from the interval, or has one already and
+   is tested against it. See expand_intervals().
+*/
+struct IntervalSides {
+  const Interval* interval = nullptr;
+  const Term* other = nullptr;
+};
+
+IntervalSides interval_sides(const BuiltinAtom& builtin) {
+  if (builtin.right != nullptr && builtin.right->kind == Term::IntervalKind) {
+    return {.interval = static_cast<const Interval*>(builtin.right.get()),
+            .other = builtin.left.get()};
+  }
+  if (builtin.left != nullptr && builtin.left->kind == Term::IntervalKind) {
+    return {.interval = static_cast<const Interval*>(builtin.left.get()),
+            .other = builtin.right.get()};
+  }
+  return {};
+}
+
+// Whether `other` is one of the values `interval` holds, e.g. whether the X of
+// 'X = 1..3' is 1, 2 or 3.
+//
+// An end that is not an integer, the 'a' of 'X = a..3', comes back kNoValue.
+// There is no interval to be in, so the binding builds no rule instance. A
+// value that is not an integer is simply not in one.
+absl::StatusOr<bool> interval_holds(const IntervalSides& sides,
+                                    const Binding& binding, Symbols& syms) {
+  ASSIGN_OR_RETURN(Sym lower,
+                   eval_number_sym(*sides.interval->lower, binding, syms));
+  ASSIGN_OR_RETURN(Sym upper,
+                   eval_number_sym(*sides.interval->upper, binding, syms));
+  ASSIGN_OR_RETURN(Sym value, eval_term(*sides.other, binding, syms));
+  if (!syms.is_number(value)) return false;
+  return syms.compare(lower, value) <= 0 && syms.compare(value, upper) <= 0;
 }
 
 // An argument read backwards, from the value it matched to the variable in it.
@@ -592,6 +646,7 @@ bool holds_arithmetic(const Term& term) {
   switch (term.kind) {
     case Term::TermOperationKind:
     case Term::NegatedTermKind:
+    case Term::IntervalKind:
       return true;
     case Term::AtomKind: {
       const Atom& atom = static_cast<const Atom&>(term);
@@ -670,6 +725,9 @@ struct BodyParts {
   // equality with an unbound variable on one side binds that variable; every
   // other comparison is a test decided once the body is bound.
   std::vector<const NafLiteral*> comparisons;
+  // The comparisons against an interval, e.g. '_R0 = 1..3'. An interval is not
+  // one value, so these are kept apart for expand_intervals() to read.
+  std::vector<const NafLiteral*> intervals;
   // 'not p(...)' literals: kept in the emitted ground rule.
   std::vector<const ClassicalLiteral*> negative;
   // Aggregates, e.g. '#count{ X : p(X) } >= 2' in "q :- #count{ X : p(X) }
@@ -683,7 +741,12 @@ struct BodyParts {
 // conditions, which are both flat lists of naf_literals.
 void split_naf_literal(const NafLiteral& naf, BodyParts& parts) {
   if (naf.literal->kind == Literal::BuiltinAtomKind) {
-    parts.comparisons.push_back(&naf);
+    if (interval_sides(static_cast<const BuiltinAtom&>(*naf.literal)).interval !=
+        nullptr) {
+      parts.intervals.push_back(&naf);
+    } else {
+      parts.comparisons.push_back(&naf);
+    }
   } else if (naf.naf) {
     parts.negative.push_back(
         static_cast<const ClassicalLiteral*>(naf.literal.get()));
@@ -757,6 +820,8 @@ VarSlots make_var_slots(const RuleView& rule) {
   for (const ClassicalLiteral* literal : rule.parts.negative)
     collect::for_each_variable(*literal, record);
   for (const NafLiteral* naf : rule.parts.comparisons)
+    collect::for_each_variable(*naf->literal, record);
+  for (const NafLiteral* naf : rule.parts.intervals)
     collect::for_each_variable(*naf->literal, record);
   for (const Aggregate* agg : rule.parts.aggregates)
     collect::for_each_variable(*agg, record);
@@ -1050,10 +1115,40 @@ absl::Status bind_assignments(const BodyParts& parts, Binding& binding,
   return absl::OkStatus();
 }
 
+// What each value an interval holds is handed to.
+using ValueFn = absl::FunctionRef<absl::Status(Sym)>;
+
+// Hands `visit` each value `interval` holds, e.g. 1, 2 and 3 for '1..3'.
+absl::Status for_each_interval_value(const Interval& interval,
+                                     const Binding& binding, Symbols& syms,
+                                     const ValueFn& visit) {
+  ASSIGN_OR_RETURN(Sym lower, eval_number_sym(*interval.lower, binding, syms));
+  ASSIGN_OR_RETURN(Sym upper, eval_number_sym(*interval.upper, binding, syms));
+
+  const std::optional<std::int64_t> low = syms.number_of(lower).to_int64();
+  const std::optional<std::int64_t> high = syms.number_of(upper).to_int64();
+  if (low.has_value() && high.has_value()) {
+    for (std::int64_t value = *low; value <= *high; ++value) {
+      RETURN_IF_ERROR(visit(syms.number(value)));
+    }
+    return absl::OkStatus();
+  }
+  // Both ends are out past an int64, which a narrow interval far from zero
+  // can be, e.g. the four values from 2^64 to 2^64 + 3.
+  for (BigInt value = syms.number_of(lower); value <= syms.number_of(upper);
+       value += 1) {
+    RETURN_IF_ERROR(visit(syms.number(value)));
+  }
+  return absl::OkStatus();
+}
+
 // Returns whether every comparison in the body holds under `binding`, e.g.
 // whether 'X < 2' holds given the binding {X: 1}. A comparison with an
 // ill-formed side, e.g. 'X < 1 / 0', comes back kNoValue: the binding builds
 // no rule instance at all.
+//
+// The comparisons against an interval are not among these. expand_intervals()
+// settles those.
 //
 // An assignment holds by construction: its variable holds exactly what the
 // other side evaluates to.
@@ -1143,6 +1238,16 @@ void collect_literal_vars(const Term& term, bool under_arithmetic,
                            out);
       return;
     }
+    case Term::IntervalKind: {
+      // An interval reads its bounds the way arithmetic reads its operands: a
+      // variable in one has to be bound before the interval says anything.
+      const Interval& interval = static_cast<const Interval&>(term);
+      collect_literal_vars(*interval.lower, /*under_arithmetic=*/true, binding,
+                           out);
+      collect_literal_vars(*interval.upper, /*under_arithmetic=*/true, binding,
+                           out);
+      return;
+    }
     case Term::AnonymousVariableKind:
     case Term::NumberKind:
     case Term::StringKind:
@@ -1181,6 +1286,11 @@ bool holds_anonymous_variable(const Term& term) {
       const TermOperation& operation = static_cast<const TermOperation&>(term);
       return holds_anonymous_variable(*operation.left) ||
              holds_anonymous_variable(*operation.right);
+    }
+    case Term::IntervalKind: {
+      const Interval& interval = static_cast<const Interval&>(term);
+      return holds_anonymous_variable(*interval.lower) ||
+             holds_anonymous_variable(*interval.upper);
     }
     case Term::NumberKind:
     case Term::StringKind:
@@ -1580,9 +1690,104 @@ absl::StatusOr<std::vector<Instance>> bind_agg_outputs(
 absl::Status extend(Join& join, size_t depth, Instance& instance,
                     const InstanceFn& emit);
 
-// Hands `emit` the instances that survive the parts of the body that are
-// decided once every positive literal has matched: the assignments, the
-// aggregates, and the comparisons.
+/* Replaces each instance with one per value the interval of `item` holds, e.g.
+   'p(X) :- X = 1..3.' turns one instance into three, binding X to 1, 2 and 3
+   in turn.
+
+   An interval whose term already has a value tests it instead. The X of
+   "q :- p(1..3)." took its value from a stored p atom, so the instances whose
+   X the interval does not hold are dropped.
+*/
+absl::StatusOr<std::vector<Instance>> expand_over_interval(
+    const NafLiteral& item, Join& join,
+    const std::vector<Instance>& instances) {
+  const auto& builtin = static_cast<const BuiltinAtom&>(*item.literal);
+  const IntervalSides sides = interval_sides(builtin);
+  // Every instance binds the same variables, since they all come out of the
+  // same body, so the first one answers for all of them.
+  const Binding& sample = instances.front().binding;
+  const bool generates =
+      sides.other->kind == Term::VariableKind &&
+      !sample.contains(static_cast<const Variable&>(*sides.other));
+
+  std::vector<Instance> expanded;
+  if (!generates) {
+    for (const Instance& instance : instances) {
+      absl::StatusOr<bool> holds =
+          interval_holds(sides, instance.binding, join.syms);
+      if (join.lost_instance(holds.status())) continue;
+      RETURN_IF_ERROR(holds.status());
+      if (*holds) expanded.push_back(instance);
+    }
+    return expanded;
+  }
+
+  const size_t slot =
+      sample.slot_of(static_cast<const Variable&>(*sides.other));
+  for (const Instance& instance : instances) {
+    absl::Status listed = for_each_interval_value(
+        *sides.interval, instance.binding, join.syms,
+        [&](Sym value) -> absl::Status {
+          Instance next = instance;
+          next.binding.set(slot, value);
+          // The value can complete an assignment, e.g. the 'Y = X + 1' of
+          // 'p(X, Y) :- X = 1..3, Y = X + 1.'
+          BindingTrail trail(next.binding);
+          absl::Status bound =
+              bind_assignments(join.parts, next.binding, trail, join.syms);
+          if (join.lost_instance(bound)) return absl::OkStatus();
+          RETURN_IF_ERROR(bound);
+          trail.keep();
+          expanded.push_back(std::move(next));
+          return absl::OkStatus();
+        });
+    // An end with no value, the 'a..3' of 'X = a..N' under {N: a}, leaves this
+    // instance no values. The others keep theirs.
+    if (join.lost_instance(listed)) continue;
+    RETURN_IF_ERROR(listed);
+  }
+  return expanded;
+}
+
+// Runs every interval of the body, each one either binding its variable to one
+// value at a time or testing the value something else bound.
+absl::StatusOr<std::vector<Instance>> expand_intervals(
+    Join& join, std::vector<Instance> instances) {
+  std::vector<const NafLiteral*> pending = join.parts.intervals;
+  while (!pending.empty() && !instances.empty()) {
+    // An interval's turn has come once its ends have values. Running another
+    // one can be what settles them: the N of '_R1 = 1..N' can be the _R0 of
+    // '_R0 = 1..3'. The first instance answers for all of them, since they all
+    // come out of the same body.
+    const Binding& sample = instances.front().binding;
+    auto ready = [&](const NafLiteral* item) {
+      const IntervalSides sides =
+          interval_sides(static_cast<const BuiltinAtom&>(*item->literal));
+      return is_bound(*sides.interval->lower, sample) &&
+             is_bound(*sides.interval->upper, sample);
+    };
+    auto it = absl::c_find_if(pending, ready);
+    // Intervals whose ends read each other can never run. verify_safe()
+    // rejects such a rule. Stopping here leaves the variables unbound, which
+    // reports it as well.
+    if (it == pending.end()) break;
+
+    const NafLiteral& item = **it;
+    pending.erase(it);
+    ASSIGN_OR_RETURN(instances, expand_over_interval(item, join, instances));
+  }
+  return instances;
+}
+
+/* Hands `emit` the instances that survive the parts of the body that are
+   decided once every positive literal has matched: the assignments, the
+   intervals, the aggregates, and the comparisons.
+
+   An interval stands for several values, and an aggregate that binds a
+   variable to its value, e.g. '#count{X : p(X)} = S', for several answers. So
+   each of them splits the instance into one per value, which is the one part
+   of the search that works on copies.
+*/
 absl::Status finish(Join& join, Instance& instance, const InstanceFn& emit) {
   BindingTrail trail(instance.binding);
   absl::Status bound =
@@ -1590,7 +1795,7 @@ absl::Status finish(Join& join, Instance& instance, const InstanceFn& emit) {
   if (join.lost_instance(bound)) return absl::OkStatus();
   RETURN_IF_ERROR(bound);
 
-  if (join.parts.aggregates.empty()) {
+  if (join.parts.aggregates.empty() && join.parts.intervals.empty()) {
     // Every variable the body binds has a value by now, so all the comparisons
     // are decidable.
     absl::StatusOr<bool> holds =
@@ -1603,14 +1808,27 @@ absl::Status finish(Join& join, Instance& instance, const InstanceFn& emit) {
     return emitted;
   }
 
-  // An aggregate that binds a variable to its value, e.g. '#count{X : p(X)} =
-  // S', splits the instance into one per value the aggregate can take, so this
-  // is the one place the search works on copies.
-  absl::StatusOr<std::vector<Instance>> expanded =
-      bind_agg_outputs(join, std::vector<Instance>{instance});
-  if (join.lost_instance(expanded.status())) return absl::OkStatus();
-  RETURN_IF_ERROR(expanded.status());
-  for (const Instance& next : *expanded) {
+  // An expansion that loses a term's value loses this instance, not the whole
+  // grounding run, so neither of these propagates its status.
+  std::vector<Instance> instances{instance};
+  if (!join.parts.intervals.empty()) {
+    // An interval runs before the aggregates, since an aggregate inside a rule
+    // holding one is a different aggregate under each of its values.
+    absl::StatusOr<std::vector<Instance>> expanded =
+        expand_intervals(join, std::move(instances));
+    if (join.lost_instance(expanded.status())) return absl::OkStatus();
+    RETURN_IF_ERROR(expanded.status());
+    instances = *std::move(expanded);
+  }
+  if (!join.parts.aggregates.empty()) {
+    absl::StatusOr<std::vector<Instance>> expanded =
+        bind_agg_outputs(join, std::move(instances));
+    if (join.lost_instance(expanded.status())) return absl::OkStatus();
+    RETURN_IF_ERROR(expanded.status());
+    instances = *std::move(expanded);
+  }
+
+  for (const Instance& next : instances) {
     absl::StatusOr<bool> holds =
         comparisons_hold(join.parts, next.binding, join.syms);
     if (join.lost_instance(holds.status())) continue;

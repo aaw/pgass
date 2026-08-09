@@ -57,6 +57,10 @@ void collect_binding_variables(const Term& term,
       for (const auto& arg : *atom.args) collect_binding_variables(*arg, out);
       return;
     }
+    // An interval binds nothing by matching, the way arithmetic does not: the
+    // 'q(1..X)' of "p(X) :- q(1..X)." asks for the atoms of one interval, so X
+    // has to be bound before the interval can say which atoms those are.
+    case Term::IntervalKind:
     case Term::NegatedTermKind:
     case Term::TermOperationKind:
     case Term::NumberKind:
@@ -125,6 +129,19 @@ void propagate_naf_literal(const NafLiteral* naf_lit,
   }
 }
 
+// Inserts into `out` the variables of a weight: the ones in what it costs, the
+// level it costs it at, and the tuple.
+void collect_weight_variables(const Weight& weight,
+                              absl::flat_hash_set<std::string_view>& out) {
+  collect::collect_variables(*weight.weight, out);
+  if (weight.level) collect::collect_variables(*weight.level, out);
+  if (weight.terms) {
+    for (const auto& term : *weight.terms) {
+      collect::collect_variables(*term, out);
+    }
+  }
+}
+
 // Inserts into `out` every variable of `head`, with no filtering.
 void collect_every_head_variable(const Head& head,
                                  absl::flat_hash_set<std::string_view>& out) {
@@ -165,16 +182,7 @@ void collect_global_variables(const Statement& statement,
   if (statement.show && statement.show->term) {
     collect::collect_variables(*statement.show->term, out);
   }
-  if (statement.weight) {
-    const Weight& weight = *statement.weight;
-    collect::collect_variables(*weight.weight, out);
-    if (weight.level) collect::collect_variables(*weight.level, out);
-    if (weight.terms) {
-      for (const auto& term : *(weight.terms)) {
-        collect::collect_variables(*term, out);
-      }
-    }
-  }
+  if (statement.weight) collect_weight_variables(*statement.weight, out);
   if (statement.body == nullptr) return;
   for (const auto& item : *(statement.body->items)) {
     switch (item->kind) {
@@ -267,6 +275,36 @@ void collect_head_vars(const Head& head,
   }
 }
 
+// The variables of a '#minimize' element its own condition leaves unbound. An
+// element is a weak constraint written another way, so its condition stands to
+// it as a body stands to a rule.
+absl::flat_hash_set<std::string_view> unbound_element_variables(
+    const MinimizeElement& element) {
+  absl::flat_hash_set<std::string_view> bound_vars, vars;
+  std::size_t prev_num_bound = 0;
+  do {
+    prev_num_bound = bound_vars.size();
+    if (element.condition == nullptr) break;
+    for (const auto& naf_literal : *element.condition) {
+      propagate_naf_literal(naf_literal.get(), bound_vars, vars);
+    }
+  } while (prev_num_bound < bound_vars.size());
+
+  collect_weight_variables(*element.weight, vars);
+
+  absl::flat_hash_set<std::string_view> unbound;
+  for (std::string_view v : vars) {
+    if (!bound_vars.contains(v)) unbound.insert(v);
+  }
+  return unbound;
+}
+
+// What a rule with a variable its body never binds comes back as. The names
+// are sorted, so several of them report the same way every run.
+absl::Status unsafe_variables_error(
+    std::string_view source, const Statement& statement,
+    const absl::flat_hash_set<std::string_view>& unbound_vars);
+
 // Returns "line N: <source line text>" for the line at byte offset pos.
 std::string format_source_line(std::string_view source, size_t pos) {
   size_t clamped = std::min(pos, source.size());
@@ -287,6 +325,9 @@ std::string format_source_line(std::string_view source, size_t pos) {
 // Returns a human-readable label for a rule's head (e.g. "p/2", "{p/1; q/2}",
 // or "integrity constraint").
 std::string head_description(const Statement& stmt) {
+  if (stmt.minimize) {
+    return stmt.minimize->maximize ? "#maximize" : "#minimize";
+  }
   if (stmt.show) return "#show";
   if (stmt.weight) return "weak constraint";
   if (stmt.head == nullptr) return "integrity constraint";
@@ -314,11 +355,36 @@ std::string head_description(const Statement& stmt) {
   return "rule";
 }
 
+absl::Status unsafe_variables_error(
+    std::string_view source, const Statement& statement,
+    const absl::flat_hash_set<std::string_view>& unbound_vars) {
+  std::vector<std::string> unbound;
+  unbound.reserve(unbound_vars.size());
+  for (std::string_view v : unbound_vars) unbound.push_back(std::string(v));
+  std::sort(unbound.begin(), unbound.end());
+  return absl::InvalidArgumentError(absl::StrCat(
+      format_source_line(source, statement.source_pos), "\n",
+      "unsafe variable", (unbound.size() == 1 ? "" : "s"), " in rule '",
+      head_description(statement), "': ", absl::StrJoin(unbound, ", ")));
+}
+
 }  // namespace
 
 absl::Status verify_safe(const Program& prog) {
   std::string_view source = prog.source;
   for (const auto& statement : *(prog.statements)) {
+    // Each element of a '#minimize' is a weak constraint of its own, with its
+    // own condition to bind its own variables, so each is checked on its own.
+    if (statement->minimize) {
+      for (const auto& element : statement->minimize->elements) {
+        const absl::flat_hash_set<std::string_view> unbound =
+            unbound_element_variables(*element);
+        if (unbound.empty()) continue;
+        return unsafe_variables_error(source, *statement, unbound);
+      }
+      continue;
+    }
+
     absl::flat_hash_set<std::string_view> bound_vars, vars;
     absl::flat_hash_set<Aggregate*> bound_aggregates, aggregates;
     absl::flat_hash_set<std::string_view> global_vars;
@@ -426,28 +492,14 @@ absl::Status verify_safe(const Program& prog) {
     // A weak constraint's weight, level, and distinctness terms must be bound
     // by the body, same as any other variable use: they're the "head" of a
     // weak constraint in everything but syntax.
-    if (statement->weight) {
-      collect::collect_variables(*statement->weight->weight, vars);
-      if (statement->weight->level) {
-        collect::collect_variables(*statement->weight->level, vars);
-      }
-      if (statement->weight->terms) {
-        for (const auto& term : *statement->weight->terms) {
-          collect::collect_variables(*term, vars);
-        }
-      }
-    }
+    if (statement->weight) collect_weight_variables(*statement->weight, vars);
 
     if (!is_subset(vars, bound_vars)) {
-      std::vector<std::string> unbound;
+      absl::flat_hash_set<std::string_view> unbound;
       for (std::string_view v : vars) {
-        if (!bound_vars.contains(v)) unbound.push_back(std::string(v));
+        if (!bound_vars.contains(v)) unbound.insert(v);
       }
-      std::sort(unbound.begin(), unbound.end());
-      return absl::InvalidArgumentError(absl::StrCat(
-          format_source_line(source, statement->source_pos), "\n",
-          "unsafe variable", (unbound.size() == 1 ? "" : "s"), " in rule '",
-          head_description(*statement), "': ", absl::StrJoin(unbound, ", ")));
+      return unsafe_variables_error(source, *statement, unbound);
     }
     if (!is_subset(aggregates, bound_aggregates)) {
       return absl::InvalidArgumentError(absl::StrCat(

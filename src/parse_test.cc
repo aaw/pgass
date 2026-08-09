@@ -637,6 +637,121 @@ TEST_F(ParserTest, ShowOverAPredicateRejectsACondition) {
               HasSubstr("'#show' over a predicate takes no condition"));
 }
 
+TEST_F(ParserTest, ConstantDirective) {
+  Parser parser("#const n = 42.");
+  auto result = parser.parse_program();
+  ASSERT_OK(result);
+  const Constant& constant = *(*(*result)->statements)[0]->constant;
+  EXPECT_EQ(constant.name, "n");
+  ASSERT_EQ(constant.value->kind, Term::NumberKind);
+}
+
+TEST_F(ParserTest, ConstantTakesAnyTerm) {
+  Parser parser("#const n = f(1, a).");
+  auto result = parser.parse_program();
+  ASSERT_OK(result);
+  const Constant& constant = *(*(*result)->statements)[0]->constant;
+  ASSERT_EQ(constant.value->kind, Term::AtomKind);
+  EXPECT_EQ(static_cast<const Atom&>(*constant.value).name, "f");
+}
+
+TEST_F(ParserTest, ConstantNeedsAValue) {
+  Parser parser("#const n.");
+  auto result = parser.parse_program();
+  ASSERT_FALSE(result.ok());
+}
+
+TEST_F(ParserTest, Minimize) {
+  Parser parser("#minimize{ 1@2, X : p(X), not q(X); 3 : r }.");
+  auto result = parser.parse_program();
+  ASSERT_OK(result);
+  const Minimize& minimize = *(*(*result)->statements)[0]->minimize;
+  EXPECT_FALSE(minimize.maximize);
+  ASSERT_EQ(minimize.elements.size(), 2u);
+  const MinimizeElement& first = *minimize.elements[0];
+  ASSERT_NE(first.weight->level, nullptr);
+  ASSERT_NE(first.weight->terms, nullptr);
+  EXPECT_EQ(first.weight->terms->size(), 1u);
+  ASSERT_NE(first.condition, nullptr);
+  EXPECT_EQ(first.condition->size(), 2u);
+  const MinimizeElement& second = *minimize.elements[1];
+  EXPECT_EQ(second.weight->level, nullptr);
+  EXPECT_EQ(second.weight->terms, nullptr);
+  EXPECT_EQ(second.condition->size(), 1u);
+}
+
+TEST_F(ParserTest, MinimizeWithoutElements) {
+  Parser parser("#minimize{}.");
+  auto result = parser.parse_program();
+  ASSERT_OK(result);
+  EXPECT_TRUE((*(*result)->statements)[0]->minimize->elements.empty());
+}
+
+TEST_F(ParserTest, Maximize) {
+  Parser parser("#maximize{ 1 : p }.");
+  auto result = parser.parse_program();
+  ASSERT_OK(result);
+  EXPECT_TRUE((*(*result)->statements)[0]->minimize->maximize);
+}
+
+// Encodings in the wild use both spellings, and so does clingo.
+TEST_F(ParserTest, MinimizeAndMaximizeTakeEitherSpelling) {
+  Parser minimise("#minimise{ 1 : p }.");
+  auto minimised = minimise.parse_program();
+  ASSERT_OK(minimised);
+  EXPECT_FALSE((*(*minimised)->statements)[0]->minimize->maximize);
+
+  Parser maximise("#maximise{ 1 : p }.");
+  auto maximised = maximise.parse_program();
+  ASSERT_OK(maximised);
+  EXPECT_TRUE((*(*maximised)->statements)[0]->minimize->maximize);
+}
+
+TEST_F(ParserTest, Interval) {
+  Parser parser("p(1..3).");
+  auto result = parser.parse_program();
+  ASSERT_OK(result);
+  const auto& head =
+      static_cast<const Disjunction&>(*(*(*result)->statements)[0]->head);
+  const Term& arg = *(*head.literals[0]->args)[0];
+  ASSERT_EQ(arg.kind, Term::IntervalKind);
+  const Interval& interval = static_cast<const Interval&>(arg);
+  EXPECT_EQ(interval.lower->kind, Term::NumberKind);
+  EXPECT_EQ(interval.upper->kind, Term::NumberKind);
+}
+
+// '..' binds less tightly than arithmetic, so this is the interval from 1 to 5.
+TEST_F(ParserTest, IntervalBindsLessTightlyThanArithmetic) {
+  Parser parser("1..2+3");
+  auto term = parser.parse_term();
+  ASSERT_OK(term);
+  ASSERT_EQ((*term)->kind, Term::IntervalKind);
+  const Interval& interval = static_cast<const Interval&>(**term);
+  EXPECT_EQ(interval.lower->kind, Term::NumberKind);
+  EXPECT_EQ(interval.upper->kind, Term::TermOperationKind);
+}
+
+// '1..2..3' is (1..2)..3, an interval whose lower end is itself an interval.
+TEST_F(ParserTest, IntervalIsLeftAssociative) {
+  Parser parser("p(1..2..3).");
+  auto result = parser.parse_program();
+  ASSERT_OK(result);
+  const auto& head =
+      static_cast<const Disjunction&>(*(*(*result)->statements)[0]->head);
+  const Term& arg = *(*head.literals[0]->args)[0];
+  ASSERT_EQ(arg.kind, Term::IntervalKind);
+  EXPECT_EQ(static_cast<const Interval&>(arg).lower->kind, Term::IntervalKind);
+  EXPECT_EQ(static_cast<const Interval&>(arg).upper->kind, Term::NumberKind);
+}
+
+// The '..' has a token of its own, so the '.' that ends the fact is still read.
+TEST_F(ParserTest, IntervalDoesNotSwallowTheEndOfTheRule) {
+  Parser parser("p(1..3). q(2).");
+  auto result = parser.parse_program();
+  ASSERT_OK(result);
+  EXPECT_EQ((*result)->statements->size(), 2u);
+}
+
 TEST_F(ParserTest, ErrorMessageMissingDotAtEndOfProgram) {
   Parser parser("p(1). p(X) :- not r(X)");
   auto result = parser.parse_program();

@@ -34,7 +34,12 @@ class Parser {
   absl::StatusOr<std::unique_ptr<Query>> parse_query();
   absl::StatusOr<std::unique_ptr<Show>> parse_show();
   absl::StatusOr<Show::Signature> parse_show_signature();
+  absl::StatusOr<std::unique_ptr<Constant>> parse_const();
+  absl::StatusOr<std::unique_ptr<Minimize>> parse_minimize(bool maximize);
+  absl::StatusOr<MinimizeElements> parse_minimize_elements();
+  absl::StatusOr<std::unique_ptr<MinimizeElement>> parse_minimize_element();
   absl::StatusOr<std::unique_ptr<Term>> parse_term();
+  absl::StatusOr<std::unique_ptr<Term>> parse_sum_term();
   absl::StatusOr<std::unique_ptr<Term>> parse_product_term();
   absl::StatusOr<std::unique_ptr<Term>> parse_single_term();
   absl::StatusOr<Terms> parse_terms();

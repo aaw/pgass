@@ -86,37 +86,58 @@ absl::StatusOr<Statements> Parser::parse_statements() {
                  | WCONS [<body>] DOT SQUARE_OPEN <weight_at_level>
    SQUARE_CLOSE
                  | SHOW <show> [COLON <body>] DOT
+                 | CONST <const> DOT
+                 | (MINIMIZE | MAXIMIZE) <minimize> DOT
 */
 absl::StatusOr<std::unique_ptr<Statement>> Parser::parse_statement() {
   auto statement = std::make_unique<Statement>();
   statement->source_pos = lexer_.next_token_pos();
 
-  // A '#show' has a token of its own, so it is settled ahead of the
-  // productions that have to be told apart by backtracking.
+  // Each directive has a token of its own, so one look ahead settles all
+  // three, ahead of the productions that need backtracking to tell apart.
   {
-    LexerCheckpoint try_show(lexer_);
-    if (lexer_.next().type == TokenType::kSHOW) {
-      try_show.commit();
-      ASSIGN_OR_RETURN(statement->show, parse_show());
+    LexerCheckpoint try_directive(lexer_);
+    Token tok = lexer_.next();
+    switch (tok.type) {
+      case TokenType::kCONST: {
+        try_directive.commit();
+        ASSIGN_OR_RETURN(statement->constant, parse_const());
+        CONSUME_TOKEN_TYPE_OR_RETURN(lexer_, TokenType::kDOT);
+        return statement;
+      }
+      case TokenType::kMINIMIZE:
+      case TokenType::kMAXIMIZE: {
+        try_directive.commit();
+        ASSIGN_OR_RETURN(statement->minimize,
+                         parse_minimize(tok.type == TokenType::kMAXIMIZE));
+        CONSUME_TOKEN_TYPE_OR_RETURN(lexer_, TokenType::kDOT);
+        return statement;
+      }
+      case TokenType::kSHOW: {
+        try_directive.commit();
+        ASSIGN_OR_RETURN(statement->show, parse_show());
 
-      // What follows the shown term is either its condition or the end of the
-      // statement, so nothing here has to be taken back.
-      Token tok = lexer_.next();
-      if (tok.type == TokenType::kCOLON) {
-        if (statement->show->term == nullptr) {
+        // What follows the shown term is either its condition or the end of
+        // the statement, so nothing here has to be taken back.
+        Token next = lexer_.next();
+        if (next.type == TokenType::kCOLON) {
+          if (statement->show->term == nullptr) {
+            return absl::InvalidArgumentError(
+                absl::StrCat("'#show' over a predicate takes no condition\n",
+                             lexer_.report_last_token_pos()));
+          }
+          ASSIGN_OR_RETURN(statement->body, parse_body());
+          next = lexer_.next();
+        }
+        if (next.type != TokenType::kDOT) {
           return absl::InvalidArgumentError(
-              absl::StrCat("'#show' over a predicate takes no condition\n",
+              absl::StrCat("Expected '.' to end rule, got '", next.val, "'\n",
                            lexer_.report_last_token_pos()));
         }
-        ASSIGN_OR_RETURN(statement->body, parse_body());
-        tok = lexer_.next();
+        return statement;
       }
-      if (tok.type != TokenType::kDOT) {
-        return absl::InvalidArgumentError(
-            absl::StrCat("Expected '.' to end rule, got '", tok.val, "'\n",
-                         lexer_.report_last_token_pos()));
-      }
-      return statement;
+      default:
+        break;  // Not a directive: the checkpoint takes the token back.
     }
   }
 
@@ -690,6 +711,79 @@ absl::StatusOr<std::unique_ptr<Show>> Parser::parse_show() {
   return show;
 }
 
+// <const> ::= ID EQUAL <term>
+absl::StatusOr<std::unique_ptr<Constant>> Parser::parse_const() {
+  auto constant = std::make_unique<Constant>();
+  CONSUME_TOKEN_OR_RETURN(lexer_, name, TokenType::kID);
+  constant->name = std::string(name.val);
+  CONSUME_TOKEN_TYPE_OR_RETURN(lexer_, TokenType::kEQUAL);
+  ASSIGN_OR_RETURN(constant->value, parse_term());
+  return constant;
+}
+
+// <minimize_element> ::= <weight_at_level> [COLON [<naf_literals>]]
+absl::StatusOr<std::unique_ptr<MinimizeElement>>
+Parser::parse_minimize_element() {
+  auto element = std::make_unique<MinimizeElement>();
+  ASSIGN_OR_RETURN(element->weight, parse_weight());
+
+  {
+    LexerCheckpoint try_colon(lexer_);
+    if (lexer_.next().type == TokenType::kCOLON) {
+      try_colon.commit();
+      LexerCheckpoint try_naf_literals(lexer_);
+      auto naf_literals = parse_naf_literals();
+      if (naf_literals.ok()) {
+        try_naf_literals.commit();
+        element->condition = std::move(*naf_literals);
+      }
+    }
+  }
+
+  return element;
+}
+
+// <minimize_elements> ::= [<minimize_elements> SEMICOLON] <minimize_element>
+absl::StatusOr<MinimizeElements> Parser::parse_minimize_elements() {
+  MinimizeElements elements;
+  ASSIGN_OR_RETURN(auto element, parse_minimize_element());
+  elements.push_back(std::move(element));
+
+  while (true) {
+    LexerCheckpoint try_next_element(lexer_);
+    if (lexer_.next().type != TokenType::kSEMICOLON) break;
+    auto next_element = parse_minimize_element();
+    if (!next_element.ok()) break;
+    try_next_element.commit();
+    elements.push_back(*std::move(next_element));
+  }
+
+  return elements;
+}
+
+// <minimize> ::= CURLY_OPEN [<minimize_elements>] CURLY_CLOSE
+absl::StatusOr<std::unique_ptr<Minimize>> Parser::parse_minimize(
+    bool maximize) {
+  auto minimize = std::make_unique<Minimize>();
+  minimize->maximize = maximize;
+  CONSUME_TOKEN_TYPE_OR_RETURN(lexer_, TokenType::kCURLY_OPEN);
+
+  // '#minimize{ }' costs nothing and parses like any other statement.
+  {
+    LexerCheckpoint try_elements(lexer_);
+    auto elements = parse_minimize_elements();
+    if (elements.ok()) {
+      try_elements.commit();
+      minimize->elements = *std::move(elements);
+    } else {
+      update_furthest(elements.status());
+    }
+  }
+
+  CONSUME_TOKEN_TYPE_OR_RETURN(lexer_, TokenType::kCURLY_CLOSE);
+  return minimize;
+}
+
 // <query> ::= <classical_literal> QUERY_MARK
 absl::StatusOr<std::unique_ptr<Query>> Parser::parse_query() {
   auto query = std::make_unique<Query>();
@@ -698,13 +792,33 @@ absl::StatusOr<std::unique_ptr<Query>> Parser::parse_query() {
   return query;
 }
 
-/* <term> ::= <product_term> | <term> (PLUS | MINUS) <product_term>
+/* <term> ::= <sum_term> | <term> DOTS <sum_term>
+
+   '..' binds less tightly than any arithmetic, so 1..2+3 is the interval from
+   1 to 5. Like the arithmetic levels it is left-associative, so 1..2..3 is
+   (1..2)..3. The left interval stands for 1 and for 2, which makes the whole
+   term stand for 1..3 and 2..3.
+*/
+absl::StatusOr<std::unique_ptr<Term>> Parser::parse_term() {
+  ASSIGN_OR_RETURN(auto lhs, parse_sum_term());
+
+  while (true) {
+    LexerCheckpoint try_dots(lexer_);
+    if (lexer_.next().type != TokenType::kDOTS) return lhs;
+    try_dots.commit();
+
+    ASSIGN_OR_RETURN(auto rhs, parse_sum_term());
+    lhs = std::make_unique<Interval>(std::move(lhs), std::move(rhs));
+  }
+}
+
+/* <sum_term> ::= <product_term> | <sum_term> (PLUS | MINUS) <product_term>
 
    Addition and subtraction bind less tightly than multiplication and division,
    so 1 + 2 * 3 parses as 1 + (2 * 3). Both levels are left-associative:
    1 - 2 - 3 parses as (1 - 2) - 3.
 */
-absl::StatusOr<std::unique_ptr<Term>> Parser::parse_term() {
+absl::StatusOr<std::unique_ptr<Term>> Parser::parse_sum_term() {
   ASSIGN_OR_RETURN(auto lhs, parse_product_term());
 
   while (true) {

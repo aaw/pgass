@@ -76,4 +76,27 @@ TEST_F(FormatTest, ShowRoundTrips) {
       "#show foo(X) : p(X), not q(X).\n");
 }
 
+TEST_F(FormatTest, ConstRoundTrips) {
+  ExpectRoundTrips(R"(#const n = 3.
+#const m = f(1, a).
+p(n).)");
+}
+
+TEST_F(FormatTest, MinimizeRoundTrips) {
+  ExpectRoundTrips(R"(p(1).
+#minimize{ 1@2, X : p(X), not q(X); 3 : p(1) }.
+#maximize{ X : p(X) }.
+)");
+}
+
+TEST_F(FormatTest, IntervalsRoundTrip) {
+  ExpectRoundTrips("p(1..3, f(2..N), -2..0) :- q(N).");
+}
+
+// '1..2 + 3' has to keep its shape. Printed as '1..2..3' it reads as an
+// interval of an interval.
+TEST_F(FormatTest, IntervalOfAnIntervalRoundTrips) {
+  ExpectRoundTrips("p(1..2..3). q(1..2 + 3).");
+}
+
 }  // namespace

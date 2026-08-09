@@ -1937,4 +1937,115 @@ TEST(GroundTest, ZeroMeansNoLimit) {
   EXPECT_OK(ground_under_limit("p(1). p(X+1) :- p(X), X < 100.", 0));
 }
 
+// --------------------------------------------------------------------------
+// Intervals
+// --------------------------------------------------------------------------
+
+TEST(GroundTest, IntervalFact) {
+  auto out = ground_source("p(1..3).");
+  ASSERT_OK(out);
+  EXPECT_EQ(*out, R"(asp 1 0 0
+1 0 1 1 0 0
+1 0 1 2 0 0
+1 0 1 3 0 0
+4 4 p(1) 1 1
+4 4 p(2) 1 2
+4 4 p(3) 1 3
+0
+)");
+}
+
+TEST(GroundTest, EmptyIntervalDerivesNothing) {
+  auto out = ground_source("p(3..1). q.");
+  ASSERT_OK(out);
+  EXPECT_THAT(*out, Not(HasSubstr("p(")));
+  EXPECT_THAT(*out, HasSubstr("q"));
+}
+
+TEST(GroundTest, IntervalOfOneValue) {
+  auto out = ground_source("p(2..2).");
+  ASSERT_OK(out);
+  EXPECT_THAT(*out, HasSubstr("p(2)"));
+  EXPECT_THAT(*out, Not(HasSubstr("p(1)")));
+  EXPECT_THAT(*out, Not(HasSubstr("p(3)")));
+}
+
+TEST(GroundTest, NegativeInterval) {
+  auto out = ground_source("p(-2..0).");
+  ASSERT_OK(out);
+  EXPECT_THAT(*out, HasSubstr("p(-2)"));
+  EXPECT_THAT(*out, HasSubstr("p(-1)"));
+  EXPECT_THAT(*out, HasSubstr("p(0)"));
+}
+
+// Two intervals in one rule stand for every pairing of their values.
+TEST(GroundTest, TwoIntervalsCrossEachOther) {
+  auto out = ground_source("p(1..2, 1..2).");
+  ASSERT_OK(out);
+  for (std::string atom : {"p(1,1)", "p(1,2)", "p(2,1)", "p(2,2)"}) {
+    EXPECT_THAT(*out, HasSubstr(atom));
+  }
+}
+
+TEST(GroundTest, IntervalInsideAFunctionTerm) {
+  auto out = ground_source("p(f(1..2)).");
+  ASSERT_OK(out);
+  EXPECT_THAT(*out, HasSubstr("p(f(1))"));
+  EXPECT_THAT(*out, HasSubstr("p(f(2))"));
+}
+
+TEST(GroundTest, IntervalBoundsComeFromTheBody) {
+  auto out = ground_source("n(3). p(1..N) :- n(N).");
+  ASSERT_OK(out);
+  EXPECT_THAT(*out, HasSubstr("p(1)"));
+  EXPECT_THAT(*out, HasSubstr("p(2)"));
+  EXPECT_THAT(*out, HasSubstr("p(3)"));
+}
+
+// An interval opposite a variable the body already bound tests that value.
+TEST(GroundTest, IntervalTestsAValueTheBodyBound) {
+  auto out = ground_source("q(2). q(9). p(X) :- q(X), X = 1..3.");
+  ASSERT_OK(out);
+  EXPECT_THAT(*out, HasSubstr("p(2)"));
+  EXPECT_THAT(*out, Not(HasSubstr("p(9)")));
+}
+
+// An interval in a body literal asks for each of its atoms in turn.
+TEST(GroundTest, IntervalInABodyLiteral) {
+  auto out = ground_source("q(2). p :- q(1..3).");
+  ASSERT_OK(out);
+  EXPECT_THAT(*out, HasSubstr("p"));
+}
+
+// An interval in an aggregate element is a tuple per value, so this counts to
+// three.
+TEST(GroundTest, IntervalInAnAggregateElement) {
+  auto out = ground_source("p(N) :- N = #count{ 1..3 }.");
+  ASSERT_OK(out);
+  EXPECT_THAT(*out, HasSubstr("p(3)"));
+}
+
+TEST(GroundTest, IntervalAndAnAggregateInOneRule) {
+  auto out =
+      ground_source("q(1..2). p(X, N) :- X = 1..2, N = #count{ Y : q(Y) }.");
+  ASSERT_OK(out);
+  EXPECT_THAT(*out, HasSubstr("p(1,2)"));
+  EXPECT_THAT(*out, HasSubstr("p(2,2)"));
+}
+
+TEST(GroundTest, IntervalsAndAssignmentsSettleEachOther) {
+  auto out = ground_source("p(X, Y) :- X = 1..3, Y = X + 1.");
+  ASSERT_OK(out);
+  EXPECT_THAT(*out, HasSubstr("p(1,2)"));
+  EXPECT_THAT(*out, HasSubstr("p(2,3)"));
+  EXPECT_THAT(*out, HasSubstr("p(3,4)"));
+}
+
+TEST(GroundTest, IntervalWithANonIntegerBoundWarns) {
+  auto warnings = ground_warnings("p(a..3).");
+  ASSERT_OK(warnings);
+  ASSERT_EQ(warnings->size(), 1u);
+  EXPECT_THAT((*warnings)[0], HasSubstr("'a' is not an integer"));
+}
+
 }  // namespace

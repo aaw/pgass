@@ -109,6 +109,15 @@ void format_term(std::string* fmt, const Term& term) {
       format_operand(fmt, *op.right, op.op, /*is_right_operand=*/true);
       break;
     }
+    case Term::IntervalKind: {
+      const Interval& interval = static_cast<const Interval&>(term);
+      // Every operator binds more tightly than '..', and '..' is
+      // left-associative, so neither end needs parentheses.
+      format_term(fmt, *interval.lower);
+      absl::StrAppend(fmt, "..");
+      format_term(fmt, *interval.upper);
+      break;
+    }
   }
 }
 
@@ -356,7 +365,30 @@ void format_show(std::string* fmt, const Show& show, const Body* condition) {
   absl::StrAppend(fmt, ".");
 }
 
+void format_minimize(std::string* fmt, const Minimize& minimize) {
+  absl::StrAppend(fmt, minimize.maximize ? "#maximize{ " : "#minimize{ ");
+  absl::StrAppend(
+      fmt, absl::StrJoin(minimize.elements, "; ",
+                         [](std::string* out, const auto& element) {
+                           format_weight(out, *element->weight);
+                           if (element->condition == nullptr) return;
+                           absl::StrAppend(out, " : ");
+                           format_naf_literals(out, element->condition);
+                         }));
+  absl::StrAppend(fmt, " }.");
+}
+
 void format_statement(std::string* fmt, const Statement& statement) {
+  if (statement.constant) {
+    absl::StrAppend(fmt, "#const ", statement.constant->name, " = ");
+    format_term(fmt, *statement.constant->value);
+    absl::StrAppend(fmt, ".");
+    return;
+  }
+  if (statement.minimize) {
+    format_minimize(fmt, *statement.minimize);
+    return;
+  }
   if (statement.show) {
     format_show(fmt, *statement.show, statement.body.get());
     return;

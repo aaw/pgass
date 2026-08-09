@@ -21,10 +21,17 @@ inline constexpr std::string_view kShowPredicate = "_show";
 // these atoms.
 inline constexpr std::string_view kViolationPredicate = "_viol";
 
-// Rewrites `prog` into the shape ground() expects: '#show' statements become
-// '_show' rules and a print filter, weak constraints become '_viol' rules,
-// classical negation becomes fresh '_neg_' predicates, and choice rules become
-// disjunctive rules plus a counting constraint.
+// The prefix on the variable an interval is lifted to: 'p(1..3).' becomes
+// 'p(_R0) :- _R0 = 1..3.'. The lexer reads no identifier starting with '_', so
+// no program can write a name that collides.
+inline constexpr std::string_view kIntervalVariablePrefix = "_R";
+
+// Rewrites `prog` into the shape ground() expects: '#minimize' statements
+// become weak constraints, '#const' names give way to the terms they stand
+// for, '#show' statements become '_show' rules and a print filter, intervals
+// become comparisons that generate them, weak constraints become '_viol'
+// rules, classical negation becomes fresh '_neg_' predicates, and choice rules
+// become disjunctive rules plus a counting constraint.
 //
 // A disjunctive head passes through as it stands. Turning 'a | b :- body.' into
 // normal rules is only sound while no two head atoms lie on a common positive

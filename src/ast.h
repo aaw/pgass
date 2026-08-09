@@ -27,7 +27,8 @@ struct Term {
     VariableKind,
     AnonymousVariableKind,
     NegatedTermKind,
-    TermOperationKind
+    TermOperationKind,
+    IntervalKind
   };
   Kind kind;
   virtual ~Term() = default;
@@ -96,6 +97,15 @@ struct Show {
 // prints nothing.
 using ShowFilter = std::optional<std::vector<Show::Signature>>;
 
+// A '#const' directive, '#const n = 42.'. The name stands for the term
+// everywhere in the program, whatever line the directive is written on.
+struct Constant {
+  std::string name;
+  std::unique_ptr<Term> value;
+};
+
+struct Minimize;
+
 struct Statement {
   std::unique_ptr<Head> head;
   std::unique_ptr<Body> body;
@@ -103,6 +113,11 @@ struct Statement {
   // Set on a '#show' statement, which has no head and whose body, if any, is
   // the shown term's condition.
   std::unique_ptr<Show> show;
+  // Set on a '#const' statement, which has neither head nor body.
+  std::unique_ptr<Constant> constant;
+  // Set on a '#minimize' or '#maximize' statement. Its elements carry their
+  // own conditions, so it has neither head nor body.
+  std::unique_ptr<Minimize> minimize;
   size_t source_pos = 0;
 };
 
@@ -155,6 +170,23 @@ struct NafLiteral : BodyItem {
 };
 
 using NafLiterals = std::unique_ptr<std::vector<std::unique_ptr<NafLiteral>>>;
+
+// One element of a '#minimize', '1@2, X : p(X)': what it costs and when it
+// costs it.
+struct MinimizeElement {
+  std::unique_ptr<Weight> weight;
+  NafLiterals condition;
+};
+
+using MinimizeElements = std::vector<std::unique_ptr<MinimizeElement>>;
+
+// A set of weak constraints written as one statement: '#minimize{ w@l, t :
+// body }.' says what ':~ body. [w@l, t]' says. A '#maximize' is the same with
+// the sign of each weight flipped.
+struct Minimize {
+  bool maximize = false;
+  MinimizeElements elements;
+};
 
 struct AggregateElement {
   Terms terms;  // These are actually "basic" terms, see grammar for details.
@@ -315,6 +347,19 @@ struct TermOperation : Term {
         op(o),
         left(std::move(l)),
         right(std::move(r)) {}
+
+  std::unique_ptr<Term> clone() const override;
+};
+
+// An interval, '1..3', which stands for each integer from `lower` to `upper`.
+// A term holding one stands for as many terms as the interval has values, so
+// 'p(1..3).' is three facts.
+struct Interval : Term {
+  std::unique_ptr<Term> lower;
+  std::unique_ptr<Term> upper;
+
+  Interval(std::unique_ptr<Term> lower, std::unique_ptr<Term> upper)
+      : Term(IntervalKind), lower(std::move(lower)), upper(std::move(upper)) {}
 
   std::unique_ptr<Term> clone() const override;
 };

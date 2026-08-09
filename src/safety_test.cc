@@ -517,4 +517,67 @@ TEST_F(SafetyTest, ErrorMessageUnsafeWeakConstraint) {
             "unsafe variable in rule 'weak constraint': Y");
 }
 
+// An interval binds nothing by matching, the way arithmetic does not. The X of
+// 'q(1..X)' has to be bound somewhere else.
+TEST_F(SafetyTest, TestIntervalBoundInALiteralDoesNotBind) {
+  std::string_view src = "p(X) :- q(1..X).";
+  Parser parser(src);
+  auto prog = parser.parse_program();
+  ASSERT_OK(prog);
+  EXPECT_THAT(verify_safe(**prog), Not(IsOk()));
+}
+
+TEST_F(SafetyTest, TestIntervalBindsThroughEquality) {
+  std::string_view src = "p(X) :- X = 1..3.";
+  Parser parser(src);
+  auto prog = parser.parse_program();
+  ASSERT_OK(prog);
+  EXPECT_THAT(verify_safe(**prog), IsOk());
+}
+
+TEST_F(SafetyTest, TestIntervalNeedsItsBoundsBound) {
+  std::string_view src = "p(1..N).";
+  Parser parser(src);
+  auto prog = parser.parse_program();
+  ASSERT_OK(prog);
+  EXPECT_THAT(verify_safe(**prog), Not(IsOk()));
+}
+
+TEST_F(SafetyTest, TestIntervalBoundsBoundByTheBody) {
+  std::string_view src = "p(1..N) :- n(N).";
+  Parser parser(src);
+  auto prog = parser.parse_program();
+  ASSERT_OK(prog);
+  EXPECT_THAT(verify_safe(**prog), IsOk());
+}
+
+TEST_F(SafetyTest, TestMinimizeElementBoundByItsCondition) {
+  std::string_view src = "#minimize{ X@0, X : p(X) }.";
+  Parser parser(src);
+  auto prog = parser.parse_program();
+  ASSERT_OK(prog);
+  EXPECT_THAT(verify_safe(**prog), IsOk());
+}
+
+// Each element has its own condition, so the p(X) of one says nothing about
+// the X of the next.
+TEST_F(SafetyTest, TestMinimizeElementsDoNotBindEachOther) {
+  std::string_view src = "#minimize{ 1@0 : p(X); X@0 : q }.";
+  Parser parser(src);
+  auto prog = parser.parse_program();
+  ASSERT_OK(prog);
+  EXPECT_THAT(verify_safe(**prog), Not(IsOk()));
+}
+
+TEST_F(SafetyTest, ErrorMessageUnsafeMinimizeElement) {
+  std::string_view src = "#minimize{ X@0 : p(1) }.";
+  Parser parser(src);
+  auto prog = parser.parse_program();
+  ASSERT_OK(prog);
+  auto status = verify_safe(**prog);
+  ASSERT_THAT(status, Not(IsOk()));
+  EXPECT_EQ(status.message(), R"(line 1: #minimize{ X@0 : p(1) }.
+unsafe variable in rule '#minimize': X)");
+}
+
 }  // namespace

@@ -19,10 +19,12 @@ enum class TokenType {
   kCOLON,
   kCOMMA,
   kCONS,
+  kCONST,
   kCURLY_CLOSE,
   kCURLY_OPEN,
   kDIV,
   kDOT,
+  kDOTS,
   kEOF,
   kEQUAL,
   kERROR,
@@ -31,6 +33,8 @@ enum class TokenType {
   kID,
   kLESS,
   kLESS_OR_EQ,
+  kMAXIMIZE,
+  kMINIMIZE,
   kMINUS,
   kNAF,
   kNUMBER,
@@ -102,7 +106,21 @@ class Lexer {
         return consume(TokenType::kAGGREGATE_SUM, 4);
       if (source_.substr(pos_, 5) == "#show" && !is_id_char(pos_ + 5))
         return consume(TokenType::kSHOW, 5);
+      if (source_.substr(pos_, 6) == "#const" && !is_id_char(pos_ + 6))
+        return consume(TokenType::kCONST, 6);
+      // Both spellings, since encodings in the wild use both.
+      if (source_.substr(pos_, 9) == "#minimize" ||
+          source_.substr(pos_, 9) == "#minimise") {
+        if (!is_id_char(pos_ + 9)) return consume(TokenType::kMINIMIZE, 9);
+      }
+      if (source_.substr(pos_, 9) == "#maximize" ||
+          source_.substr(pos_, 9) == "#maximise") {
+        if (!is_id_char(pos_ + 9)) return consume(TokenType::kMAXIMIZE, 9);
+      }
     }
+    // Ahead of '.', so the '..' of '1..3' is one token and not two ends of
+    // statements.
+    if (source_.substr(pos_, 2) == "..") return consume(TokenType::kDOTS, 2);
     if (source_.substr(pos_, 2) == "<>" || source_.substr(pos_, 2) == "!=") {
       return consume(TokenType::kUNEQUAL, 2);
     }

@@ -46,6 +46,10 @@ std::unique_ptr<Term> TermOperation::clone() const {
   return std::make_unique<TermOperation>(op, left->clone(), right->clone());
 }
 
+std::unique_ptr<Term> Interval::clone() const {
+  return std::make_unique<Interval>(lower->clone(), upper->clone());
+}
+
 BuiltinAtom* BuiltinAtom::clone_impl() const {
   auto out = new BuiltinAtom();
   out->left = left->clone();

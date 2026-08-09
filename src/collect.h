@@ -41,6 +41,26 @@ void collect_variables(const Literal& literal,
 void collect_variables(const Term& term, std::vector<std::string>& out);
 void collect_variables(const Literal& literal, std::vector<std::string>& out);
 
+// Invokes `visit` on the outermost term of each place the node holds one: each
+// argument of a classical literal, each side of a builtin atom. The reference
+// is mutable, so a visitor can put a different term in the place it is handed.
+//
+// A node that holds terms through elements of its own, such as an aggregate,
+// is not here. Which element a term stands in is something its caller needs to
+// know, so it walks the elements itself.
+using TermVisitor = std::function<void(std::unique_ptr<Term>&)>;
+void for_each_term(Terms& terms, const TermVisitor& visit);
+void for_each_term(Literal& literal, const TermVisitor& visit);
+void for_each_term(std::vector<std::unique_ptr<NafLiteral>>& nafs,
+                   const TermVisitor& visit);
+void for_each_term(Weight& weight, const TermVisitor& visit);
+
+// Invokes `visit` on every term within `slot`, innermost first, ending with
+// `slot` itself: the 1, the 3, the '1..3', then the 'f(1..3)' of 'f(1..3)'.
+// Innermost first means a visitor that replaces a term is handed one whose
+// parts it has already rewritten.
+void for_each_subterm(std::unique_ptr<Term>& slot, const TermVisitor& visit);
+
 // Invokes `visit` on every ClassicalLiteral reachable through the node, in
 // left-to-right order. The reference is mutable so callers can rewrite literals
 // in place (e.g. eliminating classical negation). BuiltinAtoms carry no
