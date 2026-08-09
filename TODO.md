@@ -1,8 +1,4 @@
 * Consider adding `--encode=sat`, which dumps the encoding as DIMACS.
-* MaxSAT grounds in 98s where gringo takes 0.6s, on the first instance. The
-  ranges the domain uses are not the cost: `vars(1..7076)` is 0.01s of it, and
-  500k of them is 0.3s, ahead of gringo. What is left is the encoding's two
-  `#count` aggregates over clauses, which is where the run sits.
 * An interval's variable is bound after the join, so a positive literal reading
   it under arithmetic the join cannot work backwards leaves it unbound:
   "p(X) :- X = 1..3, q(X*2)." reports X as unbound where clingo grounds it.

@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <cstdint>
 #include <deque>
+#include <memory>
 #include <optional>
 #include <string>
 #include <string_view>
@@ -131,6 +132,30 @@ struct GroundAtom {
   aspif::Atom id;
 };
 
+// The stretch of one predicate's atoms a join step reads, as positions into
+// PredData::atoms.
+struct AtomRange {
+  size_t begin = 0;
+  size_t end = 0;
+
+  bool operator==(const AtomRange&) const = default;
+};
+
+// Where one key's atoms sit in GroupedIndex::members.
+struct Run {
+  std::uint32_t begin = 0;
+  std::uint32_t count = 0;
+};
+
+// The atoms a join step reads, with each probe key's atoms kept together as a
+// run of `members`, so that a key costs no allocation of its own. A step that
+// probes no argument reads every atom in `members` and leaves `runs` empty.
+// grouped_index() builds these.
+struct GroupedIndex {
+  std::vector<const GroundAtom*> members;
+  absl::flat_hash_map<Tuple, Run> runs;
+};
+
 // One predicate's ground atoms found so far, e.g. the two GroundAtoms for
 // edge(a, b) and edge(b, c) once both have been derived for edge/2.
 //
@@ -147,6 +172,14 @@ struct PredData {
   // between are what the previous pass derived.
   size_t size_before_pass = 0;
   size_t size_before_prev_pass = 0;
+
+  // The grouping a join step last built over this predicate, one per set of
+  // probed argument positions. See grouped_index() for what is kept and why.
+  struct CachedIndex {
+    AtomRange range;
+    std::shared_ptr<const GroupedIndex> index;
+  };
+  mutable absl::flat_hash_map<std::vector<size_t>, CachedIndex> groupings;
 
   const GroundAtom* find(const Tuple& args) const {
     auto it = index.find(args);
@@ -271,10 +304,14 @@ struct Store {
 
   // Starts a derivation pass, so that what the last one derived becomes the
   // delta the next round of joins reads.
+  //
+  // The groupings go too. New boundaries mean no step asks for the old
+  // stretches again, and each grouping holds a pointer per atom it covers.
   void begin_pass() {
     for (auto& [key, data] : preds) {
       data.size_before_prev_pass = data.size_before_pass;
       data.size_before_pass = data.atoms.size();
+      data.groupings.clear();
     }
   }
 };
@@ -1165,13 +1202,6 @@ absl::StatusOr<bool> comparisons_hold(const BodyParts& parts,
   return true;
 }
 
-// The stretch of one predicate's atoms a join step reads, as positions into
-// PredData::atoms.
-struct AtomRange {
-  size_t begin = 0;
-  size_t end = 0;
-};
-
 // Which atoms a join step reads at the positive literal in `position`. Without
 // a delta position it reads all of them. With one it reads what the previous
 // pass derived at that literal and what existed before this pass at the others,
@@ -1377,6 +1407,12 @@ double match_estimate(const LiteralStats& stats,
 // true, and only then throws nearly all of those pairs away at setn. Taking
 // setn second instead probes it by the S in hand, which binds N and P, and
 // leaves true(P) a single lookup.
+//
+// `bound` holds only what the literals bind. extend() also binds an assignment
+// once the steps before it have what it reads, so a step probed by such a
+// variable is scored here at full predicate size. Counting those slots was
+// measured and dropped. It picks a different order on PartnerUnits, and
+// renumbering the atoms costs that benchmark ten times its solving time.
 std::vector<size_t> join_order(const BodyParts& parts, const Binding& binding,
                                const Store& store,
                                std::optional<size_t> delta_position) {
@@ -1464,9 +1500,9 @@ std::vector<size_t> join_order(const BodyParts& parts, const Binding& binding,
       for (size_t slot : fresh) bound.erase(slot);
     }
     // Nothing left is ready, which means a variable is bound only by an
-    // assignment, e.g. the X of "p(X) :- q(X+1), X = 2.". Assignments are
-    // settled after the join, so the rest go in as they come and matching
-    // reports the unbound variable.
+    // assignment that a step further in makes ready. The rest go in as they
+    // come, and extend() binds each assignment once the steps ahead of it have
+    // what it reads.
     if (!any_ready) {
       std::vector<size_t> rest = order;
       for (size_t k = 0; k < count; ++k) {
@@ -1511,47 +1547,31 @@ std::vector<size_t> probeable_positions(const ClassicalLiteral& literal,
   return positions;
 }
 
-// Where one key's atoms sit in StepIndex::members.
-struct Run {
-  std::uint32_t begin = 0;
-  std::uint32_t count = 0;
-};
-
 /* The atoms a join step can match, arranged so that probing by the values the
    step knows takes a lookup rather than a scan.
 
    Three shapes, because the two ends need no arranging at all. A step that
    probes every argument names one atom, which the store's own index already
    finds. A step that probes none matches every atom it reads. Only a step
-   between the two groups its atoms, into one block with a run per key, so that
-   a key costs no allocation of its own. A step is set up afresh on every
-   derivation pass, so an allocation per key is one the whole pass pays.
+   between the two needs its atoms grouped.
 */
 struct StepIndex {
   enum class Kind { kEvery, kOne, kGrouped };
   Kind kind = Kind::kEvery;
-  // kEvery and kGrouped: the atoms the step reads. kGrouped keeps each key's
-  // atoms together, as a run of `runs`.
-  std::vector<const GroundAtom*> members;
-  absl::flat_hash_map<Tuple, Run> runs;
+  // kEvery and kGrouped: the atoms the step reads, shared with the predicate
+  // that built them. See grouped_index().
+  std::shared_ptr<const GroupedIndex> grouped;
   // kOne: the store's own index maps a full argument tuple straight to its
   // atom, so the step reads from there and checks the atom is one it reads.
   const PredData* data = nullptr;
   AtomRange range;
 };
 
-// How the step at `positions` reads `range`'s atoms, e.g. the edge/2 atoms
-// grouped by their first argument.
-StepIndex build_step_index(const PredData& data, const AtomRange& range,
-                           const std::vector<size_t>& positions, size_t arity) {
-  StepIndex index;
-  if (positions.size() == arity && arity > 0) {
-    index.kind = StepIndex::Kind::kOne;
-    index.data = &data;
-    index.range = range;
-    return index;
-  }
-
+// Groups `range`'s atoms by their values at `positions`, e.g. the edge/2 atoms
+// by their first argument.
+GroupedIndex group_atoms(const PredData& data, const AtomRange& range,
+                         const std::vector<size_t>& positions) {
+  GroupedIndex index;
   index.members.reserve(range.end - range.begin);
   if (positions.empty()) {
     for (size_t k = range.begin; k < range.end; ++k) {
@@ -1560,7 +1580,6 @@ StepIndex build_step_index(const PredData& data, const AtomRange& range,
     return index;
   }
 
-  index.kind = StepIndex::Kind::kGrouped;
   // Sizing the map up front saves most of the rehashing. The atoms can share
   // far fewer keys than there are of them, so the guess is capped.
   constexpr size_t kMostToReserve = size_t{1} << 16;
@@ -1607,6 +1626,47 @@ StepIndex build_step_index(const PredData& data, const AtomRange& range,
   return index;
 }
 
+/* The grouping for `positions` over `range`, built once and kept on the
+   predicate for the next step that wants the same one.
+
+   Grounding an aggregate's elements is a join of its own, run once per instance
+   of the rule holding it. The '#count{ X : pred(C,X) }' of the MaxSAT encoding
+   runs once per clause, and grouping every pred atom afresh each time is
+   quadratic in the number of clauses for an answer that does not change.
+
+   A predicate only ever gains atoms, so a grouping stays right for its own
+   stretch of them. One grouping per set of positions is kept, and a step
+   reading a different stretch replaces it. Steps hold a share of what they
+   built rather than the map's copy, so replacing it leaves a running join with
+   the atoms it started on.
+*/
+std::shared_ptr<const GroupedIndex> grouped_index(
+    const PredData& data, const AtomRange& range,
+    const std::vector<size_t>& positions) {
+  auto [it, added] = data.groupings.try_emplace(positions);
+  PredData::CachedIndex& cached = it->second;
+  if (!added && cached.range == range) return cached.index;
+  cached.range = range;
+  cached.index =
+      std::make_shared<const GroupedIndex>(group_atoms(data, range, positions));
+  return cached.index;
+}
+
+// How the step at `positions` reads `range`'s atoms.
+StepIndex build_step_index(const PredData& data, const AtomRange& range,
+                           const std::vector<size_t>& positions, size_t arity) {
+  StepIndex index;
+  if (positions.size() == arity && arity > 0) {
+    index.kind = StepIndex::Kind::kOne;
+    index.data = &data;
+    index.range = range;
+    return index;
+  }
+  if (!positions.empty()) index.kind = StepIndex::Kind::kGrouped;
+  index.grouped = grouped_index(data, range, positions);
+  return index;
+}
+
 // The values one partial instance needs at `positions`, e.g. {b} for the
 // 'edge(Y, Z)' above under {Y: b}. Looking these up in the step's index gives
 // the atoms that can extend the instance.
@@ -1641,10 +1701,11 @@ using InstanceFn = absl::FunctionRef<absl::Status(const Instance&)>;
 //
 // A step is set up the first time the search reaches it rather than up front,
 // because which positions it can probe by depends on what the earlier steps
-// have bound. That answer is the same every time the search arrives here: the
-// steps run in a fixed order and each one binds exactly the variables its
-// literal mentions, whatever values it matched. So the index is built once and
-// reused for every partial instance that reaches this step.
+// have bound. That answer is the same every time the search arrives here. The
+// steps run in a fixed order, each binds the variables its literal mentions,
+// and extend() binds whichever assignments those make ready. None of it turns
+// on the values matched. So the index is built once and reused for every
+// partial instance that reaches this step.
 struct JoinStep {
   const ClassicalLiteral* literal = nullptr;
   std::vector<size_t> positions;
@@ -1780,8 +1841,8 @@ absl::StatusOr<std::vector<Instance>> expand_intervals(
 }
 
 /* Hands `emit` the instances that survive the parts of the body that are
-   decided once every positive literal has matched: the assignments, the
-   intervals, the aggregates, and the comparisons.
+   decided once every positive literal has matched: the intervals, the
+   aggregates, and the comparisons. extend() has made the assignments.
 
    An interval stands for several values, and an aggregate that binds a
    variable to its value, e.g. '#count{X : p(X)} = S', for several answers. So
@@ -1789,12 +1850,6 @@ absl::StatusOr<std::vector<Instance>> expand_intervals(
    of the search that works on copies.
 */
 absl::Status finish(Join& join, Instance& instance, const InstanceFn& emit) {
-  BindingTrail trail(instance.binding);
-  absl::Status bound =
-      bind_assignments(join.parts, instance.binding, trail, join.syms);
-  if (join.lost_instance(bound)) return absl::OkStatus();
-  RETURN_IF_ERROR(bound);
-
   if (join.parts.aggregates.empty() && join.parts.intervals.empty()) {
     // Every variable the body binds has a value by now, so all the comparisons
     // are decidable.
@@ -1872,19 +1927,32 @@ absl::Span<const GroundAtom* const> candidates(const JoinStep& step,
     if (*one == nullptr) return {};
     return absl::MakeConstSpan(one, 1);
   }
+  const GroupedIndex& grouped = *index.grouped;
   if (index.kind == StepIndex::Kind::kEvery) {
-    return absl::MakeConstSpan(index.members);
+    return absl::MakeConstSpan(grouped.members);
   }
-  auto it = index.runs.find(key);
-  if (it == index.runs.end()) return {};
-  return absl::MakeConstSpan(index.members).subspan(it->second.begin,
-                                                    it->second.count);
+  auto it = grouped.runs.find(key);
+  if (it == grouped.runs.end()) return {};
+  return absl::MakeConstSpan(grouped.members)
+      .subspan(it->second.begin, it->second.count);
 }
 
 // Extends `instance` with every stored atom the step at `depth` can match, and
 // recurses into the step after it.
 absl::Status extend(Join& join, size_t depth, Instance& instance,
                     const InstanceFn& emit) {
+  // The steps so far can have given an assignment its value, e.g. the 'Y = -X'
+  // of "pred(C,Y) :- inClause(C,X), nVar(Y), Y = -X." once inClause has bound
+  // X. Binding it here lets the step below look nVar up by Y rather than read
+  // every atom it holds. The trail undoes it on the way back out.
+  BindingTrail trail(instance.binding);
+  if (!join.parts.comparisons.empty()) {
+    absl::Status bound =
+        bind_assignments(join.parts, instance.binding, trail, join.syms);
+    if (join.lost_instance(bound)) return absl::OkStatus();
+    RETURN_IF_ERROR(bound);
+  }
+
   if (depth == join.order.size()) return finish(join, instance, emit);
 
   if (!join.steps[depth].ready) prepare_step(join, depth, instance.binding);
