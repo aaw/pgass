@@ -51,9 +51,6 @@
     loops, dropping the level ranking, bit-vector levels, z3 and its difference
     logic engines, and a sweep of cvc5's decision, sat-solver and arithmetic
     options.
-* Work out a rule's join order once and keep it, rather than redoing it on
-  every derivation pass. Then the cap on how many orders join_order tries
-  can go away.
 * Stop the parser building error messages it throws away. `parse_binop` is
   called in five places just to see whether an operator comes next, and each
   failure formats a message the caller drops when it backtracks.
