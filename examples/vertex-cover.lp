@@ -6,7 +6,7 @@
 % This graph has four minimum covers, all of size 3.
 % Try: pgass --models 0 vertex-cover.lp
 
-node(1). node(2). node(3). node(4). node(5).
+node(1..5).
 
 edge(1, 2).
 edge(2, 3).
@@ -19,4 +19,6 @@ edge(1, 3).
 
 :- edge(X, Y), not cover(X), not cover(Y).
 
-:~ cover(X). [1@0, X]
+#minimize { 1@0,X : cover(X) }.
+
+#show cover/1.

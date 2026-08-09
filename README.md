@@ -9,11 +9,12 @@ Answer set programming is a powerful framework for expressing optimization probl
 [minimum vertex cover](https://en.wikipedia.org/wiki/Vertex_cover) problem:
 
 ```
-node(1). node(2). node(3). node(4). node(5).
+node(1..5).
 edge(1,2). edge(2,3). edge(3,4). edge(4,5). edge(5,1). edge(1,3).
 { cover(X) } :- node(X).
 :- edge(X,Y), not cover(X), not cover(Y).
-:~ cover(X). [1@0, X]
+#minimize { 1@0,X : cover(X) }.
+#show cover/1.
 ```
 
 Running `pgass` on this input will return:
@@ -21,7 +22,7 @@ Running `pgass` on this input will return:
 ```
 $ pgass examples/vertex-cover.lp
 Answer: 1
-edge(1,2) edge(2,3) edge(3,4) edge(4,5) edge(5,1) edge(1,3) node(1) node(2) node(3) node(4) node(5) cover(1) cover(3) cover(4)
+cover(1) cover(3) cover(4)
 Cost: 3
 SATISFIABLE
 ```
@@ -38,16 +39,16 @@ Pass one or more ASP input files on the command line or via standard input. By d
 ```
 $ pgass examples/vertex-cover.lp --models=0
 Answer: 1
-edge(1,2) edge(2,3) edge(3,4) edge(4,5) edge(5,1) edge(1,3) node(1) node(2) node(3) node(4) node(5) cover(1) cover(3) cover(4)
+cover(1) cover(3) cover(4)
 Cost: 3
 Answer: 2
-edge(1,2) edge(2,3) edge(3,4) edge(4,5) edge(5,1) edge(1,3) node(1) node(2) node(3) node(4) node(5) cover(1) cover(3) cover(5)
+cover(1) cover(3) cover(5)
 Cost: 3
 Answer: 3
-edge(1,2) edge(2,3) edge(3,4) edge(4,5) edge(5,1) edge(1,3) node(1) node(2) node(3) node(4) node(5) cover(2) cover(3) cover(5)
+cover(2) cover(3) cover(5)
 Cost: 3
 Answer: 4
-edge(1,2) edge(2,3) edge(3,4) edge(4,5) edge(5,1) edge(1,3) node(1) node(2) node(3) node(4) node(5) cover(1) cover(2) cover(4)
+cover(1) cover(2) cover(4)
 Cost: 3
 SATISFIABLE
 ```
