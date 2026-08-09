@@ -54,3 +54,31 @@
 * Stop the parser building error messages it throws away. `parse_binop` is
   called in five places just to see whether an operator comes next, and each
   failure formats a message the caller drops when it backtracks.
+* Labyrinth is 8 of 20 where clingo is 15, both given 120s. Grounding is not
+  the story, 0.22s on 0082 against clingo's own pace. The whole 55.8s pgass
+  spends there is one checkSat call: no head cycle, so find() never loops,
+  and 0082 declares 26734 atoms of which 2197 are level-ranked and none
+  droppable. That checkSat runs 733460 decisions through cvc5's arithmetic
+  theory (2280 conflicts, 45730 propagations there) to rank `reach(X,Y,T)`,
+  which recurses through `dneighbor`/`conn` within a time step and so sits on
+  a large positive cycle every instance has, ranked or not. clingo needs none
+  of that: it finds the unfounded sets of a normal recursive predicate as
+  Boolean propagation during search, the same operation pgass already runs
+  as a post-hoc check for head-cyclic programs (see ComplexOptimizationOfAnswerSets
+  above), never as arithmetic.
+  * Atom count does not predict the gap. 0060 ranks 1728 atoms and solves in
+    2.76s; 0045 ranks only 1000 and takes 12.52s. What is expensive is
+    letting CDCL(T) decide through the difference-logic layer while it
+    searches for a push sequence, not the size of the layer.
+  * The fix this points at is dropping level ranking for ordinary recursive
+    components too, not only head-cyclic ones: mark every atom on a positive
+    cycle droppable, skip declaring its Int, and let the existing checker in
+    solve.cc find unfounded sets and assert loop nogoods on demand instead.
+    That is a bigger change than Labyrinth alone, since level ranking is what
+    every other domain's recursion leans on for correctness, so it needs
+    checking against the full suite, not just this one, before it lands.
+  * Not yet measured: whether the checker's per-round cost (asserted as
+    cheap above only for head cycles) stays cheap over a reach-sized
+    component of ~2000 atoms and ~200 cells, or whether it is worth reusing
+    or the partial-assignment propagator ComplexOptimizationOfAnswerSets
+    already asks for.
