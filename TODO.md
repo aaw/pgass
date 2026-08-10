@@ -17,6 +17,12 @@
     that derives something wants the variable cvc5 names its body with:
     partner-units-166 went from 5.4s to 54.7s, crossing-minimization-0008 from
     1.5s to 4.1s.
+  * Measured and rejected, a second way: skipping cvc5 outright for a QF_UF
+    program with no head cycle and no weak constraint, Tseitin-clausifying the
+    encoding straight into CaDiCaL through its IPASIR ABI. Cut every ppm-* case
+    by half or more and helped several other domains by 2-4s, but
+    partner-units-166 went from ~5s to a 60s timeout, the same instance the
+    clause-flattening attempt above already broke.
 
 * Ordinary recursion (a single-headed rule deriving an atom from itself
   through a positive cycle) is ranked with an Int level variable per atom, and
