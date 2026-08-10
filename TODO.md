@@ -51,6 +51,22 @@
     loops, dropping the level ranking, bit-vector levels, z3 and its difference
     logic engines, and a sweep of cvc5's decision, sat-solver and arithmetic
     options.
+* MinimalDiagnosis is 8 of 20 where clingo is 20, both given 120s. Grounding
+  is not the story, 0.5s on 0001 against clingo's own pace. The gap is the
+  same two causes as ComplexOptimizationOfAnswerSets above and Labyrinth
+  below, landing on one program together.
+  * The encoding ranks `reach(U,V)` and `coppo(W,V)`, both ordinary recursive
+    predicates over a ~150-300 vertex graph, the same shape as Labyrinth's
+    `reach(X,Y,T)`. 0001 declares 17252 Int level variables for it. Even a SAT
+    instance that needs no loop nogood at all, 0023, spends 6.6s deciding one
+    checkSat this way against clingo's 0.77s.
+  * The encoding also disjuncts `vlabel`/`llabel` for the consistency check and
+    `mvlabel`/`mllabel` for the minimality test, both head-cyclic, so every
+    round asks the checker of ComplexOptimizationOfAnswerSets. 0001 (UNSAT)
+    never gets an empty unfounded set: the droppable atoms it rules out grow
+    round over round, 8, 11, 14, 17, 24, 54, 76, 81, 84, 91, 96, 102 at round
+    12 and still climbing at 150s, so the partial-assignment check that entry
+    already asks for is what would close this one too.
 * Stop the parser building error messages it throws away. `parse_binop` is
   called in five places just to see whether an operator comes next, and each
   failure formats a message the caller drops when it backtracks.
