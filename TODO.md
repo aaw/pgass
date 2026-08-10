@@ -72,10 +72,14 @@
     overhead to drop for free: without the ranking section, cvc5 is still
     going at 300s on a check it answers in 42s with it.
   * Measured and rejected, so do not spend on them again: expansion at the
-    witness subset, growing the unfounded set, minimizing it, splitting it
-    into loops, dropping the level ranking without replacing it, bit-vector
-    levels, z3 and its difference logic engines, and a sweep of cvc5's
-    decision, sat-solver and arithmetic options.
+    witness subset, growing the unfounded set (batching it whole, growing it
+    a chunk at a time, core-guided refinement off cvc5's unsat assumptions),
+    minimizing it, splitting it into loops, dropping the level ranking
+    without replacing it, bit-vector levels, z3 and its difference logic
+    engines, and a sweep of cvc5's decision, sat-solver and arithmetic
+    options. Every shape of round-trip batching loses to just taking the
+    witness cvc5 hands back, so the partial-assignment propagator above is
+    the one avenue left.
 
 * Stop the parser building error messages it throws away. `parse_binop` is
   called in five places just to see whether an operator comes next, and each
