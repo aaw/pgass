@@ -186,8 +186,10 @@ TEST(EncodeTest, DeclaresNoLevelWithoutAPositiveCycle) {
 }
 
 // A positive cycle gets one integer per atom on it, and a difference between
-// two of them per rule that goes round the cycle.
-TEST(EncodeTest, RanksTheAtomsOfAPositiveCycle) {
+// two of them per rule that goes round the cycle. This program has no head
+// cycle anywhere, so nothing already pays for the checker: ranking is
+// cheaper here than starting a second mechanism from zero.
+TEST(EncodeTest, RanksAnOrdinaryPositiveCycleWithNoHeadCycleInTheProgram) {
   auto script = encode_source(R"(
     p :- not q.
     q :- not p.
@@ -203,6 +205,98 @@ TEST(EncodeTest, RanksTheAtomsOfAPositiveCycle) {
                              "|lvl(a)|) 1))))")));
   EXPECT_THAT(comments(*script), AllOf(Contains("; Level variables"),
                                        Contains("; Level ranking")));
+}
+
+// An ordinary cycle ('a', 'b') alongside a head cycle elsewhere
+// ('x | y. x :- y. y :- x.'), which is what tests below use to check both the
+// script's minimality assertion and solve.cc's own encoding.
+constexpr char kOrdinaryCycleBesideAHeadCycle[] = R"(
+  x | y.
+  x :- y.
+  y :- x.
+  p :- not q.
+  q :- not p.
+  :- q.
+  a :- p.
+  a :- b.
+  b :- a.
+)";
+
+// The ordinary cycle already pays for the checker via the head cycle
+// elsewhere in the program, so 'a' and 'b' are routed through it too instead
+// of being ranked.
+TEST(EncodeTest, MinimalityCoversOrdinaryRecursionWhenAHeadCycleExists) {
+  auto script = encode_source(kOrdinaryCycleBesideAHeadCycle);
+  ASSERT_OK(script);
+  EXPECT_THAT(commands(*script), Each(Not(HasSubstr("lvl"))));
+  EXPECT_THAT(commands(*script),
+              AllOf(Contains("(set-logic ALL)"),
+                    Contains(HasSubstr(
+                        "(assert (forall ((|sub(a)| Bool) (|sub(b)| Bool) "
+                        "(|sub(x)| Bool) (|sub(y)| Bool))"))));
+  EXPECT_THAT(comments(*script), Contains("; Minimality"));
+
+  // ':- q' forces p, which supports a from outside the {a, b} cycle. Nothing
+  // supports the {x, y} cycle from outside, so x and y hold each other up:
+  // the one answer set is {p, a, b, x, y}.
+  auto output = run_script(*script);
+  ASSERT_OK(output);
+  EXPECT_THAT(*output, AllOf(HasSubstr("sat"),
+                             HasSubstr("(define-fun a () Bool true)"),
+                             HasSubstr("(define-fun b () Bool true)"),
+                             HasSubstr("(define-fun x () Bool true)"),
+                             HasSubstr("(define-fun y () Bool true)")));
+}
+
+// A head-cyclic component still ranks the atoms that do not themselves share
+// a head: 'c' and 'd' rank relative to each other, resting on 'a' and 'b',
+// the checker-covered atoms the disjunction shares a head over, as sources
+// that need no rank of their own.
+TEST(EncodeTest, HeadCycleStillRanksItsUnsharedAtoms) {
+  auto script = encode_source(R"(
+    a | b.
+    a :- d.
+    d :- c.
+    c :- b.
+    b :- a.
+  )");
+  ASSERT_OK(script);
+  EXPECT_THAT(commands(*script),
+              AllOf(Contains("(declare-const |lvl(c)| Int)"),
+                    Contains("(declare-const |lvl(d)| Int)"),
+                    Not(Contains("(declare-const |lvl(a)| Int)")),
+                    Not(Contains("(declare-const |lvl(b)| Int)")),
+                    Contains("(assert (=> d (and c (>= (- |lvl(d)| "
+                             "|lvl(c)|) 1))))")));
+  EXPECT_THAT(comments(*script), AllOf(Contains("; Level ranking"),
+                                       Contains("; Minimality")));
+
+  // Nothing outside the cycle supports it, so the only way to satisfy the
+  // disjunction is for the whole chain to hold each other up together.
+  auto output = run_script(*script);
+  ASSERT_OK(output);
+  EXPECT_THAT(*output, AllOf(HasSubstr("sat"),
+                             HasSubstr("(define-fun a () Bool true)"),
+                             HasSubstr("(define-fun b () Bool true)"),
+                             HasSubstr("(define-fun c () Bool true)"),
+                             HasSubstr("(define-fun d () Bool true)")));
+}
+
+// solve.cc's own encoding has no quantifier: it checks minimality a model at
+// a time rather than asserting it once for every model. Neither component
+// here needs arithmetic, so the logic drops all the way to QF_UF, cheaper for
+// cvc5 to decide than QF_IDL.
+TEST(EncodeTest, GatedOrdinaryRecursionNeedsNoArithmetic) {
+  auto prog = ground_source(kOrdinaryCycleBesideAHeadCycle);
+  ASSERT_OK(prog);
+  cvc5::TermManager tm;
+  auto encoding = build_encoding(tm, *prog);
+  ASSERT_OK(encoding);
+  EXPECT_STREQ(encoding->logic, "QF_UF");
+  for (const cvc5::Term& level : encoding->level_var) {
+    EXPECT_TRUE(level.isNull());
+  }
+  EXPECT_FALSE(encoding->check.droppable.empty());
 }
 
 // A query asks whether every answer set satisfies it, so the script asserts it

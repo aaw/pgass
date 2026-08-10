@@ -113,22 +113,24 @@ struct Ranking {
   // atoms can lie on a common positive cycle exactly when their components are
   // equal.
   std::vector<int> component;
-  // Whether each atom can lie on a positive cycle at all, and so needs a level
-  // variable. False for every atom of a stratified program, which leaves the
-  // translation as plain completion.
+  // Whether each atom is ranked with a level variable. False for every atom
+  // of a stratified program, which leaves the translation as plain
+  // completion.
   //
   // False too for an atom sharing a rule head with another of its component.
   // Ranking one of those would throw away answer sets like the {a, b} of
   // 'a | b. a :- b. b :- a.', where a and b hold each other up and neither is
-  // above the other. The rest of the component is still ranked, resting on the
-  // unranked atoms as sources. Every answer set admits such a ranking: an atom
-  // no ordering reaches would sit on a cycle nothing outside supports.
+  // above the other. Also false for an ordinary recursive component's atoms
+  // when `droppable` below covers them instead. build_ranking() decides when
+  // that is. Every answer set admits such a ranking: an atom no ordering
+  // reaches would sit on a cycle nothing outside supports.
   std::vector<bool> needs_level;
   // Whether any atom needs one, which is whether the encoding declares an Int.
   bool any_level_var = false;
-  // Whether each atom sits in a component holding two head atoms of one rule,
-  // indexed by atom id. Those are the atoms a smaller model of the reduct may
-  // drop, so this is what the minimality check is built over.
+  // Whether each atom can lie on a positive cycle at all, indexed by atom id.
+  // Those are the atoms a smaller model of the reduct may drop, so this is
+  // what the minimality check is built over. build_ranking() says which
+  // cyclic components this covers.
   std::vector<bool> droppable;
   // Whether any atom is, which is what turns the check on.
   bool any_droppable = false;
@@ -150,6 +152,11 @@ Ranking build_ranking(const aspif::Program& prog) {
   // Two head atoms of one rule in one component are a head cycle. A choice
   // head is exempt: it leaves each of its atoms free on its own, so no two of
   // them ever have to hold together.
+  //
+  // `any_head_cyclic` says whether the program pays for the checker anywhere.
+  // An ordinary recursive component's atoms check it below to decide whether
+  // to go through the checker too instead of being ranked.
+  bool any_head_cyclic = false;
   for (const aspif::Rule& rule : prog.rules) {
     if (rule.head_type == aspif::Rule::HeadType::kChoice) continue;
     absl::flat_hash_map<int, aspif::Atom> seen;
@@ -157,6 +164,7 @@ Ranking build_ranking(const aspif::Program& prog) {
       const auto [at, fresh] = seen.emplace(ranking.component[head], head);
       if (fresh) continue;
       head_cyclic[ranking.component[head]] = true;
+      any_head_cyclic = true;
       shares_a_head[head] = true;
       shares_a_head[at->second] = true;
     }
@@ -169,12 +177,12 @@ Ranking build_ranking(const aspif::Program& prog) {
     for (int successor : succ[atom]) {
       if (successor == atom) cyclic = true;
     }
-    ranking.needs_level[atom] = cyclic && !shares_a_head[atom];
+    const bool component_head_cyclic = head_cyclic[ranking.component[atom]];
+    ranking.needs_level[atom] = cyclic && !shares_a_head[atom] &&
+                                (component_head_cyclic || !any_head_cyclic);
     if (ranking.needs_level[atom]) ranking.any_level_var = true;
-    // Every atom of a head-cyclic component can be dropped, ranked or not. A
-    // ranked atom rests on the unranked ones, so dropping one of those can
-    // take what stood on it too.
-    ranking.droppable[atom] = head_cyclic[ranking.component[atom]];
+    ranking.droppable[atom] =
+        component_head_cyclic || (any_head_cyclic && cyclic);
     if (ranking.droppable[atom]) ranking.any_droppable = true;
   }
   return ranking;
@@ -429,8 +437,8 @@ void support_formulas(cvc5::TermManager& tm, const aspif::Program& prog,
 // completion this rules out an atom whose only support is a positive cycle,
 // because no assignment of levels can put every atom of a cycle below the next.
 //
-// Atoms with no level variable are skipped: they cannot lie on a cycle, so
-// there is nothing about them to rank.
+// Atoms with no level variable are skipped: either they lie on no cycle and
+// so need no ranking, or they lie on one the checker covers instead.
 void ranking_formulas(cvc5::TermManager& tm, const aspif::Program& prog,
                       const std::vector<cvc5::Term>& atom_var,
                       const std::vector<cvc5::Term>& level_var,
@@ -788,10 +796,11 @@ MinimalityCheck build_check(cvc5::TermManager& tm, const aspif::Program& prog,
 }
 
 constexpr char kMinimalityComment[] =
-    R"(; A rule of this program has two head atoms on a common positive cycle,
-; so the assertions above admit models that are not answer sets. The
-; constraint below rules those out. It says that no proper subset of the
-; atoms a model holds is itself a model of the reduct under that model.
+    R"(; This program has a positive cycle, a rule sharing a head with another
+; of its component, an ordinary recursive one, or both, so the assertions
+; above admit models that are not answer sets. The constraint below rules
+; those out. It says that no proper subset of the atoms a model holds is
+; itself a model of the reduct under that model.
 )";
 
 // How a comment names the query: as the program wrote it, or as 'the query'

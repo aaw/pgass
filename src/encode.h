@@ -21,10 +21,10 @@
 
    The two describe the same answer sets, so running the script answers what
    solving answers. A script is run once and states everything up front.
-   solve.cc keeps a solver open, so for the two hardest parts, minimality under
-   a head cycle and the least cost of a weak constraint, it works up to the
-   answer one model at a time. The script carries each as steps to follow by
-   hand.
+   solve.cc keeps a solver open, so for the two hardest parts, minimality
+   under a positive cycle and the least cost of a weak constraint, it works up
+   to the answer one model at a time. The script carries each as steps to
+   follow by hand.
 */
 
 // cvc5 rejects AND, OR, and ADD with fewer than two arguments, and every empty
@@ -93,19 +93,25 @@ cvc5::Term cost_at_most(cvc5::TermManager& tm, const Level& level,
 
 /* Minimality asked one model at a time, which is how solve.cc asks it.
 
-   An answer set has to be a smallest model of its reduct. Where a head cycle
-   leaves that open, solve.cc takes a model of the sections below and asks a
-   second solver whether a smaller model of the reduct exists. `assertions` is
-   that question, and fixing the model under test by assumption is what asks it
-   about that model. An answer of sat is a reason the model is no answer set,
-   which loop_nogood() turns into a constraint the first solver keeps.
+   An answer set has to be a smallest model of its reduct. A positive cycle
+   can leave that open, whether it is a head cycle or, once the program
+   already runs this check somewhere else, ordinary recursion with no rule
+   sharing a head. There, solve.cc takes a model of the sections below and
+   asks a second solver whether a smaller model of the reduct exists.
+   `assertions` is that question, and fixing the model under test by
+   assumption is what asks it about that model. An answer of sat is a reason
+   the model is no answer set, which loop_nogood() turns into a constraint
+   the first solver keeps.
 
-   Empty for a program with no head cycle.
+   Empty for a program with no positive cycle.
 */
 struct MinimalityCheck {
   // The atoms a smaller model of the reduct could drop: every atom of a
-  // head-cyclic component, ranked or not. A ranked atom rests on the unranked
-  // ones, so dropping one of those can leave it unfounded too.
+  // cyclic component, ranked or not. A component with a rule sharing a head
+  // still ranks the atoms that do not themselves share one, and a ranked atom
+  // rests on the unranked ones, so dropping one of those can leave it
+  // unfounded too. An ordinary recursive component ranks nothing, once the
+  // program already runs this check elsewhere.
   std::vector<aspif::Atom> droppable;
   // Whether the smaller model still holds each droppable atom, indexed by atom
   // id. Null for every other atom, which stands for itself.
@@ -163,10 +169,11 @@ struct Encoding {
 };
 
 // The sections together describe the answer sets exactly: a model of all of
-// them is an answer set, and every answer set is one of their models. A rule
-// with two head atoms on a common positive cycle admits models that are not
-// answer sets. Minimality rules those out, either as `Encoding::check` or as
-// minimality_assertion().
+// them is an answer set, and every answer set is one of their models. A
+// positive cycle, whether from a rule with two head atoms in it or from
+// ordinary recursion the checker covers instead of ranking, admits models
+// that are not answer sets. Minimality rules those out, either as
+// `Encoding::check` or as minimality_assertion().
 
 absl::StatusOr<Encoding> build_encoding(cvc5::TermManager& tm,
                                         const aspif::Program& prog);
@@ -208,8 +215,8 @@ cvc5::Term loop_nogood(cvc5::TermManager& tm, const aspif::Program& prog,
 // set, which is the one way such a query holds.
 //
 // Three programs take more than the plain check-sat above:
-//   - A head cycle, which asserts the minimality check as well. That assertion
-//     quantifies over subsets, so the script is in the ALL logic.
+//   - A positive cycle, which asserts the minimality check as well. That
+//     assertion quantifies over subsets, so the script is in the ALL logic.
 //   - A query matching several atoms, which is one check-sat per atom, each
 //     under a negation of its own in a push and pop scope, in place of the one
 //     at the end.

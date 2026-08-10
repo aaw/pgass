@@ -1,29 +1,3 @@
-* cvc5's preprocessing pipeline taxes every clause, even where the encoding is
-  pure Boolean and there is no theory to reason about. PermutationPatternMatching
-  is the clean case: clasp reports solving its CNF in 0.00s, while pgass spends
-  seconds getting there, 65% of one run in NonClausalSimp, TheoryPreprocess,
-  ApplySubsts, StaticLearning and StaticRewrite. Per ground rule pgass pays
-  about 4.5us against clingo's 0.8us, and that is the whole of the difference
-  on a domain whose search costs nothing. This tax is paid on every domain
-  with a lot of ground clauses, not just this one.
-  * The fix is a propositional path: for an encoding that is QF_UF with no Int
-    anywhere, go from clauses straight to a SAT solver, skipping cvc5's nodes,
-    rewriter and preprocessing passes. `--encode=sat`, dumping the encoding as
-    DIMACS, is a step toward that.
-  * Measured and rejected: `simplification=none` and `static-learning=false`
-    move the needle a fifth to a twentieth, not the multiple needed, and would
-    apply to every domain including the search-bound ones below. Flattening
-    every rule to a clause, not only the constraints, backfires where a rule
-    that derives something wants the variable cvc5 names its body with:
-    partner-units-166 went from 5.4s to 54.7s, crossing-minimization-0008 from
-    1.5s to 4.1s.
-  * Measured and rejected, a second way: skipping cvc5 outright for a QF_UF
-    program with no head cycle and no weak constraint, Tseitin-clausifying the
-    encoding straight into CaDiCaL through its IPASIR ABI. Cut every ppm-* case
-    by half or more and helped several other domains by 2-4s, but
-    partner-units-166 went from ~5s to a 60s timeout, the same instance the
-    clause-flattening attempt above already broke.
-
 * Ordinary recursion (a single-headed rule deriving an atom from itself
   through a positive cycle) is ranked with an Int level variable per atom, and
   CDCL(T) has to make real theory decisions to order them. clingo does this as
@@ -36,17 +10,13 @@
   same shape of recursion in `reach`/`coppo` over its graph, and shows the
   same signature independent of any other cost: a SAT instance needing no
   loop nogood at all, 0023, still spends 6.6s where clingo takes 0.77s.
-  * The fix is dropping level ranking for ordinary recursive components, not
-    only head-cyclic ones: mark every atom on a positive cycle droppable, skip
-    declaring its Int, and let the checker already built for head cycles find
-    unfounded sets and assert loop nogoods on demand instead. This is a bigger
-    change than either domain alone, since level ranking is what every other
-    domain's recursion leans on for correctness, so it needs checking against
-    the full suite before it lands.
-  * Not yet measured: whether the checker's per-round cost, cheap where
-    measured for head cycles, stays cheap over a much larger recursive
-    component, or whether it is worth sharing with the partial-assignment
-    propagator below.
+  * The fix is dropping level ranking for ordinary recursive components in
+    favor of the checker already built for head cycles, but only for a
+    program that already pays for that checker: gate it on the program
+    having a head cycle somewhere else. Labyrinth has none, so it stays
+    untouched; MinimalDiagnosis already runs the checker for its disjunctive
+    components, so `reach`/`coppo` rides the same round trips instead of
+    starting a second mechanism from zero.
 
 * Minimality and optimality are settled by round trips to a second solver
   over a complete candidate model, not by propagation inside one search.
@@ -54,8 +24,8 @@
   being walked down to its least cost), pgass proposes a full model, asks a
   checker whether something strictly smaller satisfies the reduct, and if so
   asserts a nogood ruling out just that one witness before trying again. Each
-  round re-pays the preprocessing tax above in full, and because a nogood only
-  rules out the specific witness found, convergence is not guaranteed to be
+  round re-pays cvc5's preprocessing in full, and because a nogood only rules
+  out the specific witness found, convergence is not guaranteed to be
   fast: on ComplexOptimizationOfAnswerSets, clasp checks most of its conflicts
   on a partial assignment and keeps no loop nogood at all, where pgass runs
   1286 whole-model rounds on 0021 and is no closer. MinimalDiagnosis shows the

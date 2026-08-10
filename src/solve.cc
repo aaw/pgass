@@ -36,7 +36,7 @@ void configure(cvc5::Solver& solver, const char* logic) {
 
 // One search over one ground program. Every model find() returns is an answer
 // set, and an optimal one once settle_costs() has bounded the levels. For most
-// programs the encoding says so outright. A head cycle leaves it to the
+// programs the encoding says so outright. A positive cycle leaves it to the
 // minimality check, which find() runs before handing a model back.
 //
 // Every member holds terms of `tm`, so `tm` is declared first and destroyed
@@ -56,15 +56,15 @@ struct Search {
   // Whether the program has an answer set nothing asserted so far rules out.
   // `question`, where given, holds for this call alone.
   //
-  // A head-cyclic program checks each model for minimality first. One that
-  // fails leaves behind a loop nogood, so the next round asks a solver that
-  // knows more. The loop ends at a model that passes, or at a solver with
-  // nothing left to try.
+  // A program with a positive cycle checks each model for minimality first.
+  // One that fails leaves behind a loop nogood, so the next round asks a
+  // solver that knows more. The loop ends at a model that passes, or at a
+  // solver with nothing left to try.
   absl::StatusOr<bool> find(
       const std::optional<cvc5::Term>& question = std::nullopt);
 
   // An unfounded set of the model the solver holds, empty where that model is
-  // an answer set. Only a head-cyclic program has one to find.
+  // an answer set. Only a program with a positive cycle has one to find.
   absl::StatusOr<std::vector<aspif::Atom>> unfounded_set();
 
   // The atoms true in the model the solver holds.
@@ -210,7 +210,7 @@ absl::StatusOr<std::vector<aspif::Atom>> Search::unfounded_set() {
 
 absl::StatusOr<bool> Search::find(const std::optional<cvc5::Term>& question) {
   if (!solver.has_value()) load();
-  const bool head_cyclic = !encoding.check.droppable.empty();
+  const bool needs_check = !encoding.check.droppable.empty();
   while (true) {
     // A question holds for this call alone, so it goes in as an assumption
     // rather than an assertion.
@@ -219,7 +219,7 @@ absl::StatusOr<bool> Search::find(const std::optional<cvc5::Term>& question) {
                          ? decided(solver->checkSatAssuming(*question))
                          : decided(solver->checkSat()));
     if (!found) return false;
-    if (!head_cyclic) return true;
+    if (!needs_check) return true;
 
     ASSIGN_OR_RETURN(const std::vector<aspif::Atom> unfounded, unfounded_set());
     if (unfounded.empty()) return true;
