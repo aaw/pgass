@@ -34,5 +34,3 @@
 * Stop the parser building error messages it throws away. `parse_binop` is
   called in five places just to see whether an operator comes next, and each
   failure formats a message the caller drops when it backtracks.
-
-* `collect_agg_tuples()` in ground.cc re-splits each aggregate element's literals via `split_naf_literals()` on every call instead of once per element.
