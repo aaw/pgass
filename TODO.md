@@ -30,7 +30,3 @@
     options. Every shape of round-trip batching loses to just taking the
     witness cvc5 hands back, so the partial-assignment propagator above is
     the one avenue left.
-
-* Stop the parser building error messages it throws away. `parse_binop` is
-  called in five places just to see whether an operator comes next, and each
-  failure formats a message the caller drops when it backtracks.

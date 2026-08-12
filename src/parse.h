@@ -2,6 +2,7 @@
 #define PARSE_H_
 
 #include <memory>
+#include <optional>
 #include <string>
 #include <string_view>
 
@@ -30,6 +31,7 @@ class Parser {
   absl::StatusOr<std::unique_ptr<Weight>> parse_weight();
   absl::StatusOr<std::unique_ptr<NafLiteral>> parse_naf_literal();
   absl::StatusOr<BinopType> parse_binop();
+  std::optional<BinopType> try_binop();
   absl::StatusOr<std::unique_ptr<BuiltinAtom>> parse_builtin_atom();
   absl::StatusOr<std::unique_ptr<Query>> parse_query();
   absl::StatusOr<std::unique_ptr<Show>> parse_show();

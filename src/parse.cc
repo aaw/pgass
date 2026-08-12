@@ -337,10 +337,10 @@ absl::StatusOr<std::unique_ptr<Aggregate>> Parser::parse_aggregate() {
     // Parse the lower bound, if one exists.
     LexerCheckpoint try_term_and_binop(lexer_);
     auto term = parse_term();
-    auto binop = parse_binop();
-    if (term.ok() && binop.ok()) {
+    auto binop = try_binop();
+    if (term.ok() && binop.has_value()) {
       aggregate->lb_term = std::move(*term);
-      aggregate->lb_op = std::move(*binop);
+      aggregate->lb_op = *binop;
       try_term_and_binop.commit();
     }
   }
@@ -362,11 +362,11 @@ absl::StatusOr<std::unique_ptr<Aggregate>> Parser::parse_aggregate() {
   {
     // Parse the upper bound, if one exists.
     LexerCheckpoint try_term_and_binop(lexer_);
-    auto binop = parse_binop();
+    auto binop = try_binop();
     auto term = parse_term();
-    if (term.ok() && binop.ok()) {
+    if (term.ok() && binop.has_value()) {
       aggregate->ub_term = std::move(*term);
-      aggregate->ub_op = std::move(*binop);
+      aggregate->ub_op = *binop;
       try_term_and_binop.commit();
     }
   }
@@ -394,7 +394,7 @@ absl::StatusOr<std::unique_ptr<Body>> Parser::parse_body() {
         bool binop_follows;
         {
           LexerCheckpoint peek_binop(lexer_);
-          binop_follows = parse_binop().ok();
+          binop_follows = try_binop().has_value();
         }
         if (!binop_follows) {
           try_naf_literal.commit();
@@ -489,10 +489,10 @@ absl::StatusOr<std::unique_ptr<Choice>> Parser::parse_choice() {
     // Parse the lower bound, if one exists.
     LexerCheckpoint try_term_and_binop(lexer_);
     auto term = parse_term();
-    auto binop = parse_binop();
-    if (term.ok() && binop.ok()) {
+    auto binop = try_binop();
+    if (term.ok() && binop.has_value()) {
       choice->lb_term = std::move(*term);
-      choice->lb_op = std::move(*binop);
+      choice->lb_op = *binop;
       try_term_and_binop.commit();
     }
   }
@@ -513,11 +513,11 @@ absl::StatusOr<std::unique_ptr<Choice>> Parser::parse_choice() {
   {
     // Parse the upper bound, if one exists.
     LexerCheckpoint try_term_and_binop(lexer_);
-    auto binop = parse_binop();
+    auto binop = try_binop();
     auto term = parse_term();
-    if (term.ok() && binop.ok()) {
+    if (term.ok() && binop.has_value()) {
       choice->ub_term = std::move(*term);
-      choice->ub_op = std::move(*binop);
+      choice->ub_op = *binop;
       try_term_and_binop.commit();
     }
   }
@@ -626,7 +626,7 @@ absl::StatusOr<std::unique_ptr<NafLiteral>> Parser::parse_naf_literal() {
              | LESS_OR_EQ
              | GREATER_OR_EQ
 */
-absl::StatusOr<BinopType> Parser::parse_binop() {
+std::optional<BinopType> Parser::try_binop() {
   Token token = lexer_.next();
   if (token.type == TokenType::kEQUAL) {
     return BinopType::kEQUAL;
@@ -640,11 +640,21 @@ absl::StatusOr<BinopType> Parser::parse_binop() {
     return BinopType::kLESS_OR_EQ;
   } else if (token.type == TokenType::kGREATER_OR_EQ) {
     return BinopType::kGREATER_OR_EQ;
-  } else {
-    return absl::InvalidArgumentError(
-        absl::StrCat("Expected operator (=, <>, !=, <, >, <=, >=), got '",
-                     token.val, "'\n", lexer_.report_last_token_pos()));
   }
+  return std::nullopt;
+}
+
+absl::StatusOr<BinopType> Parser::parse_binop() {
+  LexerCheckpoint checkpoint(lexer_);
+  auto binop = try_binop();
+  if (binop.has_value()) {
+    checkpoint.commit();
+    return *binop;
+  }
+  Token token = lexer_.next();
+  return absl::InvalidArgumentError(
+      absl::StrCat("Expected operator (=, <>, !=, <, >, <=, >=), got '",
+                   token.val, "'\n", lexer_.report_last_token_pos()));
 }
 
 // <builtin_atom> ::= <term> <binop> <term>
