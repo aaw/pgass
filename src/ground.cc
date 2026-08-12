@@ -2669,6 +2669,12 @@ std::optional<MinMaxValue> settled_minmax_value(
 // costs one ground instance of the rule.
 constexpr size_t kMaxAggregateValues = 4096;
 
+absl::Status too_many_agg_values() {
+  return absl::ResourceExhaustedError(absl::StrCat(
+      "an aggregate whose value binds a variable can take more than ",
+      kMaxAggregateValues, " different values"));
+}
+
 // The terms a #min or #max can take, in ascending order. Its value is the first
 // term of one of its tuples.
 //
@@ -2688,11 +2694,7 @@ absl::StatusOr<std::vector<Sym>> minmax_values(
   std::sort(values.begin(), values.end(),
             [&syms](Sym a, Sym b) { return syms.compare(a, b) < 0; });
   values.erase(std::unique(values.begin(), values.end()), values.end());
-  if (values.size() > kMaxAggregateValues) {
-    return absl::ResourceExhaustedError(absl::StrCat(
-        "an aggregate whose value binds a variable can take more than ",
-        kMaxAggregateValues, " different values"));
-  }
+  if (values.size() > kMaxAggregateValues) return too_many_agg_values();
   return values;
 }
 
@@ -2716,11 +2718,7 @@ absl::StatusOr<std::vector<Sym>> possible_values(
   for (const AggTuple& tuple : tuples) {
     absl::btree_set<BigInt> extended = reachable;
     for (const BigInt& sum : reachable) extended.insert(sum + tuple.weight);
-    if (extended.size() > kMaxAggregateValues) {
-      return absl::ResourceExhaustedError(absl::StrCat(
-          "an aggregate whose value binds a variable can take more than ",
-          kMaxAggregateValues, " different values"));
-    }
+    if (extended.size() > kMaxAggregateValues) return too_many_agg_values();
     reachable = std::move(extended);
   }
   std::vector<Sym> values;
