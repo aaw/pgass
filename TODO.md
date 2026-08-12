@@ -38,5 +38,3 @@
 * `comparisons_hold()` in ground.cc re-evaluates comparisons `bind_assignments()` already settled as assignments.
 
 * `collect_agg_tuples()` in ground.cc re-splits each aggregate element's literals via `split_naf_literals()` on every call instead of once per element.
-
-* `matching_atoms()` in ground.cc linear-scans a predicate's atoms even when some args are ground, instead of reusing the join's probe/index machinery.

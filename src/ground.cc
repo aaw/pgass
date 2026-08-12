@@ -1928,12 +1928,11 @@ void prepare_step(Join& join, size_t depth, const Binding& binding) {
       literal.args == nullptr ? 0 : literal.args->size());
 }
 
-// The atoms `step` can match under `key`. A step naming one atom has nowhere to
-// keep it, so `one` holds it for the length of the call.
-absl::Span<const GroundAtom* const> candidates(const JoinStep& step,
+// The atoms `index` can match under `key`. An index naming one atom has
+// nowhere to keep it, so `one` holds it for the length of the call.
+absl::Span<const GroundAtom* const> candidates(const StepIndex& index,
                                                const Tuple& key,
                                                const GroundAtom** one) {
-  const StepIndex& index = step.index;
   if (index.kind == StepIndex::Kind::kOne) {
     *one = index.data->find_within(key, index.range.begin, index.range.end);
     if (*one == nullptr) return {};
@@ -2080,7 +2079,7 @@ absl::Status run_step(Join& join, size_t depth, Instance& instance,
   // The candidates already agree on the probed positions, which is why the
   // step's plan leaves those out: matching is here to bind the variables in the
   // positions still open.
-  for (const GroundAtom* atom : candidates(step, *key, &one)) {
+  for (const GroundAtom* atom : candidates(step.index, *key, &one)) {
     BindingTrail trail(instance.binding);
     absl::StatusOr<bool> ok = match_args(*step.literal, step.plan, atom->args,
                                          instance.binding, trail, join.syms);
@@ -2364,12 +2363,19 @@ absl::StatusOr<std::vector<aspif::Atom>> matching_atoms(
   // X has no value yet, which this literal's own scope has no use for, so it
   // happens on a scratch copy.
   Binding scratch = binding;
-  const std::vector<size_t> plan = match_plan(literal, /*skip=*/{});
-  for (const GroundAtom& atom : data->atoms) {
+  const std::vector<size_t> positions = probeable_positions(literal, scratch);
+  const size_t arity = literal.args == nullptr ? 0 : literal.args->size();
+  const StepIndex index = build_step_index(
+      *data, AtomRange{.begin = 0, .end = data->atoms.size()}, positions,
+      arity);
+  const std::vector<size_t> plan = match_plan(literal, positions);
+  ASSIGN_OR_RETURN(Tuple key, probe_key(literal, positions, scratch, syms));
+  const GroundAtom* one = nullptr;
+  for (const GroundAtom* atom : candidates(index, key, &one)) {
     BindingTrail trail(scratch);
     ASSIGN_OR_RETURN(bool ok,
-                     match_args(literal, plan, atom.args, scratch, trail, syms));
-    if (ok) matched.push_back(atom.id);
+                     match_args(literal, plan, atom->args, scratch, trail, syms));
+    if (ok) matched.push_back(atom->id);
   }
   return matched;
 }
