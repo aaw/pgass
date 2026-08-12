@@ -151,6 +151,10 @@ struct Encoding {
   // One integer per atom that can lie on a positive cycle, indexed the same
   // way. A null level variable is how to ask whether an atom needs ranking.
   std::vector<cvc5::Term> level_var;
+  // The formula for each rule's body, indexed the way aspif::Program::rules
+  // is. Null for a rule with an empty head, which loop_nogood() never asks
+  // about.
+  std::vector<cvc5::Term> body_by_rule;
   // What each atom variable is called, which is the symbol the program prints
   // for the atom where there is one.
   std::vector<std::string> atom_name;

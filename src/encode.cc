@@ -7,6 +7,7 @@
 #include <utility>
 #include <vector>
 
+#include "absl/algorithm/container.h"
 #include "absl/container/btree_map.h"
 #include "absl/container/flat_hash_map.h"
 #include "absl/container/flat_hash_set.h"
@@ -125,15 +126,11 @@ struct Ranking {
   // that is. Every answer set admits such a ranking: an atom no ordering
   // reaches would sit on a cycle nothing outside supports.
   std::vector<bool> needs_level;
-  // Whether any atom needs one, which is whether the encoding declares an Int.
-  bool any_level_var = false;
   // Whether each atom can lie on a positive cycle at all, indexed by atom id.
   // Those are the atoms a smaller model of the reduct may drop, so this is
   // what the minimality check is built over. build_ranking() says which
   // cyclic components this covers.
   std::vector<bool> droppable;
-  // Whether any atom is, which is what turns the check on.
-  bool any_droppable = false;
 };
 
 Ranking build_ranking(const aspif::Program& prog) {
@@ -180,10 +177,8 @@ Ranking build_ranking(const aspif::Program& prog) {
     const bool component_head_cyclic = head_cyclic[ranking.component[atom]];
     ranking.needs_level[atom] = cyclic && !shares_a_head[atom] &&
                                 (component_head_cyclic || !any_head_cyclic);
-    if (ranking.needs_level[atom]) ranking.any_level_var = true;
     ranking.droppable[atom] =
         component_head_cyclic || (any_head_cyclic && cyclic);
-    if (ranking.droppable[atom]) ranking.any_droppable = true;
   }
   return ranking;
 }
@@ -336,13 +331,20 @@ std::vector<aspif::Atom> ranked_body_atoms(const aspif::Rule& rule,
 
 // Groups the rules by the atoms they derive. Rules with an empty head derive
 // nothing and are left out. rule_formulas handles those.
+//
+// Also fills `body_by_rule` with each headed rule's body term, indexed the
+// way `prog.rules` is. loop_nogood() reads these terms for the rules it
+// looks at, which are always rules with a head.
 std::vector<std::vector<Support>> collect_supports(
     cvc5::TermManager& tm, const aspif::Program& prog,
-    const std::vector<cvc5::Term>& atom_var, const Ranking& ranking) {
+    const std::vector<cvc5::Term>& atom_var, const Ranking& ranking,
+    std::vector<cvc5::Term>& body_by_rule) {
   std::vector<std::vector<Support>> supports(prog.next_atom);
-  for (const aspif::Rule& rule : prog.rules) {
+  for (size_t index = 0; index < prog.rules.size(); ++index) {
+    const aspif::Rule& rule = prog.rules[index];
     if (rule.head.empty()) continue;
     const cvc5::Term body = body_term(tm, atom_var, rule);
+    body_by_rule[index] = body;
     const bool choice = rule.head_type == aspif::Rule::HeadType::kChoice;
     for (aspif::Atom head : rule.head) {
       std::vector<cvc5::Term> conjuncts = {body};
@@ -555,8 +557,8 @@ std::vector<std::string> cost_names(const Encoding& encoding) {
 // query spends its check-sats on the query, and asks it of whatever the
 // assertions leave, so the cost gets a check-sat of its own here and settles
 // before the query runs.
-std::string weak_constraint_block(const Encoding& encoding, bool has_query) {
-  const std::vector<std::string> names = cost_names(encoding);
+std::string weak_constraint_block(const Encoding& encoding, bool has_query,
+                                  const std::vector<std::string>& names) {
   std::string definitions;
   for (size_t i = 0; i < names.size(); ++i) {
     absl::StrAppend(&definitions, "(define-fun ", names[i], " () Int ",
@@ -941,7 +943,7 @@ cvc5::Term loop_nogood(cvc5::TermManager& tm, const aspif::Program& prog,
       }
       if (reaches_back) continue;
 
-      const cvc5::Term body = body_term(tm, encoding.atom_var, rule);
+      const cvc5::Term& body = encoding.body_by_rule[index];
       if (rule.head_type == aspif::Rule::HeadType::kChoice) {
         // A choice rule is '{a} :- B', which is 'a :- B, not not a'. It
         // supports a only where a holds, so the head atom joins the condition
@@ -1061,13 +1063,16 @@ absl::StatusOr<Encoding> build_encoding(cvc5::TermManager& tm,
   Names names = choose_names(prog, ranking);
 
   Encoding encoding;
-  encoding.logic = logic_for(prog, ranking.any_level_var);
+  const bool any_level_var =
+      absl::c_any_of(ranking.needs_level, [](bool needs) { return needs; });
+  encoding.logic = logic_for(prog, any_level_var);
   encoding.atom_var = declare_constants(tm, tm.getBooleanSort(), names.atom);
   encoding.level_var = declare_constants(tm, tm.getIntegerSort(), names.level);
   encoding.atom_name = std::move(names.atom);
 
-  const std::vector<std::vector<Support>> supports =
-      collect_supports(tm, prog, encoding.atom_var, ranking);
+  encoding.body_by_rule.resize(prog.rules.size());
+  const std::vector<std::vector<Support>> supports = collect_supports(
+      tm, prog, encoding.atom_var, ranking, encoding.body_by_rule);
 
   std::vector<cvc5::Term> rule_terms;
   rule_formulas(tm, prog, encoding.atom_var, rule_terms);
@@ -1093,7 +1098,7 @@ absl::StatusOr<Encoding> build_encoding(cvc5::TermManager& tm,
       Section{.title = "Support", .assertions = std::move(support_terms)});
   encoding.sections.push_back(Section{.title = "Level ranking",
                                       .assertions = std::move(ranking_terms)});
-  if (ranking.any_droppable) {
+  if (absl::c_any_of(ranking.droppable, [](bool drops) { return drops; })) {
     encoding.check = build_check(tm, prog, encoding.atom_var,
                                  encoding.atom_name, ranking.droppable);
   }
@@ -1158,9 +1163,11 @@ absl::StatusOr<std::string> encode_smtlib(const aspif::Program& prog) {
                               minimality.toString(), ")\n"));
   }
 
+  const std::vector<std::string> level_cost_names = cost_names(encoding);
   if (!encoding.levels.empty()) {
     append_block(script, "Weak constraints",
-                 weak_constraint_block(encoding, prog.query.has_value()));
+                 weak_constraint_block(encoding, prog.query.has_value(),
+                                       level_cost_names));
   }
 
   if (encoding.query.size() > 1) {
@@ -1208,7 +1215,7 @@ absl::StatusOr<std::string> encode_smtlib(const aspif::Program& prog) {
     absl::StrAppend(&script, "(check-sat)\n");
     // Printing the costs is step 1 of the recipe above, so the script does it
     // rather than asking for an edit before the first run.
-    for (const std::string& name : cost_names(encoding)) {
+    for (const std::string& name : level_cost_names) {
       absl::StrAppend(&script, "(get-value (", name, "))\n");
     }
     absl::StrAppend(&script, "(get-model)\n");
