@@ -35,6 +35,4 @@
   called in five places just to see whether an operator comes next, and each
   failure formats a message the caller drops when it backtracks.
 
-* `comparisons_hold()` in ground.cc re-evaluates comparisons `bind_assignments()` already settled as assignments.
-
 * `collect_agg_tuples()` in ground.cc re-splits each aggregate element's literals via `split_naf_literals()` on every call instead of once per element.

@@ -1026,6 +1026,10 @@ std::vector<std::vector<const RuleView*>> bucket_rule_views(
 struct Instance {
   Binding binding;
   std::vector<aspif::Lit> matched;
+  // Which of parts.comparisons bind_assignments() has already turned into an
+  // assignment, indexed the same way. comparisons_hold() skips these: an
+  // assignment holds by construction, so re-evaluating it is wasted work.
+  std::vector<bool> settled;
 };
 
 bool builtin_holds(BinopType op, Sym left, Sym right, const Symbols& syms) {
@@ -1103,21 +1107,24 @@ bool is_bound(const Term& term, const Binding& binding) {
 // 'Y = 1 / 0' that 'Y = 1 / X' becomes under {X: 0}: the binding builds no rule
 // instance.
 absl::Status bind_assignments(const BodyParts& parts, Binding& binding,
-                              BindingTrail& trail, Symbols& syms) {
+                              BindingTrail& trail, Symbols& syms,
+                              std::vector<bool>& settled) {
   // One assignment can bind a variable another needs, e.g. 'Y = X + 1, Z = Y +
   // 1', so passes repeat until one binds nothing new. A pass skips the
   // assignments already made: their variables are bound.
   bool changed = true;
   while (changed) {
     changed = false;
-    for (const NafLiteral* item : parts.comparisons) {
-      std::optional<Assignment> assignment = assignment_of(*item, binding);
+    for (size_t i = 0; i < parts.comparisons.size(); ++i) {
+      const NafLiteral& item = *parts.comparisons[i];
+      std::optional<Assignment> assignment = assignment_of(item, binding);
       if (!assignment.has_value()) continue;
       if (!is_bound(*assignment->value, binding)) continue;
       ASSIGN_OR_RETURN(Sym value, eval_term(*assignment->value, binding, syms));
       size_t slot = binding.slot_of(*assignment->variable);
       binding.set(slot, value);
       trail.record(slot);
+      settled[i] = true;
       changed = true;
     }
   }
@@ -1160,15 +1167,19 @@ absl::Status for_each_interval_value(const Interval& interval,
 // settles those.
 //
 // An assignment holds by construction: its variable holds exactly what the
-// other side evaluates to.
+// other side evaluates to. `settled` is bind_assignments()'s record of which
+// ones those were, so this skips re-evaluating them.
 absl::StatusOr<bool> comparisons_hold(const BodyParts& parts,
-                                      const Binding& binding, Symbols& syms) {
-  for (const NafLiteral* item : parts.comparisons) {
-    const auto& builtin = static_cast<const BuiltinAtom&>(*item->literal);
+                                      const Binding& binding, Symbols& syms,
+                                      const std::vector<bool>& settled) {
+  for (size_t i = 0; i < parts.comparisons.size(); ++i) {
+    if (settled[i]) continue;
+    const NafLiteral& item = *parts.comparisons[i];
+    const auto& builtin = static_cast<const BuiltinAtom&>(*item.literal);
     ASSIGN_OR_RETURN(Sym left, eval_term(*builtin.left, binding, syms));
     ASSIGN_OR_RETURN(Sym right, eval_term(*builtin.right, binding, syms));
     bool holds = builtin_holds(builtin.op, left, right, syms);
-    if (item->naf) holds = !holds;
+    if (item.naf) holds = !holds;
     if (!holds) return false;
   }
   return true;
@@ -1805,8 +1816,8 @@ absl::StatusOr<std::vector<Instance>> expand_over_interval(
           // The value can complete an assignment, e.g. the 'Y = X + 1' of
           // 'p(X, Y) :- X = 1..3, Y = X + 1.'
           BindingTrail trail(next.binding);
-          absl::Status bound =
-              bind_assignments(join.parts, next.binding, trail, join.syms);
+          absl::Status bound = bind_assignments(join.parts, next.binding, trail,
+                                                join.syms, next.settled);
           if (join.lost_instance(bound)) return absl::OkStatus();
           RETURN_IF_ERROR(bound);
           trail.keep();
@@ -1865,8 +1876,8 @@ absl::Status finish(Join& join, Instance& instance, const InstanceFn& emit) {
   if (join.aggregates.empty() && join.intervals.empty()) {
     // Every variable the body binds has a value by now, so all the comparisons
     // are decidable.
-    absl::StatusOr<bool> holds =
-        comparisons_hold(join.parts, instance.binding, join.syms);
+    absl::StatusOr<bool> holds = comparisons_hold(
+        join.parts, instance.binding, join.syms, instance.settled);
     if (join.lost_instance(holds.status())) return absl::OkStatus();
     RETURN_IF_ERROR(holds.status());
     if (!*holds) return absl::OkStatus();
@@ -1897,7 +1908,7 @@ absl::Status finish(Join& join, Instance& instance, const InstanceFn& emit) {
 
   for (const Instance& next : instances) {
     absl::StatusOr<bool> holds =
-        comparisons_hold(join.parts, next.binding, join.syms);
+        comparisons_hold(join.parts, next.binding, join.syms, next.settled);
     if (join.lost_instance(holds.status())) continue;
     RETURN_IF_ERROR(holds.status());
     if (!*holds) continue;
@@ -1970,8 +1981,8 @@ absl::Status run_interval_item(Join& join, size_t depth, size_t k,
         trail.record(slot);
         // The value can complete an assignment, e.g. the 'X = _R0' normalize()
         // writes 'X = 1..3' as.
-        absl::Status bound =
-            bind_assignments(join.parts, instance.binding, trail, join.syms);
+        absl::Status bound = bind_assignments(
+            join.parts, instance.binding, trail, join.syms, instance.settled);
         if (join.lost_instance(bound)) return absl::OkStatus();
         RETURN_IF_ERROR(bound);
         return run_items(join, depth, k + 1, instance, emit);
@@ -2014,8 +2025,8 @@ absl::Status run_aggregate_item(Join& join, size_t depth, size_t k,
     // The value can complete an assignment, e.g. the 'T = S + 1' of
     // 'q(T) :- #count{X : p(X)} = S, T = S + 1.' A value the assignment cannot
     // use, e.g. a #min that comes out a constant, drops that value alone.
-    absl::Status bound =
-        bind_assignments(join.parts, instance.binding, trail, join.syms);
+    absl::Status bound = bind_assignments(
+        join.parts, instance.binding, trail, join.syms, instance.settled);
     if (join.lost_instance(bound)) continue;
     RETURN_IF_ERROR(bound);
     RETURN_IF_ERROR(run_items(join, depth, k + 1, instance, emit));
@@ -2045,8 +2056,8 @@ absl::Status extend(Join& join, size_t depth, Instance& instance,
   // every atom it holds. The trail undoes it on the way back out.
   BindingTrail trail(instance.binding);
   if (!join.parts.comparisons.empty()) {
-    absl::Status bound =
-        bind_assignments(join.parts, instance.binding, trail, join.syms);
+    absl::Status bound = bind_assignments(
+        join.parts, instance.binding, trail, join.syms, instance.settled);
     if (join.lost_instance(bound)) return absl::OkStatus();
     RETURN_IF_ERROR(bound);
   }
@@ -2316,7 +2327,9 @@ absl::StatusOr<std::optional<std::string>> find_instances(
     const BodyParts& parts, const Store& store, Symbols& syms, Binding seed,
     const InstanceFn& emit,
     std::optional<size_t> delta_position = std::nullopt) {
-  Instance instance{.binding = std::move(seed), .matched = {}};
+  Instance instance{.binding = std::move(seed),
+                    .matched = {},
+                    .settled = std::vector<bool>(parts.comparisons.size())};
 
   // The assignments that stand on their own, e.g. the 'X = 2' of
   // "p(X) :- q(X+1), X = 2.", are made before the join, so that a literal
@@ -2324,7 +2337,8 @@ absl::StatusOr<std::optional<std::string>> find_instances(
   // to finish(). An assignment made here holds for every instance the join
   // finds, so nothing undoes it.
   BindingTrail trail(instance.binding);
-  absl::Status bound = bind_assignments(parts, instance.binding, trail, syms);
+  absl::Status bound = bind_assignments(parts, instance.binding, trail, syms,
+                                        instance.settled);
   if (has_no_value(bound)) return std::optional(std::string(bound.message()));
   RETURN_IF_ERROR(bound);
   trail.keep();
@@ -2782,8 +2796,8 @@ absl::StatusOr<std::vector<Instance>> expand_over_values(
       // A value the assignment cannot use, e.g. a #min that comes out a
       // constant in 'T = S + 1', drops this value's instance. The other values
       // keep theirs.
-      absl::Status bound =
-          bind_assignments(join.parts, next.binding, trail, syms);
+      absl::Status bound = bind_assignments(join.parts, next.binding, trail,
+                                            syms, next.settled);
       if (join.lost_instance(bound)) continue;
       RETURN_IF_ERROR(bound);
       trail.keep();
