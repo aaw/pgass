@@ -825,14 +825,14 @@ struct RuleView {
   BodyParts parts;
   // Whether one of the rule's aggregates reads a predicate from the rule's own
   // component, which only a disjunctive head can bring about. See
-  // mark_aggregates_in_own_component(). Deriving atoms settles no aggregate of
+  // bucket_rule_views(). Deriving atoms settles no aggregate of
   // such a rule, neither to drop an instance nor to mark a fact, because
   // settling an aggregate needs a store that is complete for what the aggregate
   // reads, and its own component is by definition still being derived.
   bool aggregate_in_own_component = false;
   // Whether every 'not' literal of the body reads an earlier component, so
   // that an atom missing from the store is missing for good. Such a rule can
-  // derive facts. See mark_settled_negation().
+  // derive facts. See bucket_rule_views().
   bool negation_is_settled = true;
   // Numbers every variable the rule mentions, head and body alike, including
   // the ones inside its aggregates. A rule's bindings all index by these.
@@ -951,71 +951,31 @@ int head_component(const PredGraph& graph, const std::vector<int>& component,
   return component[graph.id_of.at(pred_key(*rule.head[0]))];
 }
 
-// Marks the rules whose aggregates read a predicate from the rule's own
-// component, which stops deriving from settling those aggregates at all.
-//
-// verify_safe() enforces the ASP-Core-2 rule that no predicate inside an
-// aggregate shares a positive component with the head of the rule holding that
-// aggregate. It asks about pos_succ, where 'p | q(1).' leaves p and q/1 apart.
-// Joining them for derivation can put an aggregate's predicate in its own
-// rule's component after all:
-//
-//   r.
-//   p :- #count{ X : q(X) } <= 0.
-//   p | q(1) :- r.
-//
-// settled_agg_value() takes an aggregate's value from the store as it stands. A
-// predicate with no atoms derived yet has no tuples, so the count above settles
-// at 0 while q(1) does not exist. Deriving would read that as a settled '<= 0',
-// make a fact of p, and lose the answer set {r, q(1)}.
-//
-// The rest of the rule needs nothing. Its head atoms are derived with the
-// aggregate ignored, and the aggregate reaches the solver through emit_rules(),
-// which runs once every component has been derived and so reads a complete
-// store.
-void mark_aggregates_in_own_component(const PredGraph& graph,
-                                      const std::vector<int>& component,
-                                      std::vector<RuleView>& rules) {
-  for (RuleView& rule : rules) {
-    if (rule.head.empty()) continue;
-    const int own = head_component(graph, component, rule);
-    for (const Aggregate* aggregate : rule.parts.aggregates) {
-      if (reads_component(*aggregate, graph, component, own)) {
-        rule.aggregate_in_own_component = true;
-        break;
-      }
-    }
-  }
-}
-
-// Marks the rules whose 'not' literals all read earlier components, which is
-// what lets such a rule derive facts.
-//
-// Components derive in order, so an earlier one has every atom it will ever
-// get. An atom missing from it is missing from every answer set, and the 'not'
-// over it holds in all of them. Unstratified negation falls outside this, by
-// putting the 'not' in the rule's own component.
-void mark_settled_negation(const PredGraph& graph,
-                           const std::vector<int>& component,
-                           std::vector<RuleView>& rules) {
-  for (RuleView& rule : rules) {
-    if (rule.head.empty()) continue;
-    const int own = head_component(graph, component, rule);
-    for (const ClassicalLiteral* literal : rule.parts.negative) {
-      if (component[graph.id_of.at(pred_key(*literal))] >= own) {
-        rule.negation_is_settled = false;
-        break;
-      }
-    }
-  }
-}
-
 // Buckets rules by the component they derive into, with the constraints, which
-// have no head and so no component, in one extra bucket at the end. `rules`
-// owns the RuleViews and must outlive the buckets.
+// have no head and so no component, in one extra bucket at the end. Along the
+// way, since both also start from a rule's own component, marks
+// aggregate_in_own_component and negation_is_settled on each rule (see
+// RuleView). `rules` owns the RuleViews and must outlive the buckets.
+//
+// aggregate_in_own_component: whether one of the rule's aggregates reads a
+// predicate from the rule's own component, which only a disjunctive head can
+// bring about, and which stops deriving from settling that aggregate at all.
+// verify_safe() keeps an aggregate's predicates out of a positive component
+// with the rule's head, but a disjunctive head can still join them, e.g. 'p |
+// q(1) :- r.' next to 'p :- #count{ X : q(X) } <= 0.' puts q/1 in p's
+// component. Deriving reads the store as it stands, so the count above would
+// settle at 0 before q(1) exists, wrongly making p a fact and losing the
+// answer set {r, q(1)}. The aggregate is left alone instead: its rule's head
+// atoms derive without it, and it reaches the solver through emit_rules(),
+// which runs once every component is complete.
+//
+// negation_is_settled: whether every 'not' literal of the body reads an
+// earlier component, so a missing atom is missing for good and the rule can
+// derive facts. Unstratified negation is the exception, putting the 'not' in
+// the rule's own component, where a later pass can still add the atom.
 std::vector<std::vector<const RuleView*>> bucket_rule_views(
     const PredGraph& graph, const std::vector<int>& component,
-    const std::vector<RuleView>& rules) {
+    std::vector<RuleView>& rules) {
   // `component` is empty when the program mentions no predicate at all, e.g.
   // ":- 1 < 2."
   int num_components =
@@ -1024,16 +984,28 @@ std::vector<std::vector<const RuleView*>> bucket_rule_views(
           : *std::max_element(component.begin(), component.end()) + 1;
   std::vector<std::vector<const RuleView*>> bucket(num_components + 1);
   std::vector<const RuleView*>& constraints = bucket.back();
-  for (const RuleView& rv : rules) {
-    if (rv.head.empty()) {
-      constraints.push_back(&rv);
+  for (RuleView& rule : rules) {
+    if (rule.head.empty()) {
+      constraints.push_back(&rule);
       continue;
     }
-    const int own = head_component(graph, component, rv);
-    for (const ClassicalLiteral* literal : rv.head) {
+    const int own = head_component(graph, component, rule);
+    for (const ClassicalLiteral* literal : rule.head) {
       DCHECK_EQ(component[graph.id_of.at(pred_key(*literal))], own);
     }
-    bucket[own].push_back(&rv);
+    for (const Aggregate* aggregate : rule.parts.aggregates) {
+      if (reads_component(*aggregate, graph, component, own)) {
+        rule.aggregate_in_own_component = true;
+        break;
+      }
+    }
+    for (const ClassicalLiteral* literal : rule.parts.negative) {
+      if (component[graph.id_of.at(pred_key(*literal))] >= own) {
+        rule.negation_is_settled = false;
+        break;
+      }
+    }
+    bucket[own].push_back(&rule);
   }
   return bucket;
 }
@@ -3210,16 +3182,14 @@ std::optional<bool> settled_minmax_holds(const Aggregate& agg,
 // Whether grounding settles `agg` under `binding`, and if so whether it holds,
 // asked while atoms are still being derived. Nullopt means the solver decides,
 // which is also the answer for an aggregate this phase is too early to judge.
+//
+// The caller, aggregates_value(), only asks this when
+// rule.aggregate_in_own_component is false, so every predicate `agg` reads,
+// negated or not, sits in a component that has already fully derived.
 absl::StatusOr<std::optional<bool>> settle_aggregate(const Aggregate& agg,
                                                      const Binding& binding,
                                                      const Store& store,
                                                      Symbols& syms) {
-  // An aggregate under 'not' is the too-early case. Its element predicates can
-  // share the rule's own component, which unstratified negation brings about,
-  // so 'q :- not #count{ X : p(X) } >= 1.' can be counted while p is still
-  // being derived, over a set short of its final tuples. emit_rules() runs
-  // once every component has derived and settles these safely.
-  if (agg.naf) return std::nullopt;
   // A 'not' inside an element points at a predicate the same way; see
   // settled_agg_value().
   if (elements_use_negation(agg)) return std::nullopt;
@@ -3389,7 +3359,7 @@ class AggCache {
   // A disjunctive head can join an aggregate's predicate to the component of
   // the rule reading it, which would leave that store incomplete. The rules
   // this happens to never ask, so no answer taken from a partial store is
-  // cached here; see mark_aggregates_in_own_component().
+  // cached here; see bucket_rule_views().
   absl::StatusOr<std::optional<bool>> settle(const Aggregate& agg,
                                              const Binding& binding,
                                              const Store& store,
@@ -3526,7 +3496,7 @@ absl::StatusOr<BodyValue> aggregates_value(
 //
 // A rule whose aggregate reads its own component settles none of its aggregates
 // here, neither to drop an instance nor to derive a fact. Settling one would
-// read a store still being filled. See mark_aggregates_in_own_component().
+// read a store still being filled. See bucket_rule_views().
 //
 // This is where 'p(1).' becomes a fact, and where a rule over facts alone, like
 // the second rule of "edge(a, b). reachable(X, Y) :- edge(X, Y).", passes
@@ -3906,8 +3876,6 @@ absl::StatusOr<aspif::Program> ground(const Program& prog,
   const std::vector<int> component =
       strongly_connected_components(derivation_succ(graph));
   ASSIGN_OR_RETURN(std::vector<RuleView> rules, make_rule_views(prog));
-  mark_aggregates_in_own_component(graph, component, rules);
-  mark_settled_negation(graph, component, rules);
   std::vector<std::vector<const RuleView*>> rules_by_component =
       bucket_rule_views(graph, component, rules);
 

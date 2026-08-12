@@ -480,16 +480,15 @@ TEST(GroundTest, NegationInsideAnElementLeavesTheAggregateToTheSolver) {
   EXPECT_THAT(*out, HasSubstr("1 0 1 3 0 1 6\n"));
 }
 
-// An aggregate under 'not' is settled when its rule is emitted, by which time
-// every component has derived, but not while atoms are still being derived.
-// So q comes out with an empty body, but a rule reading q still carries it
-// rather than becoming a fact of its own.
-TEST(GroundTest, AnAggregateUnderNotIsSettledOnlyWhenTheRuleIsEmitted) {
+// p/1 sits in an earlier component than q's, so it is complete by the time
+// q's rule derives, and an aggregate under 'not' settles there exactly as one
+// without it does. q comes out a fact, and s along with it.
+TEST(GroundTest, AnAggregateUnderNotSettlesWhileDeriving) {
   auto out =
       ground_source("p(1). p(2). q :- not #count{ X : p(X) } >= 3. s :- q.");
   ASSERT_OK(out);
-  EXPECT_THAT(*out, HasSubstr("1 0 1 3 0 0\n"));    // q, with nothing left
-  EXPECT_THAT(*out, HasSubstr("1 0 1 4 0 1 3\n"));  // s :- q
+  EXPECT_THAT(*out, HasSubstr("4 1 q 1 3\n"));  // q, a fact
+  EXPECT_THAT(*out, HasSubstr("4 1 s 1 4\n"));  // s, a fact in turn
 }
 
 TEST(GroundTest, RecursionReachesFixpoint) {

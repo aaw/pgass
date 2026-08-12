@@ -40,7 +40,3 @@
 * `collect_agg_tuples()` in ground.cc re-splits each aggregate element's literals via `split_naf_literals()` on every call instead of once per element.
 
 * `matching_atoms()` in ground.cc linear-scans a predicate's atoms even when some args are ground, instead of reusing the join's probe/index machinery.
-
-* `settle_aggregate()` in ground.cc defers every negated aggregate instead of consulting the per-rule `aggregate_in_own_component` flag already computed.
-
-* `mark_aggregates_in_own_component()`, `mark_settled_negation()`, and `bucket_rule_views()` in ground.cc each recompute `head_component()` in a separate pass over the same rules. Mergeable into one.
