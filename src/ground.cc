@@ -2383,10 +2383,8 @@ absl::StatusOr<std::vector<aspif::Atom>> matching_atoms(
   const PredData* data = store.find(pred_key(literal));
   if (data == nullptr) return matched;
   if (args_are_ground(literal, binding)) {
-    ASSIGN_OR_RETURN(std::optional<Tuple> tuple,
-                     eval_terms(literal.args, binding, syms));
-    if (!tuple.has_value()) return matched;
-    const GroundAtom* atom = data->find(*tuple);
+    ASSIGN_OR_RETURN(Tuple tuple, eval_terms(literal.args, binding, syms));
+    const GroundAtom* atom = data->find(tuple);
     if (atom != nullptr) matched.push_back(atom->id);
     return matched;
   }
@@ -3047,28 +3045,9 @@ void apply_upper_bound(const BigInt& k, BinopType op, AggBounds& bounds) {
 }
 
 // Folds the lower-bound side ('k op AGG', e.g. '3 <= AGG') into `bounds`.
+// Reading it from the other side turns it into an upper-bound comparison.
 void apply_lower_bound(const BigInt& k, BinopType op, AggBounds& bounds) {
-  switch (op) {
-    case BinopType::kLESS_OR_EQ:
-      bounds.apply_lower(k);
-      break;
-    case BinopType::kLESS:
-      bounds.apply_lower(k + 1);
-      break;
-    case BinopType::kGREATER_OR_EQ:
-      bounds.apply_upper(k);
-      break;
-    case BinopType::kGREATER:
-      bounds.apply_upper(k - 1);
-      break;
-    case BinopType::kEQUAL:
-      bounds.apply_lower(k);
-      bounds.apply_upper(k);
-      break;
-    case BinopType::kUNEQUAL:
-      bounds.not_equal.push_back(k);
-      break;
-  }
+  apply_upper_bound(k, with_sides_swapped(op), bounds);
 }
 
 // Negates a conjunction of literals into a single literal: if there's at
@@ -3443,12 +3422,24 @@ class AggCache {
 
   Key key_for(const Aggregate& agg, const Binding& binding) {
     Key key{.agg = &agg};
-    for (size_t slot : agg_variable_slots(agg, binding)) {
+    for (size_t slot : slots_for(agg, binding)) {
       key.values.push_back(binding.at(slot));
     }
     return key;
   }
 
+  // agg_variable_slots() depends only on `agg`'s own variables and the
+  // rule's fixed slot layout, not on what `binding` currently holds, so the
+  // same aggregate gives the same slots on every call. Caching it here saves
+  // re-walking the aggregate's AST on every key_for() call, including hits.
+  const std::vector<size_t>& slots_for(const Aggregate& agg,
+                                       const Binding& binding) {
+    auto [it, inserted] = slots_.try_emplace(&agg);
+    if (inserted) it->second = agg_variable_slots(agg, binding);
+    return it->second;
+  }
+
+  absl::flat_hash_map<const Aggregate*, std::vector<size_t>> slots_;
   absl::flat_hash_map<Key, std::optional<std::vector<aspif::Lit>>> ground_;
   absl::flat_hash_map<Key, std::optional<bool>> settled_;
 };
