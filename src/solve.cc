@@ -3,6 +3,7 @@
 #include <cvc5/cvc5.h>
 
 #include <cstddef>
+#include <memory>
 #include <optional>
 #include <utility>
 #include <vector>
@@ -34,10 +35,15 @@ void configure(cvc5::Solver& solver, const char* logic) {
   solver.setOption("sat-solver", "cadical");
 }
 
+}  // namespace
+
 // One search over one ground program. Every model find() returns is an answer
 // set, and an optimal one once settle_costs() has bounded the levels. For most
 // programs the encoding says so outright. A positive cycle leaves it to the
 // minimality check, which find() runs before handing a model back.
+//
+// Forward-declared in solve.h, so AnswerSetIterator can hold one behind a
+// pointer.
 //
 // Every member holds terms of `tm`, so `tm` is declared first and destroyed
 // last.
@@ -303,7 +309,33 @@ void Search::block(const std::vector<aspif::Atom>& atoms) {
   solver->assertFormula(disjunction(tm, literals));
 }
 
-}  // namespace
+absl::StatusOr<AnswerSetIterator> AnswerSetIterator::start(
+    const aspif::Program& prog) {
+  auto search = std::make_unique<Search>();
+  RETURN_IF_ERROR(search->start(prog));
+  // Settling first is what leaves only optimal answer sets below.
+  RETURN_IF_ERROR(search->settle_costs());
+  return AnswerSetIterator(std::move(search));
+}
+
+AnswerSetIterator::AnswerSetIterator(std::unique_ptr<Search> search)
+    : search_(std::move(search)) {}
+
+AnswerSetIterator::AnswerSetIterator(AnswerSetIterator&&) noexcept = default;
+AnswerSetIterator& AnswerSetIterator::operator=(AnswerSetIterator&&) noexcept =
+    default;
+AnswerSetIterator::~AnswerSetIterator() = default;
+
+absl::StatusOr<std::optional<AnswerSet>> AnswerSetIterator::next() {
+  ASSIGN_OR_RETURN(const bool found, search_->find());
+  if (!found) return std::nullopt;  // The search covered the whole space.
+
+  AnswerSet answer_set;
+  answer_set.costs = search_->model_costs();
+  answer_set.atoms = search_->model_atoms();
+  search_->block(answer_set.atoms);
+  return answer_set;
+}
 
 absl::StatusOr<SolveResult> solve(const aspif::Program& prog,
                                   const SolveOptions& options) {
@@ -312,27 +344,18 @@ absl::StatusOr<SolveResult> solve(const aspif::Program& prog,
         "max_answer_sets cannot be negative; 0 asks for all answer sets");
   }
 
-  Search search;
-  RETURN_IF_ERROR(search.start(prog));
-  // Settling first is what leaves only optimal answer sets below.
-  RETURN_IF_ERROR(search.settle_costs());
+  ASSIGN_OR_RETURN(AnswerSetIterator iterator, AnswerSetIterator::start(prog));
 
   SolveResult result;
   while (options.max_answer_sets == 0 ||
          result.answer_sets.size() <
              static_cast<size_t>(options.max_answer_sets)) {
-    ASSIGN_OR_RETURN(const bool found, search.find());
-    if (!found) {
-      // Nothing left to find, so the search covered the whole space.
+    ASSIGN_OR_RETURN(std::optional<AnswerSet> answer_set, iterator.next());
+    if (!answer_set.has_value()) {
       result.exhausted = true;
       break;
     }
-
-    AnswerSet answer_set;
-    answer_set.costs = search.model_costs();
-    answer_set.atoms = search.model_atoms();
-    search.block(answer_set.atoms);
-    result.answer_sets.push_back(std::move(answer_set));
+    result.answer_sets.push_back(std::move(*answer_set));
   }
   return result;
 }

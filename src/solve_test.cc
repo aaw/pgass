@@ -36,15 +36,43 @@ absl::StatusOr<aspif::Program> ground_source(const std::string& source) {
   return ground(*program);
 }
 
-// One string per answer set: the names that answer set makes true, sorted and
-// separated by spaces, so that a test can state what it expects literally. The
-// empty answer set renders as the empty string. An answer set with a cost,
-// which only a program with weak constraints has, ends with '| cost' and the
-// cost of each priority level, most important level first.
+// The names one answer set makes true, sorted and separated by spaces, so
+// that a test can state what it expects literally. The empty answer set
+// renders as the empty string. An answer set with a cost, which only a
+// program with weak constraints has, ends with '| cost' and the cost of each
+// priority level, most important level first.
 //
-// Sorting matters because neither the order of the names within an answer set
-// nor the order cvc5 hands the answer sets back in is part of the contract, so
-// tests compare them as an unordered collection of sorted strings.
+// Sorting matters because the order of the names within an answer set is not
+// part of the contract, so tests compare them as sorted strings.
+std::string render_answer_set(const aspif::Program& grounded,
+                              const AnswerSet& answer_set) {
+  const absl::flat_hash_set<aspif::Atom> is_true(answer_set.atoms.begin(),
+                                                 answer_set.atoms.end());
+  std::vector<std::string> names;
+  for (const aspif::Output& output : grounded.outputs) {
+    bool holds = true;
+    for (aspif::Lit lit : output.condition) {
+      if (is_true.contains(std::abs(lit)) != (lit > 0)) {
+        holds = false;
+        break;
+      }
+    }
+    if (holds) names.push_back(output.name);
+  }
+  std::sort(names.begin(), names.end());
+  std::string line = absl::StrJoin(names, " ");
+  if (!answer_set.costs.empty()) {
+    if (!line.empty()) line += ' ';
+    absl::StrAppend(&line, "| cost ", absl::StrJoin(answer_set.costs, " "));
+  }
+  return line;
+}
+
+// One rendered string per answer set, so a test can state what it expects
+// literally.
+//
+// The order cvc5 hands the answer sets back in is not part of the contract,
+// so tests compare them as an unordered collection.
 absl::StatusOr<std::vector<std::string>> render_solutions(
     const aspif::Program& grounded, const SolveOptions& options) {
   ASSIGN_OR_RETURN(SolveResult result, solve(grounded, options));
@@ -52,26 +80,7 @@ absl::StatusOr<std::vector<std::string>> render_solutions(
   std::vector<std::string> rendered;
   rendered.reserve(result.answer_sets.size());
   for (const AnswerSet& answer_set : result.answer_sets) {
-    const absl::flat_hash_set<aspif::Atom> is_true(answer_set.atoms.begin(),
-                                                   answer_set.atoms.end());
-    std::vector<std::string> names;
-    for (const aspif::Output& output : grounded.outputs) {
-      bool holds = true;
-      for (aspif::Lit lit : output.condition) {
-        if (is_true.contains(std::abs(lit)) != (lit > 0)) {
-          holds = false;
-          break;
-        }
-      }
-      if (holds) names.push_back(output.name);
-    }
-    std::sort(names.begin(), names.end());
-    std::string line = absl::StrJoin(names, " ");
-    if (!answer_set.costs.empty()) {
-      if (!line.empty()) line += ' ';
-      absl::StrAppend(&line, "| cost ", absl::StrJoin(answer_set.costs, " "));
-    }
-    rendered.push_back(std::move(line));
+    rendered.push_back(render_answer_set(grounded, answer_set));
   }
   return rendered;
 }
@@ -577,6 +586,33 @@ TEST(SolveTest, MaxAnswerSetsLimitsHowManyComeBack) {
   auto one = solve_source(source, 1);
   ASSERT_OK(one);
   EXPECT_THAT(*one, SizeIs(1));
+}
+
+// AnswerSetIterator is what solve() runs to exhaustion. Pulled by hand it
+// hands back the same answer sets, one at a time, ending in a nullopt that
+// says the search is exhausted.
+TEST(SolveTest, AnswerSetIteratorHandsBackOneAnswerSetAtATime) {
+  auto grounded = ground_source("a | b.");
+  ASSERT_OK(grounded);
+
+  auto iterator = AnswerSetIterator::start(*grounded);
+  ASSERT_OK(iterator);
+
+  auto first = iterator->next();
+  ASSERT_OK(first);
+  ASSERT_TRUE(first->has_value());
+
+  auto second = iterator->next();
+  ASSERT_OK(second);
+  ASSERT_TRUE(second->has_value());
+
+  EXPECT_THAT((std::vector<std::string>{render_answer_set(*grounded, **first),
+                                        render_answer_set(*grounded, **second)}),
+              UnorderedElementsAre("a", "b"));
+
+  auto exhausted = iterator->next();
+  ASSERT_OK(exhausted);
+  EXPECT_FALSE(exhausted->has_value());
 }
 
 TEST(SolveTest, NegativeMaxAnswerSetsIsAnError) {

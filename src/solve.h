@@ -1,6 +1,8 @@
 #ifndef SOLVE_H_
 #define SOLVE_H_
 
+#include <memory>
+#include <optional>
 #include <vector>
 
 #include "absl/status/statusor.h"
@@ -68,6 +70,31 @@ struct SolveOptions {
 // normalization rewrites choice rules into disjunctive ones.
 absl::StatusOr<SolveResult> solve(const aspif::Program& prog,
                                   const SolveOptions& options);
+
+struct Search;
+
+// The search behind solve(), one answer set at a time. solve() runs this to
+// exhaustion or a fixed count. A caller that wants only a few, or wants to
+// stop as soon as one looks right, uses it directly instead and never pays to
+// find the rest.
+class AnswerSetIterator {
+ public:
+  // Builds the encoding and settles weak constraint costs, so every answer
+  // set next() returns afterwards is optimal.
+  static absl::StatusOr<AnswerSetIterator> start(const aspif::Program& prog);
+
+  AnswerSetIterator(AnswerSetIterator&&) noexcept;
+  AnswerSetIterator& operator=(AnswerSetIterator&&) noexcept;
+  ~AnswerSetIterator();
+
+  // The next answer set, or nullopt once the search is exhausted: a proof
+  // that no further answer set exists.
+  absl::StatusOr<std::optional<AnswerSet>> next();
+
+ private:
+  explicit AnswerSetIterator(std::unique_ptr<Search> search);
+  std::unique_ptr<Search> search_;
+};
 
 // Whether a program's query holds.
 enum class QueryAnswer {
