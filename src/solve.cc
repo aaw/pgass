@@ -100,8 +100,8 @@ struct Search {
   // check names all of them every round, so they are built once.
   void load_checker();
 
-  // Everything one round asks the solver for, in one list so it takes one call:
-  // MinimalityCheck::read first, then the droppable atoms.
+  // Everything one round asks the solver for, in one list so it takes one
+  // call. MinimalityCheck::read comes first, then the droppable atoms.
   std::vector<cvc5::Term> probe;
   // MinimalityCheck::read negated, in the same order as the front of `probe`.
   std::vector<cvc5::Term> read_false;
@@ -230,11 +230,12 @@ absl::StatusOr<bool> Search::find(const std::optional<cvc5::Term>& question) {
 }
 
 std::vector<aspif::Atom> Search::model_atoms() const {
+  const std::vector<cvc5::Term> vars(encoding.atom_var.begin() + 1,
+                                      encoding.atom_var.end());
+  const std::vector<cvc5::Term> values = solver->getValue(vars);
   std::vector<aspif::Atom> atoms;
-  for (aspif::Atom atom = 1; atom < prog->next_atom; ++atom) {
-    if (solver->getValue(encoding.atom_var[atom]).getBooleanValue()) {
-      atoms.push_back(atom);
-    }
+  for (size_t i = 0; i < values.size(); ++i) {
+    if (values[i].getBooleanValue()) atoms.push_back(1 + i);
   }
   return atoms;
 }
@@ -246,11 +247,10 @@ std::vector<BigInt> Search::model_costs() const {
   std::vector<BigInt> costs;
   costs.reserve(encoding.levels.size());
   for (const Level& level : encoding.levels) {
+    const std::vector<cvc5::Term> values = solver->getValue(level.lit_terms);
     BigInt total;
     for (size_t i = 0; i < level.lits.size(); ++i) {
-      if (solver->getValue(level.lit_terms[i]).getBooleanValue()) {
-        total += level.lits[i].weight;
-      }
+      if (values[i].getBooleanValue()) total += level.lits[i].weight;
     }
     costs.push_back(std::move(total));
   }
@@ -287,15 +287,11 @@ absl::Status Search::settle_costs() {
 }
 
 void Search::block(const std::vector<aspif::Atom>& atoms) {
-  // A program with no atoms has one model, the empty one, and no clause can say
-  // anything about it. Callers stop before asking for a second.
-  if (prog->next_atom <= 1) return;
-
   const absl::flat_hash_set<aspif::Atom> is_true(atoms.begin(), atoms.end());
-  // The clause asks for some atom to differ from this model. Only the atoms are
-  // named, never the level variables: one answer set admits many rankings, so
-  // blocking a whole model would keep handing the same answer set back under a
-  // different ranking.
+  // The clause asks for some atom to differ from this model. Only the atoms
+  // are named, never the level variables. One answer set admits many
+  // rankings, so blocking a whole model would keep handing the same answer
+  // set back under a different ranking.
   std::vector<cvc5::Term> literals;
   literals.reserve(prog->next_atom - 1);
   for (aspif::Atom atom = 1; atom < prog->next_atom; ++atom) {
@@ -337,14 +333,6 @@ absl::StatusOr<SolveResult> solve(const aspif::Program& prog,
     answer_set.atoms = search.model_atoms();
     search.block(answer_set.atoms);
     result.answer_sets.push_back(std::move(answer_set));
-
-    // A program with no atoms has the empty answer set and no other, and there
-    // is no clause to block it with, so stop before asking again. That one
-    // answer set is all of them.
-    if (prog.next_atom <= 1) {
-      result.exhausted = true;
-      break;
-    }
   }
   return result;
 }
@@ -365,10 +353,12 @@ absl::StatusOr<QueryResult> answer_query(const aspif::Program& prog) {
 
   // An atom this answer set leaves out is already answered no, so only the ones
   // it holds are worth a search. That is what makes a query over a large
-  // predicate affordable, since one answer set usually leaves few standing. The
-  // formula and the atom it stands for are paired up here because the searches
-  // below take the formula and the answer names the atom. Encoding::query runs
-  // parallel to aspif::Program::query.
+  // predicate affordable, since one answer set usually leaves few standing.
+  // Every value is read here, before any search runs, because find() below
+  // leaves the solver holding no model or a different one. The formula and
+  // the atom it stands for are paired up because the searches below take the
+  // formula and the answer names the atom. Encoding::query runs parallel to
+  // aspif::Program::query.
   std::vector<std::pair<cvc5::Term, aspif::Lit>> standing;
   for (size_t i = 0; i < search.encoding.query.size(); ++i) {
     const cvc5::Term& formula = search.encoding.query[i];
