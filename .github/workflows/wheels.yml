@@ -15,6 +15,7 @@ on:
 jobs:
   build-wheels:
     strategy:
+      fail-fast: false
       matrix:
         include:
           - os: ubuntu-latest
@@ -33,9 +34,14 @@ jobs:
         uses: pypa/cibuildwheel@v2.21
         env:
           CIBW_ARCHS: ${{ matrix.arch }}
-          # pgass needs a C++20 compiler. cvc5.cmake fetches a prebuilt cvc5
-          # for macOS/Linux x86_64/arm64, so no manylinux image swap is needed.
           CIBW_BUILD: "cp3{9,10,11,12,13}-*"
+          # cibuildwheel's default manylinux2014 image (glibc 2.17) can't link
+          # the prebuilt cvc5 archive cmake/cvc5.cmake fetches, which needs
+          # symbols from a newer glibc. manylinux_2_34 has them. This narrows
+          # the published Linux wheels to glibc 2.34+ systems (roughly RHEL 9+,
+          # Ubuntu 22.04+, Debian 12+); older systems fall back to the sdist.
+          CIBW_MANYLINUX_X86_64_IMAGE: manylinux_2_34
+          CIBW_MANYLINUX_AARCH64_IMAGE: manylinux_2_34
         with:
           package-dir: python
 
