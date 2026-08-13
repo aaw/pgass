@@ -1,4 +1,4 @@
-name: Build and publish Python wheels
+name: Build and publish Python wheels and CLI binaries
 
 # Builds on every push; publishes only when a GitHub release is published.
 on:
@@ -10,6 +10,45 @@ on:
     types: [published]
 
 jobs:
+  build-cli:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            arch: x86_64
+            asset_os: linux
+          - os: ubuntu-24.04-arm
+            arch: aarch64
+            asset_os: linux
+          - os: macos-14
+            arch: arm64
+            asset_os: macos
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Cache dependencies
+        uses: actions/cache@v4
+        with:
+          path: build/_deps
+          key: cli-deps-${{ matrix.os }}-${{ matrix.arch }}-${{ hashFiles('CMakeLists.txt', 'cmake/cvc5.cmake') }}
+
+      - name: Build pgass
+        run: make build
+
+      - name: Package
+        run: |
+          name=pgass-${{ github.ref_name }}-${{ matrix.asset_os }}-${{ matrix.arch }}
+          mkdir "$name"
+          cp build/pgass LICENSE THIRD_PARTY_LICENSES.md "$name"/
+          tar czf "$name.tar.gz" "$name"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: cli-${{ matrix.asset_os }}-${{ matrix.arch }}
+          path: pgass-*.tar.gz
+
   build-wheels:
     strategy:
       fail-fast: false
@@ -79,3 +118,20 @@ jobs:
           name: sdist
           path: dist
       - uses: pypa/gh-action-pypi-publish@release/v1
+
+  # Attaches the CLI binaries built by build-cli to the GitHub release itself.
+  publish-cli:
+    if: github.event_name == 'release'
+    needs: [build-cli]
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          pattern: "cli-*"
+          merge-multiple: true
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: dist/*.tar.gz
