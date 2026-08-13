@@ -73,3 +73,10 @@ Testing/
 
 # perf baseline times, which are per machine
 perf/.times.json
+
+# Python bindings
+__pycache__/
+*.pyc
+python/dist/
+python/*.egg-info/
+.venv/

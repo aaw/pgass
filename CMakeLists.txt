@@ -1,4 +1,4 @@
-cmake_minimum_required(VERSION 3.14)
+cmake_minimum_required(VERSION 3.15)
 project(ParseProject LANGUAGES CXX)
 
 # Use C++20
@@ -351,3 +351,34 @@ gtest_discover_tests(ground_test)
 gtest_discover_tests(solve_test)
 gtest_discover_tests(encode_test)
 gtest_discover_tests(exit_code_test)
+
+# Built only when PGASS_BUILD_PYTHON is set. scikit-build-core turns it on
+# when it invokes cmake to build the wheel. See python/pyproject.toml.
+option(PGASS_BUILD_PYTHON "Build the pgass Python extension module" OFF)
+if(PGASS_BUILD_PYTHON)
+  FetchContent_Declare(
+    pybind11
+    GIT_REPOSITORY https://github.com/pybind/pybind11.git
+    GIT_TAG        v3.0.0
+  )
+  FetchContent_MakeAvailable(pybind11)
+
+  # The name must match PYBIND11_MODULE(_native, ...) in bindings.cc.
+  # Installed into pgass/, so Python imports it as pgass._native.
+  pybind11_add_module(_native python/src/bindings.cc)
+  target_compile_options(_native PRIVATE ${PGASS_WARNINGS})
+  target_link_libraries(_native
+    PRIVATE
+      parse_lib
+      safety_lib
+      normalize_lib
+      ground_lib
+      solve_lib
+      aspif_lib
+      absl::status
+      absl::statusor
+      absl::strings
+      absl::flat_hash_set
+  )
+  install(TARGETS _native LIBRARY DESTINATION pgass)
+endif()

@@ -1,0 +1,79 @@
+name: Build and publish Python wheels
+
+# Runs on every push so PRs surface a build failure early. Publishing only
+# runs when a GitHub release is published, not on every tag push. Pushing a
+# tag alone builds wheels but ships nothing, so a bad tag can be deleted and
+# redone before it ever reaches PyPI. Only clicking "Publish release" ships.
+on:
+  push:
+    branches: [master]
+  pull_request:
+    branches: [master]
+  release:
+    types: [published]
+
+jobs:
+  build-wheels:
+    strategy:
+      matrix:
+        include:
+          - os: ubuntu-latest
+            arch: x86_64
+          - os: ubuntu-24.04-arm
+            arch: aarch64
+          - os: macos-13
+            arch: x86_64
+          - os: macos-14
+            arch: arm64
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build wheels
+        uses: pypa/cibuildwheel@v2.21
+        env:
+          CIBW_ARCHS: ${{ matrix.arch }}
+          # pgass needs a C++20 compiler. cvc5.cmake fetches a prebuilt cvc5
+          # for macOS/Linux x86_64/arm64, so no manylinux image swap is needed.
+          CIBW_BUILD: "cp3{9,10,11,12,13}-*"
+        with:
+          package-dir: python
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: wheels-${{ matrix.os }}-${{ matrix.arch }}
+          path: wheelhouse/*.whl
+
+  build-sdist:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build sdist
+        run: pipx run build --sdist --outdir dist python
+      - uses: actions/upload-artifact@v4
+        with:
+          name: sdist
+          path: dist/*.tar.gz
+
+  # Uploads to PyPI via trusted publishing (OIDC): no stored API token, but
+  # the pgass project on PyPI must have this repo/workflow added as a
+  # trusted publisher first (PyPI project settings -> Publishing), and a
+  # 'pypi' GitHub environment configured for the approval gate below.
+  publish:
+    if: github.event_name == 'release'
+    needs: [build-wheels, build-sdist]
+    runs-on: ubuntu-latest
+    environment: pypi
+    permissions:
+      id-token: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          pattern: "wheels-*"
+          merge-multiple: true
+      - uses: actions/download-artifact@v4
+        with:
+          name: sdist
+          path: dist
+      - uses: pypa/gh-action-pypi-publish@release/v1

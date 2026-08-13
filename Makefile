@@ -2,7 +2,7 @@ NPROC := $(shell nproc 2>/dev/null || sysctl -n hw.logicalcpu 2>/dev/null || ech
 
 SRCS := $(shell find src -name '*.cpp' -o -name '*.h' -o -name '*.c')
 
-.PHONY: all build clean test perf asan
+.PHONY: all build clean test perf asan python pytest
 
 all: build test
 
@@ -32,4 +32,15 @@ perf: build
 		$(if $(FILTER),--filter $(FILTER)) $(if $(SAVE),--save)
 
 clean:
-	rm -rf build build-asan
+	rm -rf build build-asan build-python .venv
+
+python:
+	@if [ ! -x .venv/bin/pip ]; then \
+		python3 -m venv .venv; \
+		.venv/bin/pip install --quiet --upgrade pip scikit-build-core; \
+	fi
+	.venv/bin/pip install --no-build-isolation -q -e python/
+
+pytest: python
+	@.venv/bin/python3 -c "import pytest" 2>/dev/null || .venv/bin/pip install --quiet pytest
+	.venv/bin/python3 -m pytest python/tests/ $(if $(FILTER),-k $(FILTER))

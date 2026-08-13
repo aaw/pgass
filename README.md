@@ -31,7 +31,7 @@ Which tells you that there is a minimum vertex cover of cost 3: `cover(1) cover(
 
 ## Usage
 
-To build, you need CMake 3.14 or newer and a C++20 compiler. Just type `make` and the binary will end up in the `build/` directory.
+To build, you need CMake 3.15 or newer and a C++20 compiler. Just type `make` and the binary will end up in the `build/` directory.
 
 Pass one or more ASP input files on the command line or via standard input. By default, `pgass` prints the first answer set it finds
 (or UNSAT if there are none). To enumerate all answer sets, pass `--models=0`:

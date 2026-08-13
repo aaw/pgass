@@ -1,0 +1,32 @@
+[build-system]
+requires = ["scikit-build-core>=0.10"]
+build-backend = "scikit_build_core.build"
+
+[project]
+name = "pgass"
+version = "0.1.0"
+description = "A pretty good answer set solver, with a pythonic API: build ASP programs as typed Python objects instead of ASP-Core-2 text."
+readme = "README.md"
+license = "Unlicense"
+requires-python = ">=3.9"
+authors = [{ name = "Aaron Windsor" }]
+classifiers = [
+  "Programming Language :: Python :: 3",
+  "Programming Language :: C++",
+  "Topic :: Scientific/Engineering :: Artificial Intelligence",
+]
+
+[project.urls]
+Homepage = "https://github.com/aaronwindsor/pgass"
+
+[tool.scikit-build]
+minimum-version = "build-system.requires"
+build-dir = "../build-python"
+wheel.packages = ["pgass"]
+
+[tool.scikit-build.cmake]
+source-dir = ".."
+args = ["-DPGASS_BUILD_PYTHON=ON"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
