@@ -38,6 +38,8 @@ jobs:
         env:
           CIBW_ARCHS: ${{ matrix.arch }}
           CIBW_BUILD: "cp3{9,10,11,12,13}-*"
+          # cvc5's prebuilt archive is glibc-only, so no musllinux (Alpine).
+          CIBW_SKIP: "*-musllinux*"
           # Default manylinux2014's glibc is too old to link the prebuilt cvc5 archive.
           CIBW_MANYLINUX_X86_64_IMAGE: quay.io/pypa/manylinux_2_34_x86_64
           CIBW_MANYLINUX_AARCH64_IMAGE: quay.io/pypa/manylinux_2_34_aarch64
