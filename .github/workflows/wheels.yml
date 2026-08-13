@@ -40,8 +40,8 @@ jobs:
           # symbols from a newer glibc. manylinux_2_34 has them. This narrows
           # the published Linux wheels to glibc 2.34+ systems (roughly RHEL 9+,
           # Ubuntu 22.04+, Debian 12+); older systems fall back to the sdist.
-          CIBW_MANYLINUX_X86_64_IMAGE: manylinux_2_34
-          CIBW_MANYLINUX_AARCH64_IMAGE: manylinux_2_34
+          CIBW_MANYLINUX_X86_64_IMAGE: quay.io/pypa/manylinux_2_34_x86_64
+          CIBW_MANYLINUX_AARCH64_IMAGE: quay.io/pypa/manylinux_2_34_aarch64
         with:
           package-dir: python
 
