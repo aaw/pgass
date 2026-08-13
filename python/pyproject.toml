@@ -26,11 +26,7 @@ wheel.packages = ["pgass"]
 
 [tool.scikit-build.cmake]
 source-dir = ".."
-# CMAKE_POLICY_VERSION_MINIMUM works around a CMake 4.0 break: it removed
-# support for cmake_minimum_required() below 3.5, and cvc5's prebuilt release
-# archive ships a Java-bindings package-config file (cvc5JavaTargets.cmake,
-# never used here) that still declares one. manylinux_2_34's CMake is new
-# enough to hit this; our own project's real requirement stays 3.15.
+# Works around CMake 4.0 rejecting cvc5's old bundled cmake_minimum_required().
 args = ["-DPGASS_BUILD_PYTHON=ON", "-DCMAKE_POLICY_VERSION_MINIMUM=3.5"]
 
 [tool.pytest.ini_options]

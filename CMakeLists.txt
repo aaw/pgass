@@ -5,6 +5,9 @@ project(ParseProject LANGUAGES CXX)
 set(CMAKE_CXX_STANDARD 20)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
+# Needed on Linux so these static libs can link into the _native shared object.
+set(CMAKE_POSITION_INDEPENDENT_CODE ON)
+
 # An unset build type means no optimization flags at all, which costs grounding
 # a factor of about 35, so `make` gets an optimized build with debug info by
 # default. `make asan` configures its own build directory as Debug.
@@ -17,6 +20,10 @@ enable_testing()
 # The warning flags every target in this project builds with.
 # -Wmissing-field-initializers is off: compilers disagree on when it fires.
 set(PGASS_WARNINGS -Wall -Wextra -Werror -Wno-missing-field-initializers)
+if(CMAKE_CXX_COMPILER_ID STREQUAL "GNU")
+  # GCC 14 misfires this on absl::InlinedVector's internal move. Clang lacks the flag.
+  list(APPEND PGASS_WARNINGS -Wno-maybe-uninitialized)
+endif()
 
 # 1. Fetch GoogleTest and Abseil from GitHub automatically
 include(FetchContent)

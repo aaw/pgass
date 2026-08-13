@@ -1,9 +1,6 @@
 name: Build and publish Python wheels
 
-# Runs on every push so PRs surface a build failure early. Publishing only
-# runs when a GitHub release is published, not on every tag push. Pushing a
-# tag alone builds wheels but ships nothing, so a bad tag can be deleted and
-# redone before it ever reaches PyPI. Only clicking "Publish release" ships.
+# Builds on every push; publishes only when a GitHub release is published.
 on:
   push:
     branches: [master]
@@ -41,11 +38,7 @@ jobs:
         env:
           CIBW_ARCHS: ${{ matrix.arch }}
           CIBW_BUILD: "cp3{9,10,11,12,13}-*"
-          # cibuildwheel's default manylinux2014 image (glibc 2.17) can't link
-          # the prebuilt cvc5 archive cmake/cvc5.cmake fetches, which needs
-          # symbols from a newer glibc. manylinux_2_34 has them. This narrows
-          # the published Linux wheels to glibc 2.34+ systems (roughly RHEL 9+,
-          # Ubuntu 22.04+, Debian 12+); older systems fall back to the sdist.
+          # Default manylinux2014's glibc is too old to link the prebuilt cvc5 archive.
           CIBW_MANYLINUX_X86_64_IMAGE: quay.io/pypa/manylinux_2_34_x86_64
           CIBW_MANYLINUX_AARCH64_IMAGE: quay.io/pypa/manylinux_2_34_aarch64
         with:
@@ -67,10 +60,7 @@ jobs:
           name: sdist
           path: dist/*.tar.gz
 
-  # Uploads to PyPI via trusted publishing (OIDC): no stored API token, but
-  # the pgass project on PyPI must have this repo/workflow added as a
-  # trusted publisher first (PyPI project settings -> Publishing), and a
-  # 'pypi' GitHub environment configured for the approval gate below.
+  # Uploads to PyPI via trusted publishing; needs a pending publisher registered there.
   publish:
     if: github.event_name == 'release'
     needs: [build-wheels, build-sdist]
