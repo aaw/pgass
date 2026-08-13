@@ -4,7 +4,7 @@ build-backend = "scikit_build_core.build"
 
 [project]
 name = "pgass"
-version = "0.1.0"
+version = "1.0.0"
 description = "A pretty good answer set solver, with a pythonic API: build ASP programs as typed Python objects instead of ASP-Core-2 text."
 readme = "README.md"
 license = "Unlicense"
@@ -17,7 +17,7 @@ classifiers = [
 ]
 
 [project.urls]
-Homepage = "https://github.com/aaronwindsor/pgass"
+Homepage = "https://github.com/aaw/pgass"
 
 [tool.scikit-build]
 minimum-version = "build-system.requires"

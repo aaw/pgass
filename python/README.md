@@ -1,9 +1,8 @@
 # pgass
 
-Python bindings for [pgass](https://github.com/aaronwindsor/pgass), a pretty
+Python bindings for [pgass](https://github.com/aaw/pgass), a pretty
 good [answer set](https://en.wikipedia.org/wiki/Answer_set_programming)
-solver. Build and solve [answer set programs](https://en.wikipedia.org/wiki/Answer_set_programming)
-as typed Python classes:
+solver. Build and solve answer set programs as typed Python classes:
 
 ```python
 import pgass
@@ -34,5 +33,5 @@ for answer_set in program.solve(models=0):
 
 This is a minimum vertex cover: `program.forbid` says no edge may go
 uncovered at both ends, and `program.minimize` asks for the fewest covered
-nodes. See the [root README](https://github.com/aaronwindsor/pgass) for what
+nodes. See the [root README](https://github.com/aaw/pgass) for what
 pgass itself does and how the CLI works.
