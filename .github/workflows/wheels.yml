@@ -30,6 +30,12 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: Cache dependencies
+        uses: actions/cache@v4
+        with:
+          path: build-python/_deps
+          key: wheels-deps-${{ matrix.os }}-${{ matrix.arch }}-${{ hashFiles('CMakeLists.txt', 'cmake/cvc5.cmake') }}
+
       - name: Build wheels
         uses: pypa/cibuildwheel@v4.2.0
         env:

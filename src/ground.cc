@@ -2867,10 +2867,7 @@ std::vector<aspif::WeightedLit> ground_agg_elements(
     aspif::Atom atom = result.new_atom();
     weighted.push_back({.lit = atom, .weight = tuple.weight});
     for (const std::vector<aspif::Lit>& support : tuple.supports) {
-      aspif::Rule rule;
-      rule.head = {atom};
-      rule.body = support;
-      result.rules.push_back(std::move(rule));
+      result.rules.push_back({.head = {atom}, .body = support});
       // A support left empty, because every literal in it was a fact, puts the
       // tuple in the set unconditionally. Whatever the remaining supports say,
       // they can only say it again.
@@ -2901,10 +2898,7 @@ aspif::Lit some_tuple_in_set(const std::vector<AggTuple>& tuples,
 
   aspif::Atom atom = result.new_atom();
   for (aspif::Lit lit : accepted) {
-    aspif::Rule rule;
-    rule.head = {atom};
-    rule.body = {lit};
-    result.rules.push_back(std::move(rule));
+    result.rules.push_back({.head = {atom}, .body = {lit}});
   }
   return atom;
 }
@@ -3053,10 +3047,7 @@ aspif::Lit negate_conjunction(const std::vector<aspif::Lit>& lits,
   }
   if (lits.size() == 1) return -lits[0];
   aspif::Atom conj = result.new_atom();
-  aspif::Rule rule;
-  rule.head = {conj};
-  rule.body = lits;
-  result.rules.push_back(std::move(rule));
+  result.rules.push_back({.head = {conj}, .body = lits});
   return -conj;
 }
 
