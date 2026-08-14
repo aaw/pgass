@@ -1,9 +1,12 @@
 # pgass
 A pretty good [answer set](https://en.wikipedia.org/wiki/Answer_set_programming) solver.
 
-pgass implements all of [ASP-Core-2](https://arxiv.org/pdf/1911.04326), has modular
-grounder and solver components, uses cvc5 as a solver backend, and is competitive with [clingo](https://potassco.org/clingo/) on
-[2015](http://aspcomp2015.dibris.unige.it/) and [2017](http://aspcomp2017.dibris.unige.it/) ASP competition benchmarks.
+pgass implements all of [ASP-Core-2](https://arxiv.org/pdf/1911.04326) with modular grounder and
+solver components and a [cvc5](https://cvc5.github.io/) solver backend. It's competitive with
+[clingo](https://potassco.org/clingo/) for day-to-day usage and on many of the
+[2015](http://aspcomp2015.dibris.unige.it/) and [2017](http://aspcomp2017.dibris.unige.it/) ASP
+competition benchmarks. It also ships modern, Pythonic bindings, so you can build ASP programs as
+typed Python objects instead of `.lp` text.
 
 Answer set programming is a powerful framework for expressing optimization problems. Here's an encoding of a
 [minimum vertex cover](https://en.wikipedia.org/wiki/Vertex_cover) problem:
@@ -29,9 +32,42 @@ SATISFIABLE
 
 Which tells you that there is a minimum vertex cover of cost 3: `cover(1) cover(3) cover(4)`.
 
-## Usage
+pgass also has Python bindings. An an [equivalent vertex cover solver](python/examples/vertex_cover.py) in Python looks like:
 
-To build, you need CMake 3.15 or newer and a C++20 compiler. Just type `make` and the binary will end up in the `build/` directory.
+```python
+import pgass
+
+class Node(pgass.Predicate):
+    x: int
+
+class Edge(pgass.Predicate):
+    x: int
+    y: int
+
+class Cover(pgass.Predicate):
+    x: int
+
+program = pgass.Program()
+program.add(Node(x) for x in range(1, 6))
+program.add(Edge(x, y) for x, y in
+            [(1, 2), (2, 3), (3, 4), (4, 5), (5, 1), (1, 3)])
+
+X, Y = pgass.vars("X Y")
+program.add(pgass.choice(Cover(X)) << Node(X))
+program.forbid(Edge(X, Y) & ~Cover(X) & ~Cover(Y))
+program.minimize(Cover(X), weight=1, priority=0)
+```
+
+## Installation
+
+Build from source: you need CMake 3.15 or newer and a C++20 compiler. Just type `make` and the binary
+will end up in the `build/` directory.
+
+Or grab a prebuilt binary from the [latest release](https://github.com/aaw/pgass/releases/latest).
+
+Python bindings are on [PyPI](https://pypi.org/project/pgass/): `pip install pgass`.
+
+## Usage
 
 Pass one or more ASP input files on the command line or via standard input. By default, `pgass` prints the first answer set it finds
 (or UNSAT if there are none). To enumerate all answer sets, pass `--models=0`:
@@ -99,6 +135,18 @@ sat
 The `cover(1)`, `cover(2)`, etc. variables in the resulting solution set represent the vertex cover, so the above result
 says `{2,3,5}` is a vertex cover of cost 3.
 
+## Benchmarking
+
+`make perf` runs a curated set of timed cases, mostly from ASP Competition benchmarks.
+
+For a broader comparison, `scripts/bench.py` runs pgass over the ASP Competition 2015 and
+2017 benchmark suites, downloading each domain on demand into a cache directory (`~/.cache/pgass-bench`
+by default, overridable with `--cache` or `PGASS_BENCH_CACHE`). `bench.py ls` lists the available
+domains, `bench.py fetch <domain>` downloads one, and `bench.py run <domain> --compare` runs every
+instance in a domain and checks answers with the domain's official solution checker. Pass an
+instance number after the domain name to run just that one, e.g. `bench.py run CrossingMinimization
+0002`.
+
 ## Language
 
 pgass supports all of ASP-Core-2 plus a few non-standard language constructs that appear in benchmarks:
@@ -116,3 +164,5 @@ pgass supports all of ASP-Core-2 plus a few non-standard language constructs tha
 
 - [ASP-Core-2 Input Language Format](https://arxiv.org/pdf/1911.04326)
 - [How to build your own ASP-based system ?!](https://arxiv.org/pdf/2008.06692): appendix B describes ASPIF, the grounder output format.
+- [Stable models and difference logic](https://link.springer.com/article/10.1007/s10472-009-9118-9): Niemelä's translation of stable models into
+  QF_IDL, which pgass follows for programs without weight bodies or weak constraints.
