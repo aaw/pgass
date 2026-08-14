@@ -16,7 +16,7 @@ node(1..5).
 edge(1,2). edge(2,3). edge(3,4). edge(4,5). edge(5,1). edge(1,3).
 { cover(X) } :- node(X).
 :- edge(X,Y), not cover(X), not cover(Y).
-#minimize { 1@0,X : cover(X) }.
+#minimize { 1@0, X : cover(X) }.
 #show cover/1.
 ```
 
@@ -30,7 +30,7 @@ Cost: 3
 SATISFIABLE
 ```
 
-Which tells you that there is a minimum vertex cover of cost 3: `cover(1) cover(3) cover(4)`.
+That output tells you that there is a minimum vertex cover of cost 3: `cover(1) cover(3) cover(4)`.
 
 pgass also has Python bindings. An an [equivalent vertex cover solver](python/examples/vertex_cover.py) in Python looks like:
 
@@ -140,8 +140,8 @@ says `{2,3,5}` is a vertex cover of cost 3.
 `make perf` runs a curated set of timed cases, mostly from ASP Competition benchmarks.
 
 For a broader comparison, `scripts/bench.py` runs pgass over the ASP Competition 2015 and
-2017 benchmark suites, downloading each domain on demand into a cache directory (`~/.cache/pgass-bench`
-by default, overridable with `--cache` or `PGASS_BENCH_CACHE`). `bench.py ls` lists the available
+2017 benchmark suites, downloading each domain on demand into a local cache directory.
+`bench.py ls` lists the available
 domains, `bench.py fetch <domain>` downloads one, and `bench.py run <domain> --compare` runs every
 instance in a domain and checks answers with the domain's official solution checker. Pass an
 instance number after the domain name to run just that one, e.g. `bench.py run CrossingMinimization
@@ -158,11 +158,12 @@ pgass supports all of ASP-Core-2 plus a few non-standard language constructs tha
 * `#minimize{ 1@0, X : cover(X) }.` is the weak constraints it spells out, one per
   element. `#maximize` is the same with the sign of each weight flipped.
 * `1..3` is an interval, which stands for each integer in it: `node(1..3).` is three
-  facts, and `p(1..N) :- q(N).` reads its end from the body.
+  facts. The endpoints don't have to be literal numbers, either: in `p(1..N) :- q(N).`,
+  `N` is whatever value `q(N)` bound it to.
 
 ## References
 
 - [ASP-Core-2 Input Language Format](https://arxiv.org/pdf/1911.04326)
 - [How to build your own ASP-based system ?!](https://arxiv.org/pdf/2008.06692): appendix B describes ASPIF, the grounder output format.
 - [Stable models and difference logic](https://link.springer.com/article/10.1007/s10472-009-9118-9): Niemelä's translation of stable models into
-  QF_IDL, which pgass follows for programs without weight bodies or weak constraints.
+  [QF_IDL](https://smt-lib.org/logics.shtml). pgass follows this translation for programs without weight bodies or weak constraints.
