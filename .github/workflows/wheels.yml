@@ -83,16 +83,6 @@ jobs:
           # tagged cp312-abi3 and pip accepts it on every later Python too
           # (3.13, 3.14, ...) with no new CI build required.
           CIBW_BUILD: "cp3{9,10,11,12}-*"
-          # With build isolation on, pip builds each target in a fresh
-          # throwaway venv, so scikit-build-core's own install path changes
-          # every time. scikit-build-core treats that as a new environment
-          # and wipes build-python/ (including the abseil/cvc5 compile) even
-          # though nothing Python-version-specific changed. Installing build
-          # deps ourselves and building without isolation keeps that path
-          # stable across the whole CIBW_BUILD loop, so only the first
-          # target pays for the full C++ build; the rest just relink.
-          CIBW_BUILD_FRONTEND: "pip; args: --no-build-isolation"
-          CIBW_BEFORE_BUILD: "pip install scikit-build-core setuptools-scm"
           # cvc5's prebuilt archive is glibc-only, so no musllinux (Alpine).
           CIBW_SKIP: "*-musllinux*"
           # Default manylinux2014's glibc is too old to link the prebuilt cvc5 archive.
