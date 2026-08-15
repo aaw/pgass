@@ -80,8 +80,6 @@ jobs:
           # Default manylinux2014's glibc is too old to link the prebuilt cvc5 archive.
           CIBW_MANYLINUX_X86_64_IMAGE: quay.io/pypa/manylinux_2_34_x86_64
           CIBW_MANYLINUX_AARCH64_IMAGE: quay.io/pypa/manylinux_2_34_aarch64
-        with:
-          package-dir: python
 
       - uses: actions/upload-artifact@v4
         with:
@@ -93,7 +91,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: Build sdist
-        run: pipx run build --sdist --outdir dist python
+        run: pipx run build --sdist --outdir dist
       - uses: actions/upload-artifact@v4
         with:
           name: sdist

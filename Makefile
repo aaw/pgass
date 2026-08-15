@@ -39,7 +39,7 @@ python:
 		python3 -m venv .venv; \
 		.venv/bin/pip install --quiet --upgrade pip scikit-build-core; \
 	fi
-	.venv/bin/pip install --no-build-isolation -q -e python/
+	.venv/bin/pip install --no-build-isolation -q -e .
 
 pytest: python
 	@.venv/bin/python3 -c "import pytest" 2>/dev/null || .venv/bin/pip install --quiet pytest
