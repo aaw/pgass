@@ -360,19 +360,34 @@ gtest_discover_tests(encode_test)
 gtest_discover_tests(exit_code_test)
 
 # Built only when PGASS_BUILD_PYTHON is set. scikit-build-core turns it on
-# when it invokes cmake to build the wheel. See python/pyproject.toml.
+# when it invokes cmake to build the wheel. See pyproject.toml.
 option(PGASS_BUILD_PYTHON "Build the pgass Python extension module" OFF)
 if(PGASS_BUILD_PYTHON)
-  FetchContent_Declare(
-    pybind11
-    GIT_REPOSITORY https://github.com/pybind/pybind11.git
-    GIT_TAG        v3.0.0
-  )
-  FetchContent_MakeAvailable(pybind11)
+  # nanobind over pybind11: STABLE_ABI lets one wheel (built against the
+  # 3.12 limited API) cover every Python from 3.12 up, so cibuildwheel's
+  # matrix doesn't grow with each new Python release. Below 3.12,
+  # nanobind_add_module falls back to a version-specific build on its own.
+  #
+  # find_package(Python) has to run here, not just inside nanobind's own
+  # CMakeLists.txt: CMake functions resolve variables from the caller's
+  # scope, and nanobind_add_module is called from this scope, not
+  # nanobind's FetchContent subdirectory. Without this, Python_INCLUDE_DIRS
+  # is empty where nanobind_add_module reads it and the build can't find
+  # Python.h.
+  find_package(Python 3.9 REQUIRED COMPONENTS Interpreter Development.Module
+               OPTIONAL_COMPONENTS Development.SABIModule)
 
-  # The name must match PYBIND11_MODULE(_native, ...) in bindings.cc.
+  FetchContent_Declare(
+    nanobind
+    GIT_REPOSITORY https://github.com/wjakob/nanobind.git
+    GIT_TAG        v2.14.0
+    GIT_SUBMODULES ext/robin_map
+  )
+  FetchContent_MakeAvailable(nanobind)
+
+  # The name must match NB_MODULE(_native, ...) in bindings.cc.
   # Installed into pgass/, so Python imports it as pgass._native.
-  pybind11_add_module(_native python/src/bindings.cc)
+  nanobind_add_module(_native STABLE_ABI python/src/bindings.cc)
   target_compile_options(_native PRIVATE ${PGASS_WARNINGS})
   target_link_libraries(_native
     PRIVATE

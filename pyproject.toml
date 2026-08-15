@@ -1,10 +1,10 @@
 [build-system]
-requires = ["scikit-build-core>=0.10"]
+requires = ["scikit-build-core>=0.10", "setuptools-scm>=8"]
 build-backend = "scikit_build_core.build"
 
 [project]
 name = "pgass"
-version = "1.0.2"
+dynamic = ["version"]
 description = "A pretty good answer set solver with a pythonic API: build and solve answer set programs as typed Python objects."
 readme = "python/README.md"
 license = "Unlicense"
@@ -23,6 +23,10 @@ Homepage = "https://github.com/aaw/pgass"
 minimum-version = "build-system.requires"
 build-dir = "build-python"
 wheel.packages = ["python/pgass"]
+wheel.py-api = "cp312"
+
+[tool.scikit-build.metadata.version]
+provider = "scikit_build_core.metadata.setuptools_scm"
 
 [tool.scikit-build.cmake]
 # Works around CMake 4.0 rejecting cvc5's old bundled cmake_minimum_required().

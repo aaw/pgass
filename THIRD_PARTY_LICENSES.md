@@ -140,8 +140,14 @@ through cvc5). Full license text:
 <https://www.apache.org/licenses/LICENSE-2.0>. Project:
 <https://github.com/abseil/abseil-cpp>.
 
-## pybind11
+## nanobind
 
 BSD 3-clause license. Compiled into the `pgass._native` extension module
 shipped in the Python wheels (not into the `pgass` CLI binary). Project:
-<https://github.com/pybind/pybind11>.
+<https://github.com/wjakob/nanobind>.
+
+## robin-map
+
+MIT license. Vendored by nanobind as its hash map implementation, compiled
+into the `pgass._native` extension module. Project:
+<https://github.com/Tessil/robin-map>.

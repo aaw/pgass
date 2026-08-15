@@ -1,5 +1,10 @@
-#include <pybind11/pybind11.h>
-#include <pybind11/stl.h>
+#include <nanobind/nanobind.h>
+#include <nanobind/stl/optional.h>
+#include <nanobind/stl/pair.h>
+#include <nanobind/stl/shared_ptr.h>
+#include <nanobind/stl/string.h>
+#include <nanobind/stl/tuple.h>
+#include <nanobind/stl/vector.h>
 
 #include <cstdint>
 #include <memory>
@@ -18,7 +23,7 @@
 #include "safety.h"
 #include "solve.h"
 
-namespace py = pybind11;
+namespace nb = nanobind;
 
 namespace {
 
@@ -49,7 +54,7 @@ PyObject* g_grounding_error = nullptr;
 PyObject* g_grounding_resource_exhausted = nullptr;
 PyObject* g_solve_error = nullptr;
 
-void translate_exception(std::exception_ptr p) {
+void translate_exception(const std::exception_ptr& p, void*) {
   try {
     if (p) std::rethrow_exception(p);
   } catch (const GroundingResourceExhaustedException& e) {
@@ -191,38 +196,38 @@ class NativeProgram {
   std::shared_ptr<aspif::Program> prog_;
 };
 
-PYBIND11_MODULE(_native, m) {
+NB_MODULE(_native, m) {
   m.doc() = "pgass's compiled extension: parses, grounds and solves the "
             "ASP-Core-2 text pgass.compile.to_text() produces.";
 
   // PgassError has no C++ exception of its own. It exists only as the common
   // Python base the stage-specific exceptions below register under, so
   // 'except pgass.PgassError' catches any of them.
-  py::object pgass_error = py::reinterpret_steal<py::object>(
+  nb::object pgass_error = nb::steal(
       PyErr_NewException("pgass._native.PgassError", PyExc_Exception, nullptr));
   m.attr("PgassError") = pgass_error;
 
-  py::exception<ParseException> parse_error(m, "ParseError", pgass_error.ptr());
-  py::exception<SafetyException> safety_error(m, "SafetyError", pgass_error.ptr());
-  py::exception<GroundingException> grounding_error(m, "GroundingError",
+  nb::exception<ParseException> parse_error(m, "ParseError", pgass_error.ptr());
+  nb::exception<SafetyException> safety_error(m, "SafetyError", pgass_error.ptr());
+  nb::exception<GroundingException> grounding_error(m, "GroundingError",
                                                       pgass_error.ptr());
-  py::exception<GroundingResourceExhaustedException> grounding_resource_exhausted(
+  nb::exception<GroundingResourceExhaustedException> grounding_resource_exhausted(
       m, "GroundingResourceExhausted", grounding_error.ptr());
-  py::exception<SolveException> solve_error(m, "SolveError", pgass_error.ptr());
+  nb::exception<SolveException> solve_error(m, "SolveError", pgass_error.ptr());
 
   g_parse_error = parse_error.ptr();
   g_safety_error = safety_error.ptr();
   g_grounding_error = grounding_error.ptr();
   g_grounding_resource_exhausted = grounding_resource_exhausted.ptr();
   g_solve_error = solve_error.ptr();
-  py::register_exception_translator(&translate_exception);
+  nb::register_exception_translator(&translate_exception);
 
-  py::class_<NativeAnswerSetIterator>(m, "NativeAnswerSetIterator")
+  nb::class_<NativeAnswerSetIterator>(m, "NativeAnswerSetIterator")
       .def("next", &NativeAnswerSetIterator::next);
 
-  py::class_<NativeProgram>(m, "NativeProgram")
-      .def_static("compile", &NativeProgram::compile, py::arg("text"),
-                  py::arg("max_ground_atoms") = 0)
+  nb::class_<NativeProgram>(m, "NativeProgram")
+      .def_static("compile", &NativeProgram::compile, nb::arg("text"),
+                  nb::arg("max_ground_atoms") = 0)
       .def("iterator", &NativeProgram::iterator)
       .def("query", &NativeProgram::query);
 }

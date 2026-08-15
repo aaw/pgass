@@ -62,7 +62,11 @@ jobs:
             arch: arm64
     runs-on: ${{ matrix.os }}
     steps:
+      # Full history and tags: setuptools_scm derives the version from the
+      # nearest tag, which a shallow checkout wouldn't have.
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
       - name: Cache dependencies
         uses: actions/cache@v4
@@ -74,7 +78,11 @@ jobs:
         uses: pypa/cibuildwheel@v4.2.0
         env:
           CIBW_ARCHS: ${{ matrix.arch }}
-          CIBW_BUILD: "cp3{9,10,11,12,13}-*"
+          # cp39-cp311 each need their own build (nanobind's stable ABI
+          # needs 3.12+). cp312 is built with STABLE_ABI, so its wheel is
+          # tagged cp312-abi3 and pip accepts it on every later Python too
+          # (3.13, 3.14, ...) with no new CI build required.
+          CIBW_BUILD: "cp3{9,10,11,12}-*"
           # cvc5's prebuilt archive is glibc-only, so no musllinux (Alpine).
           CIBW_SKIP: "*-musllinux*"
           # Default manylinux2014's glibc is too old to link the prebuilt cvc5 archive.
@@ -90,6 +98,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
       - name: Build sdist
         run: pipx run build --sdist --outdir dist
       - uses: actions/upload-artifact@v4

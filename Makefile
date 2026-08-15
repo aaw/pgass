@@ -37,7 +37,7 @@ clean:
 python:
 	@if [ ! -x .venv/bin/pip ]; then \
 		python3 -m venv .venv; \
-		.venv/bin/pip install --quiet --upgrade pip scikit-build-core; \
+		.venv/bin/pip install --quiet --upgrade pip scikit-build-core setuptools-scm; \
 	fi
 	.venv/bin/pip install --no-build-isolation -q -e .
 
